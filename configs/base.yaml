@@ -12,6 +12,7 @@ training:
   save_total_limit: 3
   eval_strategy: steps
   eval_steps: 100
+  early_stopping_patience: 2
   load_best_model_at_end: true
   metric_for_best_model: wer
   greater_is_better: false

@@ -103,6 +103,7 @@ def run_asr_task(config_path: Path) -> None:
         "generation_kwargs",
         {"max_new_tokens": 128, "do_sample": False},
     )
+    early_stopping_patience = training_cfg.get("early_stopping_patience", 1)
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     num_train_examples = len(train_ds)
@@ -147,7 +148,7 @@ def run_asr_task(config_path: Path) -> None:
         data_collator=collator,
         processing_class=processor,
         compute_metrics=partial(compute_asr_metrics, processor=processor),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)],
         generation_kwargs=generation_kwargs,
     )
 
