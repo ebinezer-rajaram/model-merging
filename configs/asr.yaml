@@ -1,0 +1,8 @@
+task: asr
+model:
+  path: models/Qwen2.5-Omni-3B
+artifacts:
+  adapter_subdir: qwen2_5_omni_lora_asr_10h
+metrics:
+  history_csv: training_history.csv
+  loss_plot: loss_wer_plot.png
