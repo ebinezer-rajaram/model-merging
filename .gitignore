@@ -1,0 +1,150 @@
+# --------------------
+# OS and editor files
+# --------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --------------------
+# Python cache & bytecode
+# --------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# --------------------
+# Virtual environments
+# --------------------
+venv/
+env/
+ENV/
+.venv/
+.ipynb_checkpoints/
+
+# --------------------
+# Package build artifacts
+# --------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# --------------------
+# Logs and outputs
+# --------------------
+logs/
+*.log
+*.out
+*.err
+nohup.out
+
+# --------------------
+# Jupyter notebook checkpoints
+# --------------------
+.ipynb_checkpoints
+*.ipynb_checkpoints
+
+# --------------------
+# Datasets & ML artifacts
+# --------------------
+data/
+datasets/
+*.csv
+*.tsv
+*.json
+*.xlsx
+*.zip
+*.gz
+*.tar
+*.tar.gz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.npy
+*.npz
+
+# --------------------
+# Model weights and checkpoints
+# --------------------
+checkpoints/
+models/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.pb
+*.tflite
+*.weights
+
+# --------------------
+# Experiment & output directories
+# --------------------
+runs/
+results/
+outputs/
+wandb/
+mlruns/
+tensorboard/
+lightning_logs/
+
+# --------------------
+# Environment & config files
+# --------------------
+.env
+.env.*
+
+*.yml
+
+# --------------------
+# Temporary or cache files
+# --------------------
+.cache/
+tmp/
+temp/
+*.tmp
+*.bak
+*.old
+
+# --------------------
+# System-specific
+# --------------------
+*.pid
+*.sock
+
+# --------------------
+# Model adapters and checkpoints
+# --------------------
+adapters/
+artifacts/
+checkpoints/
+checkpoints*/
+*.ckpt
+*.pt
+*.safetensors
+*.bin
+*.pth
+*.onnx
+*.pb
+*.tflite
+
+# Ignore trainer and optimizer states
+trainer_state.json
+training_args.bin
+optimizer.pt
+scheduler.pt
+rng_state.pth
+
+# Ignore any Hugging Face or LoRA output directories
+runs/
+outputs/
+results/
+lightning_logs/
+wandb/
+mlruns/
