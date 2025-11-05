@@ -80,15 +80,19 @@ class TaskConfig:
     # Dataset loading
     dataset_loader: Callable[..., Tuple[Any, ...]]  # Returns (train, val, test, [extra])
     loader_config_keys: Tuple[str, ...]  # Config keys to pass to loader
-    has_label_names: bool = False  # Whether loader returns label_names as 4th element
-    has_answers_map: bool = False  # Whether loader returns answers_map (Speech QA only)
 
     # Data collation
     collator_class: type  # The collator class to instantiate
-    collator_params: Dict[str, Any] = None  # Extra params beyond processor, sampling_rate
 
     # Metrics computation
     compute_metrics_fn: Callable[..., Dict[str, float]]  # The metrics function
+
+    # Optional boolean flags
+    has_label_names: bool = False  # Whether loader returns label_names as 4th element
+    has_answers_map: bool = False  # Whether loader returns answers_map (Speech QA only)
+
+    # Optional parameters
+    collator_params: Dict[str, Any] = None  # Extra params beyond processor, sampling_rate
     metrics_params: Dict[str, Any] = None  # Extra params beyond processor
 
     # Column management

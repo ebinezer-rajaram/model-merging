@@ -29,6 +29,7 @@ from core import (
     run_training_with_evaluation,
     set_global_seed,
 )
+from core.models.models import create_lora_config_from_dict
 from tasks.asr import (
     compute_asr_metrics,
     get_artifact_directories as get_asr_artifact_directories,
@@ -317,7 +318,11 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
     final_adapter_dir = output_dir / "final"
 
     print("🔧 Loading model and processor...")
-    model, processor = load_qwen_model(model_path)
+    lora_config = None
+    if "lora" in model_cfg:
+        lora_config = create_lora_config_from_dict(model_cfg["lora"])
+        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
+    model, processor = load_qwen_model(model_path, lora_config=lora_config)
 
     dataset_seed = dataset_cfg.get("seed", seed)
     cache_path = _resolve_dataset_cache_path(dataset_cfg, artifact_dirs)
@@ -419,7 +424,11 @@ def run_asr_task(config_path: Path) -> None:
     final_adapter_dir = output_dir / "final"
 
     print("🔧 Loading model and processor...")
-    model, processor = load_qwen_model(model_path)
+    lora_config = None
+    if "lora" in model_cfg:
+        lora_config = create_lora_config_from_dict(model_cfg["lora"])
+        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
+    model, processor = load_qwen_model(model_path, lora_config=lora_config)
 
     dataset_seed = dataset_cfg.get("seed", seed)
     dataset_cache_dir = dataset_cfg.get("cache_dir")
@@ -590,7 +599,11 @@ def run_speech_qa_task(config_path: Path) -> None:
     final_adapter_dir = output_dir / 'final'
 
     print('🔧 Loading model and processor...')
-    model, processor = load_qwen_model(model_path)
+    lora_config = None
+    if "lora" in model_cfg:
+        lora_config = create_lora_config_from_dict(model_cfg["lora"])
+        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
+    model, processor = load_qwen_model(model_path, lora_config=lora_config)
 
     dataset_seed = dataset_cfg.get('seed', seed)
     cache_path = _resolve_dataset_cache_path(dataset_cfg, artifact_dirs)

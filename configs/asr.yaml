@@ -1,62 +1,128 @@
+# ============================================================================
+# Automatic Speech Recognition (ASR) Task Configuration
+# ============================================================================
+
 task: asr
 seed: 0
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
 model:
   path: models/Qwen2.5-Omni-3B
+
+  # LoRA (Low-Rank Adaptation) Configuration
+  lora:
+    r: 32                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    dropout: 0.1             # Dropout probability for LoRA layers
+    bias: none               # Bias type: none, all, or lora_only
+    target_modules:          # Modules to apply LoRA to
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - out_proj
+      - fc1
+      - fc2
+    task_type: CAUSAL_LM
+
+# ============================================================================
+# Dataset Configuration
+# ============================================================================
 dataset:
-  train_hours: 50
-  val_hours: null
+  # LibriSpeech subset configuration (hours-based)
+  train_hours: 50                # Hours of training data to use
+  val_hours: null                # Validation hours (null = use default)
+  test_hours: null               # Test hours (null = use all)
+  test_split: test               # Test split name
+
+  # Data processing
   seed: 0
   num_proc: auto
   cache_splits: true
   force_rebuild: false
   return_full_validation: false
-  max_duration_seconds: 22.0
-  test_split: test
-  test_hours: null
+
+  # Audio filtering
+  max_duration_seconds: 22.0     # Filter out audio longer than this
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
 training:
+  # Batch sizes and accumulation
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 12
   gradient_accumulation_steps: 2
-  learning_rate: 5e-05
+
+  # Optimization
+  learning_rate: 7e-05
   lr_scheduler_type: cosine
+  warmup_ratio: 0.05            # Higher warmup for ASR
+  weight_decay: 0.02
+  max_grad_norm: 1.0            # Lower gradient clipping for ASR
+
+  # Training duration
   num_train_epochs: 4
+
+  # Checkpointing
   save_strategy: steps
   save_steps: 100
   save_total_limit: 4
+
+  # Evaluation
   eval_strategy: steps
   eval_steps: 100
-  logging_steps: 5
-  max_eval_samples: 0
-  early_stopping_patience: 5
-  early_stopping_threshold: 0
+  max_eval_samples: 0           # 0 = use all
   initial_eval: true
-  load_best_model_at_end: true
-  metric_for_best_model: wer
-  greater_is_better: false
-  max_grad_norm: 0.6
-  weight_decay: 0.02
-  bf16: true
-  fp16: false
-  dataloader_num_workers: 8
-  dataloader_pin_memory: true
-  dataloader_prefetch_factor: 2
-  group_by_length: true
-  length_column_name: duration
+
+  # Logging
+  logging_steps: 5
   report_to:
     - tensorboard
     - wandb
+
+  # Early stopping
+  early_stopping_patience: 7
+  early_stopping_threshold: 0.001   # 0 = any improvement
+  load_best_model_at_end: true
+  metric_for_best_model: wer    # Word Error Rate (lower is better)
+  greater_is_better: false      # WER: lower is better
+
+  # Performance optimizations
+  bf16: true
+  fp16: false
   gradient_checkpointing: true
   gradient_checkpointing_kwargs:
     use_reentrant: false
-  remove_unused_columns: false
-  warmup_ratio: 0.08
+
+  # Data loading
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 2
+  group_by_length: true         # Important for ASR (variable length audio)
+  length_column_name: duration
+
+  # Other
   eval_accumulation_steps: 2
+  remove_unused_columns: false
+
+  # Generation parameters (for evaluation)
   generation_kwargs:
-    max_new_tokens: 196
+    max_new_tokens: 128         # Longer for ASR transcripts
     do_sample: false
-    num_beams: 1
+    num_beams: 4
+
+# ============================================================================
+# Artifacts Configuration
+# ============================================================================
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_asr_10h
+  adapter_subdir: qwen2_5_omni_lora_asr_50h
+
+# ============================================================================
+# Metrics Configuration
+# ============================================================================
 metrics:
   history_csv: training_history.csv
   loss_plot: loss_wer_plot.png
