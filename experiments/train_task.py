@@ -1,16 +1,14 @@
 """Generic task training entry point."""
 
 import argparse
-import math
-import os
 import sys
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import torch
-from transformers import EarlyStoppingCallback, TrainingArguments
+from transformers import EarlyStoppingCallback
 
 torch.set_float32_matmul_precision("high")
 
@@ -20,13 +18,15 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from core import (
+    build_early_stopping_kwargs,
+    build_training_arguments,
     CustomTrainer,
     ensure_dir,
+    filter_dataset_columns,
     load_config,
     load_qwen_model,
-    plot_loss_and_wer,
-    save_artifacts,
-    save_history_to_csv,
+    parse_training_config,
+    run_training_with_evaluation,
     set_global_seed,
 )
 from tasks.asr import (
@@ -69,35 +69,6 @@ from tasks.speech_qa import (
     load_speech_qa_dataset,
     TASK_NAME as SPEECH_QA_TASK_NAME,
 )
-
-
-def _build_history_record(metrics: Dict[str, Any], *, step: int) -> Optional[Dict[str, Any]]:
-    """Transform a metrics dictionary into a history row suitable for CSV export."""
-
-    def _to_float(value: Any) -> Optional[float]:
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    loss = _to_float(metrics.get("loss"))
-    eval_loss = _to_float(metrics.get("eval_loss"))
-    eval_wer = _to_float(metrics.get("eval_wer"))
-    wer = _to_float(metrics.get("wer"))
-    learning_rate = _to_float(metrics.get("learning_rate"))
-
-    if all(value is None for value in (loss, eval_loss, eval_wer, wer, learning_rate)):
-        return None
-
-    return {
-        "step": int(step),
-        "loss": loss,
-        "eval_loss": eval_loss,
-        "wer": eval_wer if eval_wer is not None else wer,
-        "learning_rate": learning_rate,
-    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -366,16 +337,9 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
 
     full_eval_ds = eval_ds
 
-    def _filter_columns(ds):
-        keep_columns = set(spec.keep_columns) | {"audio", "label"}
-        if "duration" in ds.column_names:
-            keep_columns.add("duration")
-        keep_columns = {column for column in keep_columns if column in ds.column_names}
-        drop_columns = [col for col in ds.column_names if col not in keep_columns]
-        return ds.remove_columns(drop_columns) if drop_columns else ds
-
-    train_ds = _filter_columns(train_ds)
-    full_eval_ds = _filter_columns(full_eval_ds)
+    # Filter datasets to keep only necessary columns
+    train_ds = filter_dataset_columns(train_ds, spec.keep_columns, always_keep=["duration"])
+    full_eval_ds = filter_dataset_columns(full_eval_ds, spec.keep_columns, always_keep=["duration"])
 
     eval_ds_for_trainer = full_eval_ds
     max_eval_samples = training_cfg.get("max_eval_samples")
@@ -388,96 +352,22 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     collator = spec.collator_builder(processor, dataset_cfg, label_names, target_sr)
 
-    per_device_train_batch_size = training_cfg.get("per_device_train_batch_size", 8)
-    per_device_eval_batch_size = training_cfg.get("per_device_eval_batch_size", 8)
-    gradient_accumulation_steps = training_cfg.get("gradient_accumulation_steps", 1)
-    learning_rate_raw = training_cfg.get("learning_rate", 2e-5)
-    try:
-        learning_rate = float(learning_rate_raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid 'learning_rate' value: {learning_rate_raw!r}") from exc
-    lr_scheduler_type = training_cfg.get("lr_scheduler_type", "cosine")
-    num_train_epochs = training_cfg.get("num_train_epochs", 5)
-    logging_steps = training_cfg.get("logging_steps", 50)
-    save_strategy = training_cfg.get("save_strategy", "steps")
-    save_steps = training_cfg.get("save_steps", 250)
-    save_total_limit = training_cfg.get("save_total_limit", 2)
-    eval_strategy = training_cfg.get("eval_strategy", "steps")
-    eval_steps = training_cfg.get("eval_steps", 250)
-    load_best_model_at_end = training_cfg.get("load_best_model_at_end", True)
-    metric_for_best_model = training_cfg.get("metric_for_best_model", "macro_f1")
-    greater_is_better = training_cfg.get("greater_is_better", True)
-    max_grad_norm = training_cfg.get("max_grad_norm", 1.0)
-    weight_decay = training_cfg.get("weight_decay", 0.01)
-    bf16 = training_cfg.get("bf16", True)
-    fp16 = training_cfg.get("fp16", False)
-    dataloader_num_workers = training_cfg.get("dataloader_num_workers")
-    dataloader_pin_memory = training_cfg.get("dataloader_pin_memory", True)
-    dataloader_prefetch_factor = training_cfg.get("dataloader_prefetch_factor")
-    group_by_length = training_cfg.get("group_by_length", False)
-    length_column_name = training_cfg.get("length_column_name", "duration")
-    report_to = training_cfg.get("report_to", ["tensorboard", "wandb"])
-    gradient_checkpointing = training_cfg.get("gradient_checkpointing", True)
-    gc_kwargs = training_cfg.get("gradient_checkpointing_kwargs", {"use_reentrant": False})
-    remove_unused_columns = training_cfg.get("remove_unused_columns", False)
-    warmup_ratio = training_cfg.get("warmup_ratio", 0.05)
-    eval_accumulation_steps = training_cfg.get("eval_accumulation_steps")
-    generation_kwargs = training_cfg.get(
-        "generation_kwargs",
-        {"max_new_tokens": 16, "do_sample": False, "temperature": 0.0, "num_beams": 1},
-    )
-    early_stopping_patience = training_cfg.get("early_stopping_patience", 3)
-    early_stopping_threshold = training_cfg.get("early_stopping_threshold")
-    initial_eval = training_cfg.get("initial_eval", False)
-
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    num_train_examples = len(train_ds)
-
-    updates_per_epoch = math.ceil(
-        max(1, num_train_examples)
-        / (per_device_train_batch_size * gradient_accumulation_steps * max(1, world_size))
-    )
-    total_training_steps = max(1, updates_per_epoch * max(1, int(num_train_epochs)))
-    warmup_steps = max(1, int(total_training_steps * float(warmup_ratio)))
-
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        per_device_train_batch_size=per_device_train_batch_size,
-        per_device_eval_batch_size=per_device_eval_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        lr_scheduler_type=lr_scheduler_type,
-        warmup_steps=warmup_steps,
-        num_train_epochs=num_train_epochs,
-        logging_steps=logging_steps,
-        save_strategy=save_strategy,
-        save_steps=save_steps,
-        save_total_limit=save_total_limit,
-        eval_strategy=eval_strategy,
-        eval_steps=eval_steps,
-        load_best_model_at_end=load_best_model_at_end,
-        metric_for_best_model=metric_for_best_model,
-        greater_is_better=greater_is_better,
-        max_grad_norm=max_grad_norm,
-        weight_decay=weight_decay,
-        bf16=bf16,
-        fp16=fp16,
-        dataloader_num_workers=dataloader_num_workers,
-        dataloader_pin_memory=dataloader_pin_memory,
-        dataloader_prefetch_factor=dataloader_prefetch_factor,
-        group_by_length=group_by_length,
-        eval_accumulation_steps=eval_accumulation_steps,
-        length_column_name=length_column_name,
-        report_to=report_to,
-        gradient_checkpointing=gradient_checkpointing,
-        gradient_checkpointing_kwargs=gc_kwargs,
-        remove_unused_columns=remove_unused_columns,
+    # Parse training configuration with task-specific defaults
+    task_defaults = {
+        "metric_for_best_model": "macro_f1",
+        "greater_is_better": True,
+        "early_stopping_patience": 3,
+        "length_column_name": "duration",
+    }
+    train_config = parse_training_config(
+        training_cfg,
+        num_train_examples=len(train_ds),
+        task_defaults=task_defaults,
     )
 
-    early_stopping_kwargs = {"early_stopping_patience": early_stopping_patience}
-    if early_stopping_threshold is not None:
-        early_stopping_kwargs["early_stopping_threshold"] = early_stopping_threshold
-
+    # Build training arguments
+    training_args = build_training_arguments(train_config, output_dir=str(output_dir))
+    early_stopping_kwargs = build_early_stopping_kwargs(train_config)
     compute_metrics_fn = spec.metrics_builder(processor, label_names or [])
 
     trainer = CustomTrainer(
@@ -489,47 +379,19 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         processing_class=processor,
         compute_metrics=compute_metrics_fn,
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
-        generation_kwargs=generation_kwargs,
+        generation_kwargs=train_config.generation_kwargs,
     )
 
-    seed_history_rows: List[Dict[str, Any]] = []
-    if initial_eval:
-        print("🧪 Running initial evaluation before training...")
-        initial_metrics = trainer.evaluate()
-        if isinstance(initial_metrics, dict) and initial_metrics:
-            scalar_metrics = {
-                key: value
-                for key, value in initial_metrics.items()
-                if isinstance(value, (int, float))
-            }
-            if scalar_metrics:
-                formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_metrics.items())
-                print(f"📊 Initial metrics: {formatted}")
-            record = _build_history_record(initial_metrics, step=0)
-            if record is not None:
-                seed_history_rows.append(record)
-
-    print("🚀 Starting LoRA fine-tuning...")
-    trainer.train()
-
-    print(f"🎯 Running evaluation on held-out split ({len(full_eval_ds)} samples)...")
-    final_eval_metrics = trainer.evaluate(eval_dataset=full_eval_ds)
-    if isinstance(final_eval_metrics, dict) and final_eval_metrics:
-        scalar_final_metrics = {
-            key: value for key, value in final_eval_metrics.items() if isinstance(value, (int, float))
-        }
-        if scalar_final_metrics:
-            formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_final_metrics.items())
-            print(f"🏁 Final evaluation metrics: {formatted}")
-
-    history_rows = save_history_to_csv(trainer, history_csv_path, extra_rows=seed_history_rows)
-    if history_rows and loss_plot_path:
-        plot_loss_and_wer(history_csv_path, loss_plot_path)
-
-    print("💾 Saving LoRA adapter and processor...")
-    ensure_dir(final_adapter_dir)
-    save_artifacts(trainer, processor, final_adapter_dir)
-    print(f"✅ Done: {final_adapter_dir}")
+    # Run training with evaluation
+    run_training_with_evaluation(
+        trainer,
+        processor=processor,
+        full_eval_dataset=full_eval_ds,
+        initial_eval=train_config.initial_eval,
+        history_csv_path=history_csv_path,
+        loss_plot_path=loss_plot_path,
+        final_adapter_dir=final_adapter_dir,
+    )
 
 
 def run_asr_task(config_path: Path) -> None:
@@ -618,13 +480,11 @@ def run_asr_task(config_path: Path) -> None:
                 f" {max_duration_seconds:.1f}s."
             )
 
-    keep_columns = {"audio", "text", "duration"}
-    drop_train_cols = [col for col in train_ds.column_names if col not in keep_columns]
-    drop_val_cols = [col for col in val_ds.column_names if col not in keep_columns]
-    drop_full_cols = [col for col in raw_full_val_ds.column_names if col not in keep_columns]
-    train_ds = train_ds.remove_columns(drop_train_cols)
-    val_ds = val_ds.remove_columns(drop_val_cols)
-    full_val_ds = raw_full_val_ds.remove_columns(drop_full_cols)
+    # Filter datasets to keep only necessary columns
+    keep_columns = ["audio", "text", "duration"]
+    train_ds = filter_dataset_columns(train_ds, keep_columns)
+    val_ds = filter_dataset_columns(val_ds, keep_columns)
+    full_val_ds = filter_dataset_columns(raw_full_val_ds, keep_columns)
 
     eval_val_ds = val_ds
 
@@ -638,94 +498,32 @@ def run_asr_task(config_path: Path) -> None:
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     collator = OmniASRCollator(processor=processor, sampling_rate=target_sr)
 
-    per_device_train_batch_size = training_cfg.get("per_device_train_batch_size", 16)
-    per_device_eval_batch_size = training_cfg.get("per_device_eval_batch_size", 4)
-    gradient_accumulation_steps = training_cfg.get("gradient_accumulation_steps", 1)
-    learning_rate_raw = training_cfg.get("learning_rate", 5e-5)
-    try:
-        learning_rate = float(learning_rate_raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid 'learning_rate' value: {learning_rate_raw!r}") from exc
-    lr_scheduler_type = training_cfg.get("lr_scheduler_type", "cosine")
-    num_train_epochs = training_cfg.get("num_train_epochs", 2)
-    logging_steps = training_cfg.get("logging_steps", 50)
-    save_strategy = training_cfg.get("save_strategy", "steps")
-    save_steps = training_cfg.get("save_steps", 250)
-    save_total_limit = training_cfg.get("save_total_limit", 2)
-    eval_strategy = training_cfg.get("eval_strategy", "steps")
-    eval_steps = training_cfg.get("eval_steps", 250)
-    load_best_model_at_end = training_cfg.get("load_best_model_at_end", True)
-    metric_for_best_model = training_cfg.get("metric_for_best_model", "wer")
-    greater_is_better = training_cfg.get("greater_is_better", False)
-    max_grad_norm = training_cfg.get("max_grad_norm", 1.0)
-    weight_decay = training_cfg.get("weight_decay", 0.01)
-    bf16 = training_cfg.get("bf16", True)
-    fp16 = training_cfg.get("fp16", False)
-    dataloader_num_workers = training_cfg.get("dataloader_num_workers")
-    dataloader_pin_memory = training_cfg.get("dataloader_pin_memory", True)
-    dataloader_prefetch_factor = training_cfg.get("dataloader_prefetch_factor")
-    group_by_length = training_cfg.get("group_by_length", False)
-    length_column_name = training_cfg.get("length_column_name")
-    report_to = training_cfg.get("report_to", ["tensorboard", "wandb"])
-    gradient_checkpointing = training_cfg.get("gradient_checkpointing", True)
-    gc_kwargs = training_cfg.get("gradient_checkpointing_kwargs", {"use_reentrant": False})
-    remove_unused_columns = training_cfg.get("remove_unused_columns", False)
-    warmup_ratio = training_cfg.get("warmup_ratio", 0.05)
-    eval_accumulation_steps = training_cfg.get("eval_accumulation_steps")
-    generation_kwargs = training_cfg.get(
-        "generation_kwargs",
-        {"max_new_tokens": 196, "do_sample": False, "temperature": 0.0, "num_beams": 1},
-    )
-    early_stopping_patience = training_cfg.get("early_stopping_patience", 1)
-    early_stopping_threshold = training_cfg.get("early_stopping_threshold")
-    initial_eval = training_cfg.get("initial_eval", False)
-
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    num_train_examples = len(train_ds)
-
-    updates_per_epoch = math.ceil(
-        num_train_examples / (per_device_train_batch_size * gradient_accumulation_steps * world_size)
-    )
-    total_training_steps = max(1, updates_per_epoch * num_train_epochs)
-    warmup_steps = max(1, int(total_training_steps * warmup_ratio))
-
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        per_device_train_batch_size=per_device_train_batch_size,
-        per_device_eval_batch_size=per_device_eval_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        lr_scheduler_type=lr_scheduler_type,
-        warmup_steps=warmup_steps,
-        num_train_epochs=num_train_epochs,
-        logging_steps=logging_steps,
-        save_strategy=save_strategy,
-        save_steps=save_steps,
-        save_total_limit=save_total_limit,
-        eval_strategy=eval_strategy,
-        eval_steps=eval_steps,
-        load_best_model_at_end=load_best_model_at_end,
-        metric_for_best_model=metric_for_best_model,
-        greater_is_better=greater_is_better,
-        max_grad_norm=max_grad_norm,
-        weight_decay=weight_decay,
-        bf16=bf16,
-        fp16=fp16,
-        dataloader_num_workers=dataloader_num_workers,
-        dataloader_pin_memory=dataloader_pin_memory,
-        dataloader_prefetch_factor=dataloader_prefetch_factor,
-        group_by_length=group_by_length,
-        eval_accumulation_steps=eval_accumulation_steps,
-        length_column_name=length_column_name,
-        report_to=report_to,
-        gradient_checkpointing=gradient_checkpointing,
-        gradient_checkpointing_kwargs=gc_kwargs,
-        remove_unused_columns=remove_unused_columns,
+    # Parse training configuration with ASR-specific defaults
+    task_defaults = {
+        "per_device_train_batch_size": 16,
+        "per_device_eval_batch_size": 4,
+        "learning_rate": 5e-5,
+        "num_train_epochs": 2,
+        "metric_for_best_model": "wer",
+        "greater_is_better": False,
+        "early_stopping_patience": 1,
+        "length_column_name": None,
+        "generation_kwargs": {
+            "max_new_tokens": 196,
+            "do_sample": False,
+            "temperature": 0.0,
+            "num_beams": 1,
+        },
+    }
+    train_config = parse_training_config(
+        training_cfg,
+        num_train_examples=len(train_ds),
+        task_defaults=task_defaults,
     )
 
-    early_stopping_kwargs = {"early_stopping_patience": early_stopping_patience}
-    if early_stopping_threshold is not None:
-        early_stopping_kwargs["early_stopping_threshold"] = early_stopping_threshold
+    # Build training arguments
+    training_args = build_training_arguments(train_config, output_dir=str(output_dir))
+    early_stopping_kwargs = build_early_stopping_kwargs(train_config)
 
     trainer = CustomTrainer(
         model=model,
@@ -736,47 +534,19 @@ def run_asr_task(config_path: Path) -> None:
         processing_class=processor,
         compute_metrics=partial(compute_asr_metrics, processor=processor),
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
-        generation_kwargs=generation_kwargs,
+        generation_kwargs=train_config.generation_kwargs,
     )
 
-    seed_history_rows = []
-    if initial_eval:
-        print("🧪 Running initial evaluation before training...")
-        initial_metrics = trainer.evaluate()
-        if isinstance(initial_metrics, dict) and initial_metrics:
-            scalar_metrics = {
-                key: value
-                for key, value in initial_metrics.items()
-                if isinstance(value, (int, float))
-            }
-            if scalar_metrics:
-                formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_metrics.items())
-                print(f"📊 Initial metrics: {formatted}")
-            record = _build_history_record(initial_metrics, step=0)
-            if record is not None:
-                seed_history_rows.append(record)
-
-    print("🚀 Starting LoRA fine-tuning...")
-    trainer.train()
-
-    print(f"🎯 Running evaluation on full validation split ({len(full_val_ds)} samples)...")
-    final_eval_metrics = trainer.evaluate(eval_dataset=full_val_ds)
-    if isinstance(final_eval_metrics, dict) and final_eval_metrics:
-        scalar_final_metrics = {
-            key: value for key, value in final_eval_metrics.items() if isinstance(value, (int, float))
-        }
-        if scalar_final_metrics:
-            formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_final_metrics.items())
-            print(f"🏁 Final full-eval metrics: {formatted}")
-
-    history_rows = save_history_to_csv(trainer, history_csv_path, extra_rows=seed_history_rows)
-    if history_rows:
-        plot_loss_and_wer(history_csv_path, loss_plot_path)
-
-    print("💾 Saving LoRA adapter and processor...")
-    ensure_dir(final_adapter_dir)
-    save_artifacts(trainer, processor, final_adapter_dir)
-    print(f"✅ Done: {final_adapter_dir}")
+    # Run training with evaluation
+    run_training_with_evaluation(
+        trainer,
+        processor=processor,
+        full_eval_dataset=full_val_ds,
+        initial_eval=train_config.initial_eval,
+        history_csv_path=history_csv_path,
+        loss_plot_path=loss_plot_path,
+        final_adapter_dir=final_adapter_dir,
+    )
 
 
 
@@ -834,26 +604,13 @@ def run_speech_qa_task(config_path: Path) -> None:
     if train_ds is None:
         raise RuntimeError('Speech QA dataset did not provide a training split.')
 
-    def _filter_columns(ds):
-        if ds is None:
-            return None
-        keep_columns = {
-            'audio',
-            'question',
-            'answers',
-            'label_text',
-            'transcript',
-            'context',
-            'duration',
-            'id',
-        }
-        keep_columns = {col for col in keep_columns if col in ds.column_names}
-        drop_columns = [col for col in ds.column_names if col not in keep_columns]
-        return ds.remove_columns(drop_columns) if drop_columns else ds
-
-    train_ds = _filter_columns(train_ds)
-    val_ds = _filter_columns(val_ds)
-    test_ds = _filter_columns(test_ds)
+    # Filter datasets to keep only necessary columns
+    keep_columns = ['audio', 'question', 'answers', 'label_text', 'transcript', 'context', 'duration', 'id']
+    train_ds = filter_dataset_columns(train_ds, keep_columns)
+    if val_ds is not None:
+        val_ds = filter_dataset_columns(val_ds, keep_columns)
+    if test_ds is not None:
+        test_ds = filter_dataset_columns(test_ds, keep_columns)
 
     if val_ds is not None:
         eval_ds_full = val_ds
@@ -884,95 +641,34 @@ def run_speech_qa_task(config_path: Path) -> None:
         include_context=dataset_cfg.get('include_context', False),
     )
 
-    per_device_train_batch_size = training_cfg.get('per_device_train_batch_size', 8)
-    per_device_eval_batch_size = training_cfg.get('per_device_eval_batch_size', 8)
-    gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
-    learning_rate_raw = training_cfg.get('learning_rate', 3e-5)
-    try:
-        learning_rate = float(learning_rate_raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid 'learning_rate' value: {learning_rate_raw!r}") from exc
-    lr_scheduler_type = training_cfg.get('lr_scheduler_type', 'cosine')
-    num_train_epochs = training_cfg.get('num_train_epochs', 6)
-    logging_steps = training_cfg.get('logging_steps', 100)
-    save_strategy = training_cfg.get('save_strategy', 'steps')
-    save_steps = training_cfg.get('save_steps', 200)
-    save_total_limit = training_cfg.get('save_total_limit', 2)
-    eval_strategy = training_cfg.get('eval_strategy', 'steps')
-    eval_steps = training_cfg.get('eval_steps', 200)
-    load_best_model_at_end = training_cfg.get('load_best_model_at_end', True)
-    metric_for_best_model = training_cfg.get('metric_for_best_model', 'f1')
-    greater_is_better = training_cfg.get('greater_is_better', True)
-    max_grad_norm = training_cfg.get('max_grad_norm', 1.0)
-    weight_decay = training_cfg.get('weight_decay', 0.01)
-    bf16 = training_cfg.get('bf16', True)
-    fp16 = training_cfg.get('fp16', False)
-    dataloader_num_workers = training_cfg.get('dataloader_num_workers')
-    dataloader_pin_memory = training_cfg.get('dataloader_pin_memory', True)
-    dataloader_prefetch_factor = training_cfg.get('dataloader_prefetch_factor')
-    group_by_length = training_cfg.get('group_by_length', False)
-    length_column_name = training_cfg.get('length_column_name', 'duration')
-    report_to = training_cfg.get('report_to', ['tensorboard', 'wandb'])
-    gradient_checkpointing = training_cfg.get('gradient_checkpointing', True)
-    gc_kwargs = training_cfg.get('gradient_checkpointing_kwargs', {'use_reentrant': False})
-    remove_unused_columns = training_cfg.get('remove_unused_columns', False)
-    warmup_ratio = training_cfg.get('warmup_ratio', 0.05)
-    eval_accumulation_steps = training_cfg.get('eval_accumulation_steps')
-    generation_kwargs = training_cfg.get(
-        'generation_kwargs',
-        {'max_new_tokens': 48, 'do_sample': False, 'temperature': 0.0, 'num_beams': 1},
-    )
-    early_stopping_patience = training_cfg.get('early_stopping_patience', 4)
-    early_stopping_threshold = training_cfg.get('early_stopping_threshold')
-    initial_eval = training_cfg.get('initial_eval', False)
-
-    world_size = int(os.environ.get('WORLD_SIZE', '1'))
-    num_train_examples = len(train_ds)
-
-    updates_per_epoch = math.ceil(
-        max(1, num_train_examples)
-        / (per_device_train_batch_size * gradient_accumulation_steps * max(1, world_size))
-    )
-    total_training_steps = max(1, updates_per_epoch * max(1, int(num_train_epochs)))
-    warmup_steps = max(1, int(total_training_steps * float(warmup_ratio)))
-
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        per_device_train_batch_size=per_device_train_batch_size,
-        per_device_eval_batch_size=per_device_eval_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        lr_scheduler_type=lr_scheduler_type,
-        warmup_steps=warmup_steps,
-        num_train_epochs=num_train_epochs,
-        logging_steps=logging_steps,
-        save_strategy=save_strategy,
-        save_steps=save_steps,
-        save_total_limit=save_total_limit,
-        eval_strategy=eval_strategy,
-        eval_steps=eval_steps,
-        load_best_model_at_end=load_best_model_at_end,
-        metric_for_best_model=metric_for_best_model,
-        greater_is_better=greater_is_better,
-        max_grad_norm=max_grad_norm,
-        weight_decay=weight_decay,
-        bf16=bf16,
-        fp16=fp16,
-        dataloader_num_workers=dataloader_num_workers,
-        dataloader_pin_memory=dataloader_pin_memory,
-        dataloader_prefetch_factor=dataloader_prefetch_factor,
-        group_by_length=group_by_length,
-        eval_accumulation_steps=eval_accumulation_steps,
-        length_column_name=length_column_name,
-        report_to=report_to,
-        gradient_checkpointing=gradient_checkpointing,
-        gradient_checkpointing_kwargs=gc_kwargs,
-        remove_unused_columns=remove_unused_columns,
+    # Parse training configuration with Speech QA-specific defaults
+    task_defaults = {
+        "gradient_accumulation_steps": 2,
+        "learning_rate": 3e-5,
+        "num_train_epochs": 6,
+        "logging_steps": 100,
+        "save_steps": 200,
+        "eval_steps": 200,
+        "metric_for_best_model": "f1",
+        "greater_is_better": True,
+        "early_stopping_patience": 4,
+        "length_column_name": "duration",
+        "generation_kwargs": {
+            "max_new_tokens": 48,
+            "do_sample": False,
+            "temperature": 0.0,
+            "num_beams": 1,
+        },
+    }
+    train_config = parse_training_config(
+        training_cfg,
+        num_train_examples=len(train_ds),
+        task_defaults=task_defaults,
     )
 
-    early_stopping_kwargs = {'early_stopping_patience': early_stopping_patience}
-    if early_stopping_threshold is not None:
-        early_stopping_kwargs['early_stopping_threshold'] = early_stopping_threshold
+    # Build training arguments
+    training_args = build_training_arguments(train_config, output_dir=str(output_dir))
+    early_stopping_kwargs = build_early_stopping_kwargs(train_config)
 
     reference_store = {'values': eval_answers_for_trainer}
 
@@ -992,40 +688,22 @@ def run_speech_qa_task(config_path: Path) -> None:
         processing_class=processor,
         compute_metrics=_qa_metrics,
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
-        generation_kwargs=generation_kwargs,
+        generation_kwargs=train_config.generation_kwargs,
     )
 
-    seed_history_rows: List[Dict[str, Any]] = []
-    if initial_eval:
-        print('🧪 Running initial evaluation before training...')
-        initial_metrics = trainer.evaluate()
-        if isinstance(initial_metrics, dict) and initial_metrics:
-            scalar_metrics = {
-                key: value
-                for key, value in initial_metrics.items()
-                if isinstance(value, (int, float))
-            }
-            if scalar_metrics:
-                formatted = ', '.join(f"{k}={v:.4f}" for k, v in scalar_metrics.items())
-                print(f'📊 Initial metrics: {formatted}')
-            record = _build_history_record(initial_metrics, step=0)
-            if record is not None:
-                seed_history_rows.append(record)
-
-    print('🚀 Starting LoRA fine-tuning...')
-    trainer.train()
-
+    # Run training with evaluation (using full eval dataset)
     reference_store['values'] = eval_answers_full
-    print(f'🎯 Running evaluation on held-out split ({len(eval_ds_full)} samples)...')
-    final_eval_metrics = trainer.evaluate(eval_dataset=eval_ds_full)
-    if isinstance(final_eval_metrics, dict) and final_eval_metrics:
-        scalar_final_metrics = {
-            key: value for key, value in final_eval_metrics.items() if isinstance(value, (int, float))
-        }
-        if scalar_final_metrics:
-            formatted = ', '.join(f"{k}={v:.4f}" for k, v in scalar_final_metrics.items())
-            print(f'🏁 Final validation metrics: {formatted}')
+    run_training_with_evaluation(
+        trainer,
+        processor=processor,
+        full_eval_dataset=eval_ds_full,
+        initial_eval=train_config.initial_eval,
+        history_csv_path=history_csv_path,
+        loss_plot_path=loss_plot_path,
+        final_adapter_dir=final_adapter_dir,
+    )
 
+    # Optional: additional test set evaluation
     if test_ds is not None and test_ds is not eval_ds_full:
         test_answers = answers_map.get('test', [])
         if test_answers:
@@ -1039,15 +717,6 @@ def run_speech_qa_task(config_path: Path) -> None:
                 if scalar_test_metrics:
                     formatted = ', '.join(f"{k}={v:.4f}" for k, v in scalar_test_metrics.items())
                     print(f'📦 Test metrics: {formatted}')
-
-    history_rows = save_history_to_csv(trainer, history_csv_path, extra_rows=seed_history_rows)
-    if history_rows and loss_plot_path:
-        plot_loss_and_wer(history_csv_path, loss_plot_path)
-
-    print('💾 Saving LoRA adapter and processor...')
-    ensure_dir(final_adapter_dir)
-    save_artifacts(trainer, processor, final_adapter_dir)
-    print(f'✅ Done: {final_adapter_dir}')
 
 
 def main() -> None:

@@ -5,6 +5,7 @@ from .dataset_utils import (
     build_manifest,
     build_split_metadata,
     compute_split_hours,
+    filter_dataset_columns,
     hours_key,
     hours_to_seconds,
     load_cached_split,
@@ -31,6 +32,13 @@ from .models import load_qwen_asr_model, load_qwen_model
 from .plotting import plot_loss_and_wer
 from .seed_utils import set_global_seed
 from .trainer import CustomTrainer, save_artifacts, save_history_to_csv
+from .training_config import (
+    TrainingConfig,
+    build_early_stopping_kwargs,
+    build_training_arguments,
+    parse_training_config,
+)
+from .training_loop import build_history_record, run_training_with_evaluation
 
 __all__ = [
     "dump_json",
@@ -40,6 +48,7 @@ __all__ = [
     "build_manifest",
     "build_split_metadata",
     "compute_split_hours",
+    "filter_dataset_columns",
     "hours_key",
     "hours_to_seconds",
     "load_cached_split",
@@ -67,4 +76,10 @@ __all__ = [
     "CustomTrainer",
     "save_artifacts",
     "save_history_to_csv",
+    "TrainingConfig",
+    "parse_training_config",
+    "build_training_arguments",
+    "build_early_stopping_kwargs",
+    "build_history_record",
+    "run_training_with_evaluation",
 ]

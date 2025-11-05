@@ -26,6 +26,7 @@ __all__ = [
     "build_split_metadata",
     "subset_dataset_by_metadata",
     "normalize_split_metadata",
+    "filter_dataset_columns",
 ]
 
 
@@ -264,3 +265,35 @@ def save_cached_split(cache_path: Path, payload: Dict[str, Any]) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("w") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
+
+
+def filter_dataset_columns(
+    dataset: Dataset,
+    keep_columns: Sequence[str],
+    *,
+    always_keep: Optional[Sequence[str]] = None,
+) -> Dataset:
+    """Filter dataset to keep only specified columns.
+
+    Args:
+        dataset: The dataset to filter
+        keep_columns: Base set of columns to keep
+        always_keep: Additional columns to always keep if they exist (e.g., "duration")
+
+    Returns:
+        Dataset with only the specified columns
+    """
+    keep_set = set(keep_columns)
+
+    # Add always_keep columns if they exist in the dataset
+    if always_keep:
+        keep_set.update(col for col in always_keep if col in dataset.column_names)
+
+    # Only keep columns that actually exist in the dataset
+    keep_set = {col for col in keep_set if col in dataset.column_names}
+
+    # Identify columns to drop
+    drop_columns = [col for col in dataset.column_names if col not in keep_set]
+
+    # Return filtered dataset
+    return dataset.remove_columns(drop_columns) if drop_columns else dataset
