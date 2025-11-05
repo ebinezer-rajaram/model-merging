@@ -3,7 +3,7 @@ seed: 0
 model:
   path: models/Qwen2.5-Omni-3B
 dataset:
-  dataset_name: slurp
+  dataset_name: marcel-gohsen/slurp
   dataset_config: null
   seed: 0
   num_proc: auto
