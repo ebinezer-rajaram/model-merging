@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 
-from core.dataset_utils import (
+from core import (
     add_duration,
     build_split_metadata,
     load_cached_split,
@@ -284,9 +284,33 @@ def load_slurp_intent_dataset(
 
     effective_num_proc = resolve_num_proc(num_proc)
     map_kwargs = num_proc_map_kwargs(effective_num_proc)
+
+    # Filter out corrupted audio files BEFORE any metadata generation
+    # This ensures indices are valid for the filtered dataset
+    def _validate_audio(example):
+        """Check if audio can be loaded without errors."""
+        try:
+            # Try to access the audio array to detect corruption
+            if audio_column_name in example:
+                _ = example[audio_column_name]["array"]
+            return True
+        except (RuntimeError, Exception):
+            return False
+
+    print(f"Filtering corrupted audio files from dataset...")
+    initial_sizes = {split_name: len(split_ds) for split_name, split_ds in dataset.items()}
+    dataset = dataset.filter(_validate_audio, **map_kwargs)
+    filtered_sizes = {split_name: len(split_ds) for split_name, split_ds in dataset.items()}
+
+    for split_name in initial_sizes:
+        removed = initial_sizes[split_name] - filtered_sizes.get(split_name, 0)
+        if removed > 0:
+            print(f"  {split_name}: removed {removed} corrupted audio file(s)")
+
     duration_fn = partial(add_duration, audio_column=audio_column_name)
     dataset = dataset.map(duration_fn, **map_kwargs)
 
+    # Include filtering info in cache key to invalidate cache when dataset changes
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
     dataset_key = dataset_name.replace("/", "_")
     config_key = dataset_config or "default"
@@ -295,7 +319,8 @@ def load_slurp_intent_dataset(
         f"_train_{_samples_key(max_train_samples)}"
         f"_val_{_samples_key(max_validation_samples)}"
         f"_test_{_samples_key(max_test_samples)}"
-        f"_seed_{int(seed)}.json"
+        f"_seed_{int(seed)}"
+        f"_filtered_{filtered_sizes.get('train', 0)}_{filtered_sizes.get('validation', 0)}_{filtered_sizes.get('test', 0)}.json"
     )
     cache_path = cache_root / cache_name
 
@@ -423,9 +448,25 @@ class IntentClassificationCollator:
         return prompt
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        audio_arrays = [feature["audio"]["array"] for feature in features]
-        transcripts = [feature.get("text", "") for feature in features]
-        label_strings = [self._label_to_text(feature.get("label")) for feature in features]
+        # Filter out corrupted audio samples
+        valid_features = []
+        for feature in features:
+            try:
+                # Try to access the audio array to detect corruption early
+                _ = feature["audio"]["array"]
+                valid_features.append(feature)
+            except (RuntimeError, Exception) as e:
+                # Skip corrupted audio files
+                print(f"Warning: Skipping corrupted audio sample: {e}")
+                continue
+
+        # If all samples are corrupted, raise an error
+        if not valid_features:
+            raise RuntimeError("All audio samples in batch are corrupted")
+
+        audio_arrays = [feature["audio"]["array"] for feature in valid_features]
+        transcripts = [feature.get("text", "") for feature in valid_features]
+        label_strings = [self._label_to_text(feature.get("label")) for feature in valid_features]
 
         tokenizer = getattr(self.processor, "tokenizer", None)
         if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":

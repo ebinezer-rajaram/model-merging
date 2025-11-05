@@ -13,7 +13,7 @@ dataset:
   max_validation_samples: null
   max_test_samples: null
   label_column: intent
-  text_column: sentence
+  text_column: transcript
   audio_column: audio
   split_percentages: null
   train_split: train
