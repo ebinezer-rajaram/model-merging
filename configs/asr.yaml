@@ -1,6 +1,60 @@
 task: asr
+seed: 0
 model:
   path: models/Qwen2.5-Omni-3B
+dataset:
+  train_hours: 50
+  val_hours: null
+  seed: 0
+  num_proc: auto
+  cache_splits: true
+  force_rebuild: false
+  return_full_validation: false
+  max_duration_seconds: 22.0
+  test_split: test
+  test_hours: null
+training:
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 2
+  learning_rate: 5e-05
+  lr_scheduler_type: cosine
+  num_train_epochs: 4
+  save_strategy: steps
+  save_steps: 100
+  save_total_limit: 4
+  eval_strategy: steps
+  eval_steps: 100
+  logging_steps: 5
+  max_eval_samples: 0
+  early_stopping_patience: 5
+  early_stopping_threshold: 0
+  initial_eval: true
+  load_best_model_at_end: true
+  metric_for_best_model: wer
+  greater_is_better: false
+  max_grad_norm: 0.6
+  weight_decay: 0.02
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 2
+  group_by_length: true
+  length_column_name: duration
+  report_to:
+    - tensorboard
+    - wandb
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  remove_unused_columns: false
+  warmup_ratio: 0.08
+  eval_accumulation_steps: 2
+  generation_kwargs:
+    max_new_tokens: 196
+    do_sample: false
+    num_beams: 1
 artifacts:
   adapter_subdir: qwen2_5_omni_lora_asr_10h
 metrics:

@@ -1,2 +1,70 @@
 task: emotion
-notes: "Placeholder config for emotion recognition."
+seed: 0
+model:
+  path: models/Qwen2.5-Omni-3B
+dataset:
+  dataset_name: AbstractTTS/IEMOCAP
+  dataset_config: default
+  seed: 0
+  num_proc: auto
+  include_transcript: true
+  cache_splits: true
+  force_rebuild: false
+  max_train_samples: null
+  max_validation_samples: null
+  max_test_samples: null
+  label_column: major_emotion
+  text_column: transcription
+  audio_column: audio
+  split_percentages:
+    train: 0.8
+    validation: 0.1
+    test: 0.1
+  stratify_by_column: label
+artifacts:
+  adapter_subdir: qwen2_5_omni_lora_emotion
+metrics:
+  history_csv: emotion_training_history.csv
+  loss_plot: loss_accuracy_plot.png
+training:
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 2
+  learning_rate: 2e-05
+  lr_scheduler_type: cosine
+  num_train_epochs: 5
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 3
+  eval_strategy: steps
+  eval_steps: 50
+  logging_steps: 25
+  max_eval_samples: null
+  early_stopping_patience: 4
+  early_stopping_threshold: 0.001
+  initial_eval: true
+  load_best_model_at_end: true
+  metric_for_best_model: eval_macro_f1
+  greater_is_better: true
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 2
+  group_by_length: false
+  length_column_name: duration
+  report_to:
+    - tensorboard
+    - wandb
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  remove_unused_columns: false
+  warmup_ratio: 0.05
+  eval_accumulation_steps: 1
+  generation_kwargs:
+    max_new_tokens: 12
+    do_sample: false
+    num_beams: 1
