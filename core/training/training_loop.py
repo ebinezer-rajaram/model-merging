@@ -7,8 +7,9 @@ from typing import Any, Dict, List, Optional
 
 from datasets import Dataset
 
-from .io_utils import ensure_dir
-from .plotting import plot_loss_and_wer
+from core.data.io_utils import ensure_dir
+from core.evaluation.plotting import plot_loss_and_wer
+
 from .trainer import CustomTrainer, save_artifacts, save_history_to_csv
 
 

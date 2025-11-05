@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import numpy as np
 
-from core.metrics import compute_wer_from_texts, decode_tokens
+from core import compute_wer_from_texts, decode_tokens
 
 
 def compute_asr_metrics(eval_pred: Any, processor) -> Dict[str, float]:

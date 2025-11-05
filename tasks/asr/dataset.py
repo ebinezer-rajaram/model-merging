@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from datasets import Dataset, load_dataset
 
-from core.dataset_utils import (
+from core import (
     add_duration,
     build_split_metadata,
     hours_key,

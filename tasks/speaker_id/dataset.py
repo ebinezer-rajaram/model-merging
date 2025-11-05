@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 
-from core.dataset_utils import (
+from core import (
     add_duration,
     build_split_metadata,
     load_cached_split,
