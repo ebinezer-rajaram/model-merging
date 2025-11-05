@@ -1,0 +1,73 @@
+task: speech_qa
+seed: 0
+model:
+  path: models/Qwen2.5-Omni-3B
+dataset:
+  dataset_name: kresnik/spoken_squad
+  dataset_config: null
+  seed: 0
+  num_proc: auto
+  cache_splits: true
+  force_rebuild: false
+  max_train_samples: null
+  max_validation_samples: null
+  max_test_samples: null
+  audio_column: audio
+  question_column: question
+  transcript_column: text
+  context_column: context
+  id_column: id
+  answer_column: answers
+  split_percentages: null
+  train_split: train
+  validation_split: validation
+  test_split: test
+  include_transcript: true
+  include_context: false
+artifacts:
+  adapter_subdir: qwen2_5_omni_lora_speech_qa
+metrics:
+  history_csv: speech_qa_training_history.csv
+  loss_plot: speech_qa_loss_metrics.png
+training:
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 3e-05
+  lr_scheduler_type: cosine
+  num_train_epochs: 6
+  save_strategy: steps
+  save_steps: 200
+  save_total_limit: 3
+  eval_strategy: steps
+  eval_steps: 200
+  logging_steps: 100
+  max_eval_samples: null
+  early_stopping_patience: 6
+  early_stopping_threshold: 0.001
+  initial_eval: true
+  load_best_model_at_end: true
+  metric_for_best_model: eval_f1
+  greater_is_better: true
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 2
+  group_by_length: false
+  length_column_name: duration
+  report_to:
+    - tensorboard
+    - wandb
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  remove_unused_columns: false
+  warmup_ratio: 0.05
+  eval_accumulation_steps: 1
+  generation_kwargs:
+    max_new_tokens: 48
+    do_sample: false
+    num_beams: 1
