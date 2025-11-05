@@ -56,21 +56,43 @@ class CustomTrainer(Trainer):
         gen_inputs = {k: v for k, v in inputs.items() if k != "labels"}
 
         if prompt_lengths is not None and "input_ids" in gen_inputs:
-            input_ids = gen_inputs["input_ids"].clone()
+            input_ids = gen_inputs["input_ids"]
             attention_mask = gen_inputs.get("attention_mask")
-            if attention_mask is not None:
-                attention_mask = attention_mask.clone()
 
-            pad_token_id = getattr(model.config, "pad_token_id", 0)
-            for idx, prompt_len in enumerate(prompt_lengths):
-                if prompt_len < input_ids.size(1):
-                    input_ids[idx, prompt_len:] = pad_token_id
+            seq_len = input_ids.size(1)
+            pad_token_id = getattr(model.config, "pad_token_id", None)
+            if pad_token_id is None:
+                tokenizer = getattr(self, "tokenizer", None)
+                pad_token_id = getattr(tokenizer, "pad_token_id", 0)
+
+            max_prompt_len = max(int(length) for length in prompt_lengths) if prompt_lengths else seq_len
+            max_prompt_len = min(max_prompt_len, seq_len)
+
+            new_input_ids = input_ids.new_full((input_ids.size(0), max_prompt_len), pad_token_id)
+            new_attention_mask = None
+            if attention_mask is not None:
+                new_attention_mask = attention_mask.new_zeros((attention_mask.size(0), max_prompt_len))
+
+            for row_idx, prompt_len in enumerate(prompt_lengths):
+                prompt_len = int(prompt_len)
+                if prompt_len <= 0:
+                    continue
+                prompt_len = min(prompt_len, seq_len)
+
+                source_tokens = input_ids[row_idx, :prompt_len]
+                dest_len = min(prompt_len, max_prompt_len)
+                new_input_ids[row_idx, -dest_len:] = source_tokens[-dest_len:]
+
+                if new_attention_mask is not None:
                     if attention_mask is not None:
-                        attention_mask[idx, prompt_len:] = 0
+                        source_mask = attention_mask[row_idx, :prompt_len]
+                    else:
+                        source_mask = source_tokens.new_ones((prompt_len,), dtype=new_attention_mask.dtype)
+                    new_attention_mask[row_idx, -dest_len:] = source_mask[-dest_len:]
 
-            gen_inputs["input_ids"] = input_ids
-            if attention_mask is not None:
-                gen_inputs["attention_mask"] = attention_mask
+            gen_inputs["input_ids"] = new_input_ids
+            if new_attention_mask is not None:
+                gen_inputs["attention_mask"] = new_attention_mask
 
         generated = model.generate(**gen_inputs, **self.generation_kwargs)
 

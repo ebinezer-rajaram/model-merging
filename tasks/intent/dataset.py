@@ -427,6 +427,10 @@ class IntentClassificationCollator:
         transcripts = [feature.get("text", "") for feature in features]
         label_strings = [self._label_to_text(feature.get("label")) for feature in features]
 
+        tokenizer = getattr(self.processor, "tokenizer", None)
+        if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
+            tokenizer.padding_side = "left"
+
         prompts = [self._build_prompt(text, feature) for text, feature in zip(transcripts, features)]
         full_texts = [
             f"{prompt} {label}".strip()

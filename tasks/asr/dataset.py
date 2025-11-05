@@ -194,6 +194,10 @@ class OmniASRCollator:
         texts = [feature["text"] for feature in features]
         prompts = [self.processor.audio_token + text for text in texts]
 
+        tokenizer = getattr(self.processor, "tokenizer", None)
+        if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
+            tokenizer.padding_side = "left"
+
         inputs = self.processor(
             audio=audio_arrays,
             sampling_rate=self.sampling_rate,

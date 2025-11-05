@@ -440,6 +440,10 @@ class SpeechQACollator:
         labels = [self._select_label(feature) for feature in features]
         prompts = [self._build_prompt(feature) for feature in features]
 
+        tokenizer = getattr(self.processor, "tokenizer", None)
+        if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
+            tokenizer.padding_side = "left"
+
         full_texts = [
             f"{prompt} {label}".strip()
             for prompt, label in zip(prompts, labels)

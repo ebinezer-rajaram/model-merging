@@ -121,6 +121,9 @@ def load_model_and_processor(
 ) -> tuple[Any, Qwen2_5OmniProcessor]:
     """Load the base Qwen Omni model and optionally attach a LoRA adapter."""
     processor = Qwen2_5OmniProcessor.from_pretrained(str(model_path), use_fast=False)
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
+        tokenizer.padding_side = "left"
     model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(
         str(model_path),
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
@@ -143,6 +146,9 @@ def prepare_task_for_evaluation(
     config: Optional[Dict[str, Any]] = None,
 ) -> TaskEvalSetup:
     """Return dataset, collator, and metric functions for the requested task."""
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
+        tokenizer.padding_side = "left"
     key = (task_name or "").strip().lower()
     if key not in _TASK_REGISTRY:
         available = ", ".join(get_registered_eval_tasks()) or "none"
