@@ -40,6 +40,14 @@ python3 main.py train
 python3 main.py train --task asr --config asr.yaml
 ```
 
+Additional tasks can be triggered with their dedicated configs, for example:
+
+```bash
+python3 main.py train --task speaker_id --config speaker_id.yaml
+python3 main.py train --task intent --config intent.yaml
+python3 main.py train --task speech_qa --config speech_qa.yaml
+```
+
 ---
 
 ### Direct Experiment Scripts
@@ -51,10 +59,15 @@ You can also call the experiment modules directly.
 python3 experiments/train_task.py --task asr --config asr.yaml
 ```
 
-The remaining scripts are placeholders for future stages and currently raise `NotImplementedError`:
+To evaluate a base model or adapter on a dataset split, run:
+
+```bash
+python3 experiments/evaluate_task.py --task emotion --config emotion.yaml --split validation
+```
+
+Scripts for vector extraction, merging, and overfitting analysis remain under construction and will raise `NotImplementedError` for now:
 
 * `python experiments/extract_vector.py`
-* `python experiments/evaluate_task.py`
 * `python experiments/analyze_overfitting.py`
 * `python experiments/merge_vectors.py`
 
@@ -64,6 +77,18 @@ The remaining scripts are placeholders for future stages and currently raise `No
 
 Task configs live in `configs/` and are merged with `base.yaml`.
 Override values either by editing the task config or passing a different file via `--config`.
+
+## 📚 Supported Tasks
+
+| Task key | Config file | Default dataset | Notes |
+| --- | --- | --- | --- |
+| `asr` | `configs/asr.yaml` | `librispeech_asr` (`clean`) | Controls hours via `train_hours`/`val_hours`; filters long utterances. |
+| `emotion` | `configs/emotion.yaml` | `AbstractTTS/IEMOCAP` | Supports stratified splits and transcript-conditioned prompts. |
+| `speaker_id` | `configs/speaker_id.yaml` | `speechcolab/voxceleb1` (subset) | Use `max_speakers`/`max_samples_per_speaker` to keep downloads manageable. |
+| `intent` | `configs/intent.yaml` | `slurp` | Treats SLURP intents as labels; optional scenario/action metadata in prompts. |
+| `speech_qa` | `configs/speech_qa.yaml` | `kresnik/spoken_squad` | Audio QA with question prompts; adjust column names if using another dataset. |
+
+All dataset parameters (`dataset_name`, column aliases, sample caps, etc.) can be swapped to target alternative Hugging Face datasets without code changes.
 
 ---
 
