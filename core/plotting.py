@@ -3,7 +3,7 @@
 import csv
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     import matplotlib.pyplot as plt
@@ -15,30 +15,45 @@ def _parse_float(value: Optional[str]) -> Optional[float]:
     """Safely parse floats that may be missing."""
     if value is None or value == "" or str(value).lower() == "none":
         return None
-    return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def _collect_series(csv_path: Path) -> Tuple[List[Optional[int]], List[Optional[float]], List[Optional[float]], List[Optional[float]]]:
+def _parse_step(value: Optional[str]) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_series(csv_path: Path) -> Tuple[List[Optional[int]], Dict[str, List[Optional[float]]]]:
     """Load series data from the training history CSV."""
     steps: List[Optional[int]] = []
-    train_loss: List[Optional[float]] = []
-    eval_loss: List[Optional[float]] = []
-    wers: List[Optional[float]] = []
+    metric_series: Dict[str, List[Optional[float]]] = {}
 
     with csv_path.open("r") as csv_file:
         reader = csv.DictReader(csv_file)
-        for row in reader:
-            step_value = row.get("step")
-            steps.append(int(float(step_value)) if step_value else None)
-            train_loss.append(_parse_float(row.get("loss")))
-            eval_loss.append(_parse_float(row.get("eval_loss")))
-            wers.append(_parse_float(row.get("wer")))
+        if reader.fieldnames is None:
+            return steps, metric_series
 
-    return steps, train_loss, eval_loss, wers
+        metric_fields = [field for field in reader.fieldnames if field != "step"]
+        for field in metric_fields:
+            metric_series[field] = []
+
+        for row in reader:
+            steps.append(_parse_step(row.get("step")))
+            for field in metric_fields:
+                metric_series[field].append(_parse_float(row.get(field)))
+
+    return steps, metric_series
 
 
 def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
-    """Render loss and WER curves."""
+    """Render training metrics against steps."""
     if plt is None:
         print("⚠️ Matplotlib not available; skipping plot generation.")
         return
@@ -47,45 +62,76 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
         print(f"⚠️ Metrics CSV {csv_path} not found; skipping plot generation.")
         return
 
-    steps, train_loss, eval_loss, wers = _collect_series(csv_path)
+    steps, metric_series = _collect_series(csv_path)
+    if not metric_series:
+        print("ℹ️ No metric columns available to plot.")
+        return
 
-    fig, ax_loss = plt.subplots(figsize=(8, 5))
+    loss_metrics = {
+        name: values for name, values in metric_series.items() if "loss" in name.lower()
+    }
+    remaining_metrics = {
+        name: values
+        for name, values in metric_series.items()
+        if name not in loss_metrics and name.lower() != "epoch"
+    }
+
+    if loss_metrics:
+        primary_metrics = loss_metrics
+        secondary_metrics = remaining_metrics
+    else:
+        primary_metrics = remaining_metrics
+        secondary_metrics = {}
+
+    fig, ax_primary = plt.subplots(figsize=(8, 5))
     plotted = False
 
-    train_points = [(s, l) for s, l in zip(steps, train_loss) if s is not None and l is not None]
-    if train_points:
-        train_steps, train_losses = zip(*train_points)
-        ax_loss.plot(train_steps, train_losses, label="Train Loss", color="tab:blue")
-        plotted = True
+    def _plot_series(ax, series_dict, *, color_cycle=None):
+        nonlocal plotted
+        for index, (name, values) in enumerate(sorted(series_dict.items())):
+            points = [(s, v) for s, v in zip(steps, values) if s is not None and v is not None]
+            if not points:
+                continue
+            xs, ys = zip(*points)
+            label = name.replace("eval_", "Eval ").replace("train_", "Train ").replace("_", " ").title()
+            if color_cycle and index < len(color_cycle):
+                ax.plot(xs, ys, label=label, color=color_cycle[index])
+            else:
+                ax.plot(xs, ys, label=label)
+            plotted = True
 
-    eval_points = [(s, l) for s, l in zip(steps, eval_loss) if s is not None and l is not None]
-    if eval_points:
-        eval_steps, eval_losses = zip(*eval_points)
-        ax_loss.plot(eval_steps, eval_losses, label="Eval Loss", color="tab:orange")
-        plotted = True
+    _plot_series(ax_primary, primary_metrics, color_cycle=["tab:blue", "tab:orange", "tab:red"])
 
-    ax_wer = ax_loss.twinx()
-    wer_points = [(s, w) for s, w in zip(steps, wers) if s is not None and w is not None]
-    if wer_points:
-        wer_steps, wer_values = zip(*wer_points)
-        ax_wer.plot(wer_steps, wer_values, label="WER", color="tab:green")
-        ax_wer.set_ylabel("Word Error Rate")
-        plotted = True
+    axis_label = "Loss" if loss_metrics else "Metric Value"
+    ax_primary.set_ylabel(axis_label)
+
+    ax_secondary = None
+    if secondary_metrics:
+        ax_secondary = ax_primary.twinx()
+        _plot_series(ax_secondary, secondary_metrics, color_cycle=["tab:green", "tab:purple", "tab:brown"])
+        ax_secondary.set_ylabel("Secondary Metrics")
 
     if not plotted:
         print("ℹ️ Not enough data to render plots.")
         plt.close(fig)
         return
 
-    ax_loss.set_xlabel("Step")
-    ax_loss.set_ylabel("Loss")
-    ax_loss.legend(loc="upper left")
-    ax_wer.legend(loc="upper right")
-    plt.title("Training and Evaluation Metrics")
+    ax_primary.set_xlabel("Step")
+
+    primary_handles, primary_labels = ax_primary.get_legend_handles_labels()
+    if primary_handles:
+        ax_primary.legend(loc="upper left")
+
+    if ax_secondary is not None:
+        secondary_handles, secondary_labels = ax_secondary.get_legend_handles_labels()
+        if secondary_handles:
+            ax_secondary.legend(loc="upper right")
+
+    plt.title("Training Metrics Over Steps")
     plt.tight_layout()
 
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(plot_path)
     plt.close(fig)
 
-    print(f"🖼️ Saved loss/WER plot to {plot_path}")
+    print(f"🖼️ Saved training metrics plot to {plot_path}")
