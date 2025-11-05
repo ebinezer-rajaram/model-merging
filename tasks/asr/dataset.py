@@ -1,33 +1,184 @@
 """Dataset loading and collation for ASR tasks."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from datasets import Dataset, load_dataset
 
+from core.dataset_utils import (
+    add_duration,
+    build_split_metadata,
+    hours_key,
+    load_cached_split,
+    normalize_split_metadata,
+    num_proc_map_kwargs,
+    resolve_num_proc,
+    save_cached_split,
+    select_indices_by_duration,
+    subset_dataset_by_metadata,
+)
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "asr" / "datasets"
+
+MANIFEST_FIELDS: Tuple[str, ...] = ("id", "speaker_id", "chapter_id", "text")
+
+
+def _normalize_cached_payload(
+    payload: Dict[str, Any],
+    fallback_seed: int,
+) -> Tuple[Dict[str, Dict[str, Any]], int]:
+    if "splits" in payload:
+        return normalize_split_metadata(payload.get("splits")), int(payload.get("seed", fallback_seed))
+
+    # Legacy payload support (prior format without nested splits).
+    splits = {
+        "train": {
+            "indices": list(payload.get("train_indices", [])),
+            "hours": float(payload.get("train_duration_hours", 0.0)),
+            "manifest": payload.get("train_manifest", []),
+        },
+        "validation": {
+            "indices": list(payload.get("val_indices", [])),
+            "hours": float(payload.get("val_duration_hours", 0.0)),
+            "manifest": payload.get("val_manifest", []),
+        },
+    }
+    return splits, int(payload.get("seed", fallback_seed))
+
+
+def load_librispeech_subset(
+    train_hours: float = 10.0,
+    val_hours: Optional[float] = 1.0,
+    seed: int = 0,
+    *,
+    num_proc: Optional[int | str] = None,
+    cache_dir: Optional[Path | str] = None,
+    cache_splits: bool = True,
+    force_rebuild: bool = False,
+    return_full_validation: bool = False,
+    return_test_split: bool = False,
+    test_split: str = "test.clean",
+    test_hours: Optional[float] = None,
+) -> Tuple[Dataset, Dataset] | Tuple[Dataset, Dataset, Dataset] | Tuple[Dataset, Dataset, Dataset, Dataset]:
+    """Load configurable LibriSpeech subsets with cached manifests."""
+    base = load_dataset("librispeech_asr", "clean")
+    train_full, val_full = base["train.100"], base["validation"]
+
+    effective_num_proc = resolve_num_proc(num_proc)
+
+    train_full = train_full.map(add_duration, **num_proc_map_kwargs(effective_num_proc))
+    val_full = val_full.map(add_duration, **num_proc_map_kwargs(effective_num_proc))
+    test_full = None
+    if return_test_split:
+        available_splits = [name for name in base.keys() if name.startswith("test")]
+        split_aliases = {
+            "test.clean": "test",
+            "test-clean": "test",
+            "test_other": "test.other",
+            "test-other": "test.other",
+        }
+        lookup_split = split_aliases.get(test_split, test_split)
+        try:
+            test_full = base[lookup_split]
+        except KeyError as exc:
+            raise ValueError(
+                f"Requested test split '{test_split}' is not available. Options: {available_splits}."
+            ) from exc
+        test_full = test_full.map(add_duration, **num_proc_map_kwargs(effective_num_proc))
+
+    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
+    cache_name = (
+        f"train_{hours_key(train_hours)}_val_{hours_key(val_hours)}"
+        f"_seed_{int(seed)}.json"
+    )
+    cache_path = cache_root / cache_name
+
+    cached_payload = load_cached_split(cache_path) if cache_splits and not force_rebuild else None
+
+    splits_metadata: Dict[str, Dict[str, Any]]
+    payload_seed = seed
+
+    if cached_payload is None:
+        train_indices = select_indices_by_duration(train_full["duration"], train_hours, seed)
+        val_indices = select_indices_by_duration(val_full["duration"], val_hours, seed + 1)
+
+        splits_metadata = {
+            "train": build_split_metadata(
+                train_full,
+                train_indices,
+                manifest_fields=MANIFEST_FIELDS,
+            ),
+            "validation": build_split_metadata(
+                val_full,
+                val_indices,
+                manifest_fields=MANIFEST_FIELDS,
+            ),
+        }
+        payload_seed = seed
+
+        if cache_splits:
+            save_cached_split(
+                cache_path,
+                {
+                    "seed": payload_seed,
+                    "dataset": "librispeech_asr",
+                    "config": "clean",
+                    "splits": splits_metadata,
+                },
+            )
+    else:
+        splits_metadata, payload_seed = _normalize_cached_payload(cached_payload, seed)
+
+    train_subset = subset_dataset_by_metadata(train_full, splits_metadata.get("train"))
+    val_subset = subset_dataset_by_metadata(val_full, splits_metadata.get("validation"))
+
+    train_hours_logged = float(splits_metadata.get("train", {}).get("hours", 0.0) or 0.0)
+    val_hours_logged = float(splits_metadata.get("validation", {}).get("hours", 0.0) or 0.0)
+    test_subset: Optional[Dataset] = None
+    test_hours_logged: Optional[float] = None
+
+    if return_test_split and test_full is not None:
+        if test_hours is not None:
+            test_indices = select_indices_by_duration(test_full["duration"], test_hours, seed + 2)
+            test_subset = test_full.select(test_indices)
+            total_seconds = sum(float(test_full["duration"][idx]) for idx in test_indices)
+            test_hours_logged = total_seconds / 3600.0
+        else:
+            test_subset = test_full
+            durations = test_subset["duration"] if "duration" in test_subset.column_names else []
+            total_seconds = float(sum(durations)) if durations else 0.0
+            test_hours_logged = total_seconds / 3600.0 if total_seconds else 0.0
+
+    print(
+        "🎧 LibriSpeech subset:"
+        f" train={len(train_subset)} samples ≈ {train_hours_logged:.2f} h,"
+        f" val={len(val_subset)} samples ≈ {val_hours_logged:.2f} h"
+        f" (seed={payload_seed}, num_proc={effective_num_proc})."
+    )
+
+    if return_test_split and test_subset is not None:
+        print(
+            f"🧪 Test split '{test_split}': {len(test_subset)} samples"
+            + (f" ≈ {test_hours_logged:.2f} h." if test_hours_logged is not None else ".")
+        )
+
+    if return_full_validation and return_test_split and test_subset is not None:
+        return train_subset, val_subset, val_full, test_subset
+    if return_full_validation:
+        return train_subset, val_subset, val_full
+    if return_test_split and test_subset is not None:
+        return train_subset, val_subset, test_subset
+    return train_subset, val_subset
+
 
 def load_librispeech_10h() -> Tuple[Dataset, Dataset]:
-    """Load a 10h subset of LibriSpeech clean for ASR fine-tuning."""
-    base = load_dataset("librispeech_asr", "clean")
-    train_full, val_ds = base["train.100"], base["validation"]
-
-    def _add_dur(batch):
-        arr, sr = batch["audio"]["array"], batch["audio"]["sampling_rate"]
-        batch["duration"] = float(len(arr) / sr) if sr and arr is not None else 0.0
-        return batch
-
-    train_full = train_full.map(_add_dur)
-
-    target_sec, cumulative, indices = 10 * 3600.0, 0.0, []
-    for idx, duration in enumerate(train_full["duration"]):
-        cumulative += duration
-        indices.append(idx)
-        if cumulative >= target_sec:
-            break
-
-    print(f"🎧 Selected {len(indices)} samples ≈ {cumulative/3600.0:.2f} h from train.100")
-    return train_full.select(indices), val_ds
+    """Backwards-compatible loader returning a 10h/1h split."""
+    return load_librispeech_subset(train_hours=10.0, val_hours=1.0)
 
 
 @dataclass

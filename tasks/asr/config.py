@@ -23,4 +23,5 @@ def get_artifact_directories(package_root: Path) -> Dict[str, Path]:
         "vectors": base / "vectors",
         "metrics": base / "metrics",
         "models": base / "models",
+        "datasets": base / "datasets",
     }
