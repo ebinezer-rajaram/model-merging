@@ -2,7 +2,7 @@
 
 import csv
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from transformers import Trainer
@@ -16,10 +16,12 @@ class CustomTrainer(Trainer):
         *args,
         generation_kwargs: Optional[Dict[str, Any]] = None,
         enable_generation: bool = True,
+        constrained_decoding_fn: Optional[Callable] = None,
         **kwargs,
     ):
         self.generation_kwargs = generation_kwargs or {"max_new_tokens": 128, "do_sample": False}
         self.enable_generation = enable_generation
+        self.constrained_decoding_fn = constrained_decoding_fn
         super().__init__(*args, **kwargs)
 
     def prediction_step(
@@ -94,7 +96,12 @@ class CustomTrainer(Trainer):
             if new_attention_mask is not None:
                 gen_inputs["attention_mask"] = new_attention_mask
 
-        generated = model.generate(**gen_inputs, **self.generation_kwargs)
+        # Apply constrained decoding if available
+        final_gen_kwargs = dict(self.generation_kwargs)
+        if self.constrained_decoding_fn is not None:
+            final_gen_kwargs["prefix_allowed_tokens_fn"] = self.constrained_decoding_fn
+
+        generated = model.generate(**gen_inputs, **final_gen_kwargs)
 
         preds = generated.detach().cpu()
         label_ids = inputs["labels"].detach().cpu() if has_labels else None

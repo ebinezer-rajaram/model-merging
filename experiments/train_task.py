@@ -20,6 +20,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 from core import (
     build_early_stopping_kwargs,
     build_training_arguments,
+    create_classification_constraint,
     CustomTrainer,
     ensure_dir,
     filter_dataset_columns,
@@ -375,6 +376,14 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
     early_stopping_kwargs = build_early_stopping_kwargs(train_config)
     compute_metrics_fn = spec.metrics_builder(processor, label_names or [])
 
+    # Create constrained decoding function to ensure only valid labels are generated
+    print(f"🔒 Creating constrained decoding with {len(label_names)} valid labels...")
+    constraint_fn = create_classification_constraint(
+        processor=processor,
+        label_names=label_names,
+        allow_eos=True,
+    )
+
     trainer = CustomTrainer(
         model=model,
         args=training_args,
@@ -385,6 +394,7 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         compute_metrics=compute_metrics_fn,
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
         generation_kwargs=train_config.generation_kwargs,
+        constrained_decoding_fn=constraint_fn,
     )
 
     # Run training with evaluation

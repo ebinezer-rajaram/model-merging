@@ -39,6 +39,8 @@ from .training import (
     build_early_stopping_kwargs,
     build_history_record,
     build_training_arguments,
+    create_classification_constraint,
+    create_multi_token_constraint,
     parse_training_config,
     run_training_with_evaluation,
     save_artifacts,
@@ -87,5 +89,7 @@ __all__ = [
     "build_training_arguments",
     "build_early_stopping_kwargs",
     "build_history_record",
+    "create_classification_constraint",
+    "create_multi_token_constraint",
     "run_training_with_evaluation",
 ]
