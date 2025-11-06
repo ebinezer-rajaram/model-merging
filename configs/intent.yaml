@@ -15,7 +15,7 @@ model:
   lora:
     r: 32                    # LoRA rank (higher = more parameters, better fit)
     alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.1             # Dropout probability for LoRA layers
+    dropout: 0.15             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
       - q_proj
@@ -23,8 +23,6 @@ model:
       - v_proj
       - o_proj
       - out_proj
-      - fc1
-      - fc2
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -74,12 +72,12 @@ training:
   # Optimization
   learning_rate: 3e-05
   lr_scheduler_type: cosine
-  warmup_ratio: 0.05
+  warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Training duration
-  num_train_epochs: 6
+  num_train_epochs: 8
 
   # Checkpointing
   save_strategy: steps
@@ -99,8 +97,8 @@ training:
     - wandb
 
   # Early stopping
-  early_stopping_patience: 5
-  early_stopping_threshold: 0.001
+  early_stopping_patience: 8
+  early_stopping_threshold: 0.0001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1
   greater_is_better: true
@@ -116,18 +114,18 @@ training:
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: false
+  group_by_length: true
   length_column_name: duration
 
   # Other
   eval_accumulation_steps: 1
   remove_unused_columns: false
 
-  # Generation parameters (for evaluation)
+  # Generation parameters (for constrained decoding evaluation)
   generation_kwargs:
-    max_new_tokens: 16
-    do_sample: false
-    num_beams: 1
+    max_new_tokens: 8        # Intent labels may be 2-3 tokens, 5 provides buffer
+    do_sample: false         # Greedy decoding for deterministic results
+    num_beams: 1            # No beam search needed with constraints
 
 # ============================================================================
 # Artifacts Configuration
