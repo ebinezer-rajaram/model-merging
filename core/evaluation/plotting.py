@@ -53,7 +53,7 @@ def _collect_series(csv_path: Path) -> Tuple[List[Optional[int]], Dict[str, List
 
 
 def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
-    """Render training metrics against steps."""
+    """Render training metrics against steps with proper subplot organization."""
     if plt is None:
         print("⚠️ Matplotlib not available; skipping plot generation.")
         return
@@ -67,14 +67,14 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
         print("ℹ️ No metric columns available to plot.")
         return
 
-    # Categorize metrics into losses and accuracy-like metrics
+    # Categorize metrics into losses and task-specific metrics
     loss_metrics = {
         name: values for name, values in metric_series.items() if "loss" in name.lower()
     }
 
-    # Accuracy-like metrics: accuracy, f1, macro_f1, wer, exact_match
+    # Task metrics: accuracy, f1, macro_f1, wer, exact_match
     # Exclude: num_samples, recognized_rate, epoch, learning_rate
-    accuracy_metrics = {
+    task_metrics = {
         name: values
         for name, values in metric_series.items()
         if name not in loss_metrics
@@ -88,73 +88,112 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
         )
     }
 
-    if not loss_metrics and not accuracy_metrics:
-        print("ℹ️ No plottable metrics found (losses or accuracies).")
+    if not loss_metrics and not task_metrics:
+        print("ℹ️ No plottable metrics found (losses or task metrics).")
         return
 
-    fig, ax_primary = plt.subplots(figsize=(10, 6))
-    plotted = False
+    # Determine number of subplots needed
+    num_plots = sum([bool(loss_metrics), bool(task_metrics)])
+    if num_plots == 0:
+        print("ℹ️ No plottable metrics found.")
+        return
 
-    def _plot_series(ax, series_dict, *, color_cycle=None):
-        nonlocal plotted
-        for index, (name, values) in enumerate(sorted(series_dict.items())):
+    fig, axes = plt.subplots(num_plots, 1, figsize=(10, 5 * num_plots))
+    if num_plots == 1:
+        axes = [axes]
+
+    current_ax_idx = 0
+
+    def _plot_series(ax, series_dict, ylabel: str):
+        """Plot a set of metrics on the given axis."""
+        plotted = False
+        # Separate train and eval metrics
+        train_metrics = {k: v for k, v in series_dict.items() if k.startswith("train_")}
+        eval_metrics = {k: v for k, v in series_dict.items() if k.startswith("eval_")}
+
+        colors = plt.cm.tab10.colors
+        color_idx = 0
+
+        for name, values in sorted(train_metrics.items()):
             points = [(s, v) for s, v in zip(steps, values) if s is not None and v is not None]
             if not points:
                 continue
             xs, ys = zip(*points)
-            label = name.replace("eval_", "Eval ").replace("train_", "Train ").replace("_", " ").title()
-            if color_cycle and index < len(color_cycle):
-                ax.plot(xs, ys, label=label, marker='o', markersize=4, color=color_cycle[index])
-            else:
-                ax.plot(xs, ys, label=label, marker='o', markersize=4)
+            label = name.replace("train_", "").replace("_", " ").title()
+            ax.plot(xs, ys, label=f"Train {label}", marker='o', markersize=3,
+                   linewidth=2, color=colors[color_idx % len(colors)], alpha=0.8)
             plotted = True
 
-    # Plot losses on primary axis
+            # Plot corresponding eval metric if it exists
+            eval_name = name.replace("train_", "eval_")
+            if eval_name in eval_metrics:
+                eval_values = eval_metrics[eval_name]
+                eval_points = [(s, v) for s, v in zip(steps, eval_values) if s is not None and v is not None]
+                if eval_points:
+                    eval_xs, eval_ys = zip(*eval_points)
+                    ax.plot(eval_xs, eval_ys, label=f"Eval {label}", marker='s', markersize=4,
+                           linewidth=2, color=colors[color_idx % len(colors)], linestyle='--', alpha=0.8)
+
+            color_idx += 1
+
+        # Plot eval-only metrics (no corresponding train metric)
+        for name, values in sorted(eval_metrics.items()):
+            train_name = name.replace("eval_", "train_")
+            if train_name in train_metrics:
+                continue  # Already plotted with its train counterpart
+
+            points = [(s, v) for s, v in zip(steps, values) if s is not None and v is not None]
+            if not points:
+                continue
+            xs, ys = zip(*points)
+            label = name.replace("eval_", "").replace("_", " ").title()
+            ax.plot(xs, ys, label=f"Eval {label}", marker='s', markersize=4,
+                   linewidth=2, color=colors[color_idx % len(colors)], linestyle='--', alpha=0.8)
+            plotted = True
+            color_idx += 1
+
+        if plotted:
+            ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
+            ax.set_xlabel("Training Step", fontsize=11, fontweight='bold')
+            ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.7)
+            ax.legend(loc="best", framealpha=0.95, fontsize=9)
+            # Set smart y-axis limits with some padding
+            ax.margins(y=0.1)
+
+        return plotted
+
+    # Plot losses
     if loss_metrics:
-        _plot_series(ax_primary, loss_metrics, color_cycle=["tab:blue", "tab:orange", "tab:red"])
-        ax_primary.set_ylabel("Loss", fontsize=11, fontweight='bold')
+        if _plot_series(axes[current_ax_idx], loss_metrics, "Loss"):
+            axes[current_ax_idx].set_title("Training Loss", fontsize=12, fontweight='bold', pad=10)
+            current_ax_idx += 1
 
-    # Plot accuracy metrics on secondary axis
-    ax_secondary = None
-    if accuracy_metrics:
-        if loss_metrics:
-            ax_secondary = ax_primary.twinx()
-            _plot_series(ax_secondary, accuracy_metrics, color_cycle=["tab:green", "tab:purple", "tab:brown", "tab:pink"])
-            # Determine appropriate label based on metrics present
-            if any("wer" in name.lower() for name in accuracy_metrics.keys()):
-                ax_secondary.set_ylabel("WER / Accuracy Metrics", fontsize=11, fontweight='bold')
-            else:
-                ax_secondary.set_ylabel("Accuracy / F1 Score", fontsize=11, fontweight='bold')
+    # Plot task metrics
+    if task_metrics:
+        # Determine the appropriate y-axis label based on which metrics are present
+        metric_names = list(task_metrics.keys())
+
+        if any("wer" in name.lower() for name in metric_names):
+            ylabel = "WER"
+        elif any("exact_match" in name.lower() for name in metric_names):
+            ylabel = "Score"
+        elif any("accuracy" in name.lower() for name in metric_names) and any("f1" in name.lower() for name in metric_names):
+            ylabel = "Accuracy / F1"
+        elif any("accuracy" in name.lower() for name in metric_names):
+            ylabel = "Accuracy"
+        elif any("f1" in name.lower() for name in metric_names):
+            ylabel = "F1 Score"
         else:
-            # No losses, plot accuracy metrics on primary axis
-            _plot_series(ax_primary, accuracy_metrics, color_cycle=["tab:green", "tab:purple", "tab:brown", "tab:pink"])
-            ax_primary.set_ylabel("Accuracy / F1 Score", fontsize=11, fontweight='bold')
+            ylabel = "Metric Value"
 
-    if not plotted:
-        print("ℹ️ Not enough data to render plots.")
-        plt.close(fig)
-        return
+        if _plot_series(axes[current_ax_idx], task_metrics, ylabel):
+            axes[current_ax_idx].set_title("Task Metrics", fontsize=12, fontweight='bold', pad=10)
 
-    ax_primary.set_xlabel("Training Step", fontsize=11, fontweight='bold')
-    ax_primary.grid(True, alpha=0.3, linestyle='--')
-
-    # Combine legends if we have both axes
-    primary_handles, primary_labels = ax_primary.get_legend_handles_labels()
-    if ax_secondary is not None:
-        secondary_handles, secondary_labels = ax_secondary.get_legend_handles_labels()
-        all_handles = primary_handles + secondary_handles
-        all_labels = primary_labels + secondary_labels
-        if all_handles:
-            ax_primary.legend(all_handles, all_labels, loc="best", framealpha=0.9)
-    else:
-        if primary_handles:
-            ax_primary.legend(loc="best", framealpha=0.9)
-
-    plt.title("Training Metrics Over Steps", fontsize=12, fontweight='bold')
-    plt.tight_layout()
+    plt.suptitle("Training Progress", fontsize=14, fontweight='bold', y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
 
     plot_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(plot_path, dpi=150)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
     print(f"🖼️ Saved training metrics plot to {plot_path}")
