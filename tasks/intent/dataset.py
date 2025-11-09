@@ -427,9 +427,11 @@ class IntentClassificationCollator:
 
     def _build_prompt(self, transcript: str, metadata: Dict[str, Any]) -> str:
         transcript = (transcript or "").strip()
+        # Format class options for the prompt
+        class_options = ", ".join(self.label_names)
         prompt = (
             f"{self.processor.audio_token}"
-            "Classify the user's intent from the spoken utterance."
+            f"What is the user's intent from the spoken utterance? Choose from: {class_options}."
         )
         if self.prepend_scenario:
             scenario = metadata.get("scenario")

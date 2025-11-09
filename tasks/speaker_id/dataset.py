@@ -513,9 +513,11 @@ class SpeakerIdentificationCollator:
 
     def _build_prompt(self, transcript: str) -> str:
         transcript = (transcript or "").strip()
+        # Format class options for the prompt
+        class_options = ", ".join(self.label_names)
         prompt = (
             f"{self.processor.audio_token}"
-            "Identify the speaker in the provided audio segment."
+            f"Who is the speaker in the provided audio segment? Choose from: {class_options}."
         )
         if transcript and self.include_transcript:
             prompt += f"\nTranscript: {transcript}\nSpeaker:"

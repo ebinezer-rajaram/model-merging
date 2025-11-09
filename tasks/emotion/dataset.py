@@ -376,9 +376,11 @@ class EmotionDataCollator:
 
     def _build_prompt(self, transcript: str) -> str:
         """Assemble the textual prompt for the model."""
+        # Format class options for the prompt
+        class_options = ", ".join(self.label_names)
         base = (
             f"{self.processor.audio_token}"
-            "Classify the speaker's emotion in the provided audio clip."
+            f"What is the speaker's emotion in the provided audio clip? Choose from: {class_options}."
         )
         transcript = (transcript or "").strip()
         if transcript and self.include_transcript:
