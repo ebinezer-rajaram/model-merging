@@ -527,61 +527,60 @@ def _get_speech_qa_task_config() -> TaskConfig:
 
 
 def _register_default_tasks() -> None:
-    """Register built-in task builders."""
+    """Register built-in task builders.
+
+    Note: Task names are hardcoded to avoid circular imports during module initialization.
+    The actual task components are imported lazily when the evaluation setup is built.
+    """
+    # Register ASR
     try:
-        from tasks.asr import TASK_NAME as asr_task_name  # type: ignore
-    except ImportError:
-        asr_task_name = None
-    if asr_task_name:
         register_eval_task(
-            asr_task_name,
+            "asr",
             lambda **kwargs: _build_generic_eval_setup(_get_asr_task_config(), **kwargs),
             overwrite=True,
         )
+    except Exception:
+        pass  # Silently skip if ASR components are unavailable
 
+    # Register Emotion
     try:
-        from tasks.emotion import TASK_NAME as emotion_task_name  # type: ignore
-    except ImportError:
-        emotion_task_name = None
-    if emotion_task_name:
         register_eval_task(
-            emotion_task_name,
+            "emotion",
             lambda **kwargs: _build_generic_eval_setup(_get_emotion_task_config(), **kwargs),
             overwrite=True,
         )
+    except Exception:
+        pass
 
+    # Register Speaker ID
     try:
-        from tasks.speaker_id import TASK_NAME as speaker_task_name  # type: ignore
-    except ImportError:
-        speaker_task_name = None
-    if speaker_task_name:
         register_eval_task(
-            speaker_task_name,
+            "speaker_id",
             lambda **kwargs: _build_generic_eval_setup(_get_speaker_task_config(), **kwargs),
             overwrite=True,
         )
+    except Exception:
+        pass
 
+    # Register Intent
     try:
-        from tasks.intent import TASK_NAME as intent_task_name  # type: ignore
-    except ImportError:
-        intent_task_name = None
-    if intent_task_name:
         register_eval_task(
-            intent_task_name,
+            "intent",
             lambda **kwargs: _build_generic_eval_setup(_get_intent_task_config(), **kwargs),
             overwrite=True,
         )
+    except Exception:
+        pass
 
+    # Register Speech QA
     try:
-        from tasks.speech_qa import TASK_NAME as speech_qa_task_name  # type: ignore
-    except ImportError:
-        speech_qa_task_name = None
-    if speech_qa_task_name:
         register_eval_task(
-            speech_qa_task_name,
+            "speech_qa",
             lambda **kwargs: _build_generic_eval_setup(_get_speech_qa_task_config(), **kwargs),
             overwrite=True,
         )
+    except Exception:
+        pass
 
 
 _register_default_tasks()
