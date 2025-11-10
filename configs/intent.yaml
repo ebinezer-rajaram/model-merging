@@ -44,6 +44,9 @@ dataset:
   max_validation_samples: null
   max_test_samples: null
 
+  # Maximum audio duration in seconds (null = no limit)
+  max_duration: null
+
   # Column mappings
   label_column: intent
   text_column: transcript

@@ -13,9 +13,9 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.1             # Dropout probability for LoRA layers
+    r: 128                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 256                # LoRA alpha scaling factor (typically 2x rank)
+    dropout: 0.15             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
       - q_proj
@@ -23,15 +23,20 @@ model:
       - v_proj
       - o_proj
       - out_proj
+      - gate_proj  # ADD: MLP gating
+      - up_proj    # ADD: MLP expansion
+      - down_proj  # ADD: MLP projection
     task_type: CAUSAL_LM
 
 # ============================================================================
 # Dataset Configuration
 # ============================================================================
 dataset:
-  # Dataset source
-  dataset_name: AbstractTTS/IEMOCAP
+  # Dataset source - using local MELD dataset
+  dataset_name: local_meld
   dataset_config: default
+  # Path to local MELD data directory
+  data_dir: datasets/meld
 
   # Data processing
   seed: 0
@@ -44,17 +49,22 @@ dataset:
   max_validation_samples: null
   max_test_samples: null
 
+  # Maximum audio duration in seconds (null = no limit)
+  # Samples exceeding this will be filtered out to prevent OOM
+  # MELD average is ~3s, max normal sample is ~30s
+  max_duration: 30.0
+
   # Column mappings
-  label_column: major_emotion
-  text_column: transcription
+  # MELD has: neutral, joy, sadness, anger, surprise, fear, disgust
+  label_column: Emotion
+  text_column: Utterance
   audio_column: audio
 
-  # Split configuration (using percentages for this dataset)
-  split_percentages:
-    train: 0.8
-    validation: 0.1
-    test: 0.1
-  stratify_by_column: label
+  # Split configuration
+  # MELD has predefined train/validation/test splits
+  train_split: train
+  validation_split: validation
+  test_split: test
 
   # Task-specific options
   include_transcript: true
@@ -65,18 +75,18 @@ dataset:
 training:
   # Batch sizes and accumulation
   per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
+  per_device_eval_batch_size: 12
   gradient_accumulation_steps: 2
 
   # Optimization
-  learning_rate: 2e-05
+  learning_rate: 3e-05
   lr_scheduler_type: cosine
-  warmup_ratio: 0.05
+  warmup_ratio: 0.15
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Training duration
-  num_train_epochs: 5
+  num_train_epochs: 10
 
   # Checkpointing
   save_strategy: steps
@@ -90,13 +100,13 @@ training:
   initial_eval: true
 
   # Logging
-  logging_steps: 25
+  logging_steps: 10
   report_to:
     - tensorboard
     - wandb
 
   # Early stopping
-  early_stopping_patience: 4
+  early_stopping_patience: 5
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1
@@ -113,11 +123,11 @@ training:
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: false
+  group_by_length: true
   length_column_name: duration
 
   # Other
-  eval_accumulation_steps: 1
+  eval_accumulation_steps: 4
   remove_unused_columns: false
 
   # Generation parameters (for constrained decoding evaluation)

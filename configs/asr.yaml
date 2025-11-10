@@ -32,9 +32,9 @@ model:
 # ============================================================================
 dataset:
   # LibriSpeech subset configuration (hours-based)
-  train_hours: 50                # Hours of training data to use
-  val_hours: null                # Validation hours (null = use default)
-  test_hours: null               # Test hours (null = use all)
+  train_hours: 10              # Hours of training data to use
+  val_hours: 1              # Validation hours (null = use default)
+  test_hours: 1              # Test hours (null = use all)
   test_split: test               # Test split name
 
   # Data processing
@@ -52,7 +52,7 @@ dataset:
 # ============================================================================
 training:
   # Batch sizes and accumulation
-  per_device_train_batch_size: 16
+  per_device_train_batch_size: 20
   per_device_eval_batch_size: 12
   gradient_accumulation_steps: 2
 
@@ -64,16 +64,16 @@ training:
   max_grad_norm: 1.0            # Lower gradient clipping for ASR
 
   # Training duration
-  num_train_epochs: 4
+  num_train_epochs: 5
 
   # Checkpointing
   save_strategy: steps
-  save_steps: 100
+  save_steps: 50
   save_total_limit: 4
 
   # Evaluation
   eval_strategy: steps
-  eval_steps: 100
+  eval_steps: 50
   max_eval_samples: 0           # 0 = use all
   initial_eval: true
 
@@ -84,10 +84,10 @@ training:
     - wandb
 
   # Early stopping
-  early_stopping_patience: 8
+  early_stopping_patience: 2
   early_stopping_threshold: 0.001   # 0 = any improvement
   load_best_model_at_end: true
-  metric_for_best_model: wer    # Word Error Rate (lower is better)
+  metric_for_best_model: wer_standardize    # Options: 'wer' (if using single mode) or 'wer_default'/'wer_standardize' (if using both)
   greater_is_better: false      # WER: lower is better
 
   # Performance optimizations
@@ -126,3 +126,4 @@ artifacts:
 metrics:
   history_csv: training_history.csv
   loss_plot: loss_wer_plot.png
+  wer_normalization: both  # Options: 'default', 'standardize', or 'both' (compute both metrics)
