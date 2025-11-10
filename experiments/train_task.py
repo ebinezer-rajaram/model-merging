@@ -1,6 +1,7 @@
 """Generic task training entry point."""
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from functools import partial
@@ -80,6 +81,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def setup_wandb_for_task(task_name: str, training_cfg: Dict[str, Any]) -> None:
+    """Configure wandb with task-specific project name.
+
+    Args:
+        task_name: Name of the task (e.g., 'asr', 'emotion', 'intent')
+        training_cfg: Training configuration dictionary
+    """
+    report_to = training_cfg.get("report_to", [])
+    if "wandb" in report_to:
+        try:
+            import wandb
+            # Set wandb project based on task name
+            project_name = f"speech-merging-{task_name}"
+            os.environ["WANDB_PROJECT"] = project_name
+            print(f"📊 Configured wandb project: {project_name}")
+        except ImportError:
+            print("⚠️ wandb not available, skipping wandb configuration")
+            pass
+
+
 def _resolve_dataset_cache_path(dataset_cfg: Dict[str, Any], artifact_dirs: Dict[str, Path]) -> Path:
     """Normalize dataset cache paths relative to the task artifact directory."""
     dataset_cache_dir = dataset_cfg.get("cache_dir")
@@ -91,6 +112,106 @@ def _resolve_dataset_cache_path(dataset_cfg: Dict[str, Any], artifact_dirs: Dict
         dataset_cache_path = ensure_dir(artifact_dirs["datasets"])
     dataset_cfg["cache_dir"] = dataset_cache_path
     return dataset_cache_path
+
+
+def _setup_common_components(
+    config: Dict[str, Any],
+    task_name: str,
+    artifact_dirs: Dict[str, Path],
+    default_adapter_subdir: str,
+    default_history_csv: str,
+    default_loss_plot: str,
+):
+    """Setup components common to all tasks (model, directories, paths)."""
+    training_cfg = config.get("training", {})
+    artifacts_cfg = config.get("artifacts", {})
+    metrics_cfg = config.get("metrics", {})
+    model_cfg = config.get("model", {})
+
+    setup_wandb_for_task(task_name, training_cfg)
+
+    model_path = PACKAGE_ROOT / model_cfg.get("path", "models/Qwen2.5-Omni-3B")
+    output_dir = ensure_dir(
+        artifact_dirs["adapters"] / artifacts_cfg.get("adapter_subdir", default_adapter_subdir)
+    )
+    metrics_dir = ensure_dir(artifact_dirs["metrics"])
+
+    history_csv_path = metrics_dir / metrics_cfg.get("history_csv", default_history_csv)
+    loss_plot_path = metrics_dir / metrics_cfg.get("loss_plot", default_loss_plot)
+    final_adapter_dir = output_dir / "final"
+
+    print("🔧 Loading model and processor...")
+    lora_config = None
+    if "lora" in model_cfg:
+        lora_config = create_lora_config_from_dict(model_cfg["lora"])
+        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
+    model, processor = load_qwen_model(model_path, lora_config=lora_config)
+
+    return {
+        "model": model,
+        "processor": processor,
+        "output_dir": output_dir,
+        "metrics_dir": metrics_dir,
+        "history_csv_path": history_csv_path,
+        "loss_plot_path": loss_plot_path,
+        "final_adapter_dir": final_adapter_dir,
+    }
+
+
+def _truncate_eval_dataset(full_eval_ds, max_eval_samples: Optional[int]):
+    """Truncate evaluation dataset if max_eval_samples is specified."""
+    if max_eval_samples is None:
+        return full_eval_ds
+
+    max_eval_samples = int(max(0, max_eval_samples))
+    if 0 < max_eval_samples < len(full_eval_ds):
+        truncated = full_eval_ds.select(range(max_eval_samples))
+        print(f"🔍 Validation truncated to {len(truncated)} samples for faster eval.")
+        return truncated
+    return full_eval_ds
+
+
+def _filter_by_duration(dataset, max_duration_seconds: Optional[float], split_name: str = "dataset"):
+    """Filter dataset to keep only samples within max duration."""
+    if max_duration_seconds is None:
+        return dataset
+
+    def _keep_duration(example: dict) -> bool:
+        duration = example.get("duration") or 0.0
+        return float(duration) <= max_duration_seconds
+
+    before = len(dataset)
+    filtered = dataset.filter(_keep_duration)
+    if len(filtered) != before:
+        print(f"⏱️ Filtered {before - len(filtered)} {split_name} samples longer than {max_duration_seconds:.1f}s.")
+    return filtered
+
+
+class _DatasetWithReferenceStore:
+    """Wrapper to update reference store before dataset access (for Speech QA)."""
+
+    def __init__(self, dataset, reference_store: Dict[str, Any], reference_values: Any):
+        self._dataset = dataset
+        self._reference_store = reference_store
+        self._reference_values = reference_values
+        # Copy dataset attributes for compatibility
+        for attr in dir(dataset):
+            if not attr.startswith('_') and attr not in ('_dataset', '_reference_store', '_reference_values'):
+                try:
+                    setattr(self, attr, getattr(dataset, attr))
+                except (AttributeError, TypeError):
+                    pass
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def __getitem__(self, idx):
+        self._reference_store['values'] = self._reference_values
+        return self._dataset[idx]
+
+    def __iter__(self):
+        self._reference_store['values'] = self._reference_values
+        return iter(self._dataset)
 
 
 @dataclass
@@ -114,6 +235,7 @@ CLASSIFICATION_BASE_KEYS: Tuple[str, ...] = (
     "max_train_samples",
     "max_validation_samples",
     "max_test_samples",
+    "max_duration",
     "label_column",
     "text_column",
     "audio_column",
@@ -122,6 +244,8 @@ CLASSIFICATION_BASE_KEYS: Tuple[str, ...] = (
     "validation_split",
     "test_split",
     "stratify_by_column",
+    "revision",
+    "data_dir",
 )
 
 SPEECH_QA_LOADER_KEYS: Tuple[str, ...] = (
@@ -299,30 +423,24 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
 
     training_cfg = config.get("training", {})
     dataset_cfg = config.get("dataset", {})
-    artifacts_cfg = config.get("artifacts", {})
-    metrics_cfg = config.get("metrics", {})
-    model_cfg = config.get("model", {})
-
-    model_path = PACKAGE_ROOT / model_cfg.get("path", "models/Qwen2.5-Omni-3B")
     artifact_dirs = spec.get_artifact_directories(PACKAGE_ROOT)
 
-    output_dir = ensure_dir(
-        artifact_dirs["adapters"] / artifacts_cfg.get("adapter_subdir", spec.default_adapter_subdir)
+    # Setup common components
+    components = _setup_common_components(
+        config,
+        spec.task_name,
+        artifact_dirs,
+        spec.default_adapter_subdir,
+        f"{spec.task_name}_training_history.csv",
+        f"{spec.task_name}_loss_plot.png",
     )
-    metrics_dir = ensure_dir(artifact_dirs["metrics"])
-
-    history_csv_path = metrics_dir / metrics_cfg.get(
-        "history_csv", f"{spec.task_name}_training_history.csv"
-    )
-    loss_plot_path = metrics_dir / metrics_cfg.get("loss_plot", f"{spec.task_name}_loss_plot.png")
-    final_adapter_dir = output_dir / "final"
-
-    print("🔧 Loading model and processor...")
-    lora_config = None
-    if "lora" in model_cfg:
-        lora_config = create_lora_config_from_dict(model_cfg["lora"])
-        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
-    model, processor = load_qwen_model(model_path, lora_config=lora_config)
+    model = components["model"]
+    processor = components["processor"]
+    output_dir = components["output_dir"]
+    metrics_dir = components["metrics_dir"]
+    history_csv_path = components["history_csv_path"]
+    loss_plot_path = components["loss_plot_path"]
+    final_adapter_dir = components["final_adapter_dir"]
 
     dataset_seed = dataset_cfg.get("seed", seed)
     cache_path = _resolve_dataset_cache_path(dataset_cfg, artifact_dirs)
@@ -336,6 +454,8 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
 
     if train_ds is None:
         raise RuntimeError(f"{spec.task_name} dataset did not provide a training split.")
+
+    # Use validation for early stopping during training
     eval_ds = val_ds or test_ds
     if eval_ds is None:
         raise RuntimeError(f"{spec.task_name} dataset requires a validation or test split.")
@@ -346,13 +466,13 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
     train_ds = filter_dataset_columns(train_ds, spec.keep_columns, always_keep=["duration"])
     full_eval_ds = filter_dataset_columns(full_eval_ds, spec.keep_columns, always_keep=["duration"])
 
-    eval_ds_for_trainer = full_eval_ds
-    max_eval_samples = training_cfg.get("max_eval_samples")
-    if max_eval_samples is not None:
-        max_eval_samples = int(max(0, max_eval_samples))
-        if 0 < max_eval_samples < len(full_eval_ds):
-            eval_ds_for_trainer = full_eval_ds.select(range(max_eval_samples))
-            print(f"🔍 Validation truncated to {len(eval_ds_for_trainer)} samples for faster eval.")
+    # Prepare test dataset if available and different from validation
+    test_ds_for_eval = None
+    if test_ds is not None and val_ds is not None:
+        # We have both validation and test, so use test for final evaluation
+        test_ds_for_eval = filter_dataset_columns(test_ds, spec.keep_columns, always_keep=["duration"])
+
+    eval_ds_for_trainer = _truncate_eval_dataset(full_eval_ds, training_cfg.get("max_eval_samples"))
 
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     collator = spec.collator_builder(processor, dataset_cfg, label_names, target_sr)
@@ -397,6 +517,11 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         history_csv_path=history_csv_path,
         loss_plot_path=loss_plot_path,
         final_adapter_dir=final_adapter_dir,
+        config=config,
+        config_path=config_path,
+        metrics_dir=metrics_dir,
+        test_dataset=test_ds_for_eval,
+        test_split_name="test",
     )
 
 
@@ -408,38 +533,31 @@ def run_asr_task(config_path: Path) -> None:
 
     training_cfg = config.get("training", {})
     dataset_cfg = config.get("dataset", {})
-    artifacts_cfg = config.get("artifacts", {})
     metrics_cfg = config.get("metrics", {})
-    model_cfg = config.get("model", {})
-
-    model_path = PACKAGE_ROOT / model_cfg.get("path", "models/Qwen2.5-Omni-3B")
     artifact_dirs = get_asr_artifact_directories(PACKAGE_ROOT)
 
-    output_dir = ensure_dir(
-        artifact_dirs["adapters"] / artifacts_cfg.get("adapter_subdir", "qwen2_5_omni_lora_asr_10h")
+    # Setup common components
+    components = _setup_common_components(
+        config,
+        ASR_TASK_NAME,
+        artifact_dirs,
+        "qwen2_5_omni_lora_asr_10h",
+        "training_history.csv",
+        "loss_wer_plot.png",
     )
-    metrics_dir = ensure_dir(artifact_dirs["metrics"])
-
-    history_csv_path = metrics_dir / metrics_cfg.get("history_csv", "training_history.csv")
-    loss_plot_path = metrics_dir / metrics_cfg.get("loss_plot", "loss_wer_plot.png")
-    final_adapter_dir = output_dir / "final"
-
-    print("🔧 Loading model and processor...")
-    lora_config = None
-    if "lora" in model_cfg:
-        lora_config = create_lora_config_from_dict(model_cfg["lora"])
-        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
-    model, processor = load_qwen_model(model_path, lora_config=lora_config)
+    model = components["model"]
+    processor = components["processor"]
+    output_dir = components["output_dir"]
+    metrics_dir = components["metrics_dir"]
+    history_csv_path = components["history_csv_path"]
+    loss_plot_path = components["loss_plot_path"]
+    final_adapter_dir = components["final_adapter_dir"]
 
     dataset_seed = dataset_cfg.get("seed", seed)
-    dataset_cache_dir = dataset_cfg.get("cache_dir")
-    if dataset_cache_dir is not None:
-        dataset_cache_path = Path(dataset_cache_dir)
-        if not dataset_cache_path.is_absolute():
-            dataset_cache_path = artifact_dirs["base"] / dataset_cache_path
-    else:
-        dataset_cache_path = ensure_dir(artifact_dirs["datasets"])
+    dataset_cache_path = _resolve_dataset_cache_path(dataset_cfg, artifact_dirs)
 
+    # Load train, val, and optionally test splits
+    return_test = dataset_cfg.get("return_test_split", True)
     loader_kwargs = dict(
         train_hours=dataset_cfg.get("train_hours", 10.0),
         val_hours=dataset_cfg.get("val_hours", 1.0),
@@ -449,11 +567,23 @@ def run_asr_task(config_path: Path) -> None:
         cache_splits=dataset_cfg.get("cache_splits", True),
         force_rebuild=dataset_cfg.get("force_rebuild", False),
         return_full_validation=dataset_cfg.get("return_full_validation", False),
+        return_test_split=return_test,
+        test_split=dataset_cfg.get("test_split", "test.clean"),
+        test_hours=dataset_cfg.get("test_hours"),
     )
     train_val = load_librispeech_subset(**loader_kwargs)
-    if dataset_cfg.get("return_full_validation", False):
+
+    # Unpack based on what was returned
+    test_ds = None
+    if dataset_cfg.get("return_full_validation", False) and return_test:
+        train_ds, val_ds, raw_full_val_ds, test_ds = train_val
+        print(f"📏 Full validation set retained with {len(raw_full_val_ds)} samples.")
+    elif dataset_cfg.get("return_full_validation", False):
         train_ds, val_ds, raw_full_val_ds = train_val
         print(f"📏 Full validation set retained with {len(raw_full_val_ds)} samples.")
+    elif return_test:
+        train_ds, val_ds, test_ds = train_val
+        raw_full_val_ds = val_ds
     else:
         train_ds, val_ds = train_val
         raw_full_val_ds = val_ds
@@ -461,49 +591,21 @@ def run_asr_task(config_path: Path) -> None:
     max_duration_seconds = dataset_cfg.get("max_duration_seconds")
     if max_duration_seconds is not None:
         max_duration_seconds = float(max_duration_seconds)
-
-        def _keep_duration(example: dict, *, max_duration: float = max_duration_seconds) -> bool:
-            duration = example.get("duration") or 0.0
-            return float(duration) <= max_duration
-
-        train_before = len(train_ds)
-        train_ds = train_ds.filter(_keep_duration)
-        if len(train_ds) != train_before:
-            print(
-                f"⏱️ Filtered {train_before - len(train_ds)} training samples longer than"
-                f" {max_duration_seconds:.1f}s."
-            )
-
-        val_before = len(val_ds)
-        val_ds = val_ds.filter(_keep_duration)
-        if len(val_ds) != val_before:
-            print(
-                f"⏱️ Filtered {val_before - len(val_ds)} validation samples longer than"
-                f" {max_duration_seconds:.1f}s."
-            )
-
-        full_before = len(raw_full_val_ds)
-        raw_full_val_ds = raw_full_val_ds.filter(_keep_duration)
-        if len(raw_full_val_ds) != full_before:
-            print(
-                f"⏱️ Filtered {full_before - len(raw_full_val_ds)} full-eval samples longer than"
-                f" {max_duration_seconds:.1f}s."
-            )
+        train_ds = _filter_by_duration(train_ds, max_duration_seconds, "training")
+        val_ds = _filter_by_duration(val_ds, max_duration_seconds, "validation")
+        raw_full_val_ds = _filter_by_duration(raw_full_val_ds, max_duration_seconds, "full-eval")
+        if test_ds is not None:
+            test_ds = _filter_by_duration(test_ds, max_duration_seconds, "test")
 
     # Filter datasets to keep only necessary columns
     keep_columns = ["audio", "text", "duration"]
     train_ds = filter_dataset_columns(train_ds, keep_columns)
     val_ds = filter_dataset_columns(val_ds, keep_columns)
     full_val_ds = filter_dataset_columns(raw_full_val_ds, keep_columns)
+    if test_ds is not None:
+        test_ds = filter_dataset_columns(test_ds, keep_columns)
 
-    eval_val_ds = val_ds
-
-    max_eval_samples = training_cfg.get("max_eval_samples")
-    if max_eval_samples is not None:
-        max_eval_samples = int(max(0, max_eval_samples))
-        if 0 < max_eval_samples < len(val_ds):
-            eval_val_ds = val_ds.select(range(max_eval_samples))
-            print(f"🔍 Validation truncated to {len(eval_val_ds)} samples for faster eval.")
+    eval_val_ds = _truncate_eval_dataset(val_ds, training_cfg.get("max_eval_samples"))
 
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     collator = OmniASRCollator(processor=processor, sampling_rate=target_sr)
@@ -535,6 +637,7 @@ def run_asr_task(config_path: Path) -> None:
     training_args = build_training_arguments(train_config, output_dir=str(output_dir))
     early_stopping_kwargs = build_early_stopping_kwargs(train_config)
 
+    wer_normalization = metrics_cfg.get("wer_normalization", "default")
     trainer = CustomTrainer(
         model=model,
         args=training_args,
@@ -542,7 +645,7 @@ def run_asr_task(config_path: Path) -> None:
         eval_dataset=eval_val_ds,
         data_collator=collator,
         processing_class=processor,
-        compute_metrics=partial(compute_asr_metrics, processor=processor),
+        compute_metrics=partial(compute_asr_metrics, processor=processor, wer_normalization=wer_normalization),
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
         generation_kwargs=train_config.generation_kwargs,
     )
@@ -556,6 +659,11 @@ def run_asr_task(config_path: Path) -> None:
         history_csv_path=history_csv_path,
         loss_plot_path=loss_plot_path,
         final_adapter_dir=final_adapter_dir,
+        config=config,
+        config_path=config_path,
+        metrics_dir=metrics_dir,
+        test_dataset=test_ds,
+        test_split_name=dataset_cfg.get("test_split", "test.clean"),
     )
 
 
@@ -583,28 +691,24 @@ def run_speech_qa_task(config_path: Path) -> None:
 
     training_cfg = config.get('training', {})
     dataset_cfg = config.get('dataset', {})
-    artifacts_cfg = config.get('artifacts', {})
-    metrics_cfg = config.get('metrics', {})
-    model_cfg = config.get('model', {})
-
-    model_path = PACKAGE_ROOT / model_cfg.get('path', 'models/Qwen2.5-Omni-3B')
     artifact_dirs = get_speech_qa_artifact_directories(PACKAGE_ROOT)
 
-    output_dir = ensure_dir(
-        artifact_dirs['adapters'] / artifacts_cfg.get('adapter_subdir', 'qwen2_5_omni_lora_speech_qa')
+    # Setup common components
+    components = _setup_common_components(
+        config,
+        SPEECH_QA_TASK_NAME,
+        artifact_dirs,
+        'qwen2_5_omni_lora_speech_qa',
+        'speech_qa_training_history.csv',
+        'speech_qa_loss_metrics.png',
     )
-    metrics_dir = ensure_dir(artifact_dirs['metrics'])
-
-    history_csv_path = metrics_dir / metrics_cfg.get('history_csv', 'speech_qa_training_history.csv')
-    loss_plot_path = metrics_dir / metrics_cfg.get('loss_plot', 'speech_qa_loss_metrics.png')
-    final_adapter_dir = output_dir / 'final'
-
-    print('🔧 Loading model and processor...')
-    lora_config = None
-    if "lora" in model_cfg:
-        lora_config = create_lora_config_from_dict(model_cfg["lora"])
-        print(f"  Using LoRA config from YAML: r={model_cfg['lora'].get('r')}, alpha={model_cfg['lora'].get('alpha')}")
-    model, processor = load_qwen_model(model_path, lora_config=lora_config)
+    model = components["model"]
+    processor = components["processor"]
+    output_dir = components["output_dir"]
+    metrics_dir = components["metrics_dir"]
+    history_csv_path = components["history_csv_path"]
+    loss_plot_path = components["loss_plot_path"]
+    final_adapter_dir = components["final_adapter_dir"]
 
     dataset_seed = dataset_cfg.get('seed', seed)
     cache_path = _resolve_dataset_cache_path(dataset_cfg, artifact_dirs)
@@ -635,17 +739,14 @@ def run_speech_qa_task(config_path: Path) -> None:
     else:
         raise RuntimeError('Speech QA dataset requires a validation or test split.')
 
-    eval_ds_for_trainer = eval_ds_full
-    eval_answers_for_trainer = eval_answers_full
-
     max_eval_samples = training_cfg.get('max_eval_samples')
-    if max_eval_samples is not None:
-        max_eval_samples = int(max(0, max_eval_samples))
-        if 0 < max_eval_samples < len(eval_ds_full):
-            indices = list(range(max_eval_samples))
-            eval_ds_for_trainer = eval_ds_full.select(indices)
-            eval_answers_for_trainer = [eval_answers_full[idx] for idx in indices]
-            print(f'🔍 Validation truncated to {len(eval_ds_for_trainer)} samples for faster eval.')
+    eval_ds_for_trainer = _truncate_eval_dataset(eval_ds_full, max_eval_samples)
+
+    # Truncate answers to match truncated dataset
+    if max_eval_samples is not None and len(eval_ds_for_trainer) < len(eval_ds_full):
+        eval_answers_for_trainer = eval_answers_full[:len(eval_ds_for_trainer)]
+    else:
+        eval_answers_for_trainer = eval_answers_full
 
     target_sr = getattr(getattr(processor, 'feature_extractor', None), 'sampling_rate', 16000)
     collator = SpeechQACollator(
@@ -705,8 +806,23 @@ def run_speech_qa_task(config_path: Path) -> None:
         generation_kwargs=train_config.generation_kwargs,
     )
 
+    # Prepare test dataset and answers if available
+    test_ds_for_eval = None
+    test_answers = None
+    if test_ds is not None and val_ds is not None:
+        # We have both validation and test, so use test for final evaluation
+        test_ds_for_eval = test_ds
+        test_answers = answers_map.get('test', [])
+
     # Run training with evaluation (using full eval dataset)
     reference_store['values'] = eval_answers_full
+
+    # Wrap test dataset to update reference answers before evaluation
+    reference_store['values'] = eval_answers_full
+    test_ds_wrapped = None
+    if test_ds_for_eval is not None and test_answers:
+        test_ds_wrapped = _DatasetWithReferenceStore(test_ds_for_eval, reference_store, test_answers)
+
     run_training_with_evaluation(
         trainer,
         processor=processor,
@@ -715,22 +831,12 @@ def run_speech_qa_task(config_path: Path) -> None:
         history_csv_path=history_csv_path,
         loss_plot_path=loss_plot_path,
         final_adapter_dir=final_adapter_dir,
+        config=config,
+        config_path=config_path,
+        metrics_dir=metrics_dir,
+        test_dataset=test_ds_wrapped,
+        test_split_name="test",
     )
-
-    # Optional: additional test set evaluation
-    if test_ds is not None and test_ds is not eval_ds_full:
-        test_answers = answers_map.get('test', [])
-        if test_answers:
-            reference_store['values'] = test_answers
-            print(f'🧪 Running evaluation on test split ({len(test_ds)} samples)...')
-            test_metrics = trainer.evaluate(eval_dataset=test_ds)
-            if isinstance(test_metrics, dict) and test_metrics:
-                scalar_test_metrics = {
-                    key: value for key, value in test_metrics.items() if isinstance(value, (int, float))
-                }
-                if scalar_test_metrics:
-                    formatted = ', '.join(f"{k}={v:.4f}" for k, v in scalar_test_metrics.items())
-                    print(f'📦 Test metrics: {formatted}')
 
 
 def main() -> None:

@@ -6,6 +6,7 @@ import argparse
 import json
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any
 
@@ -61,7 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate base model or LoRA adapter on a task.")
     parser.add_argument("--task", default=ASR_TASK_NAME, help="Task name to evaluate.")
     parser.add_argument("--config", default=None, help="Optional config filename override.")
-    parser.add_argument("--adapter", default=None, help="Path to the adapter directory to evaluate.")
+    parser.add_argument("--adapter", default=None, help="Path to the adapter directory to evaluate (or task name for cross-task eval).")
+    parser.add_argument("--run-id", default=None, help="Specific run ID to evaluate (e.g., run_20251109_143022). Defaults to 'best'.")
     parser.add_argument(
         "--split",
         default="validation",
@@ -75,17 +77,82 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reuse cached base-model metrics when available.",
     )
+    parser.add_argument("--trained-on-task", default=None, help="Task the adapter was trained on (for cross-task eval).")
     return parser.parse_args()
 
 
-def _resolve_adapter_path(raw_path: str | None) -> Optional[Path]:
-    """Resolve adapter path relative to the package root."""
+def _resolve_adapter_path(
+    raw_path: str | None,
+    run_id: Optional[str] = None,
+    trained_on_task: Optional[str] = None,
+) -> tuple[Optional[Path], Optional[str]]:
+    """Resolve adapter path relative to the package root.
+
+    Args:
+        raw_path: Raw adapter path or task name
+        run_id: Specific run ID to use (defaults to "best")
+        trained_on_task: Task the adapter was trained on (for determining which artifacts dir)
+
+    Returns:
+        Tuple of (adapter_path, trained_on_task)
+    """
     if raw_path is None:
-        return None
+        return None, None
+
+    # If it looks like a simple task name (no path separators), treat it as cross-task eval
+    if "/" not in raw_path and "\\" not in raw_path:
+        # This is likely a task name for cross-task evaluation
+        from core.training.run_manager import RunManager
+
+        # Map task name to artifact directory
+        task_artifact_map = {
+            ASR_TASK_NAME: get_asr_artifact_directories,
+            EMOTION_TASK_NAME: get_emotion_artifact_directories,
+            SPEAKER_TASK_NAME: get_speaker_artifact_directories,
+            INTENT_TASK_NAME: get_intent_artifact_directories,
+            SPEECH_QA_TASK_NAME: get_speech_qa_artifact_directories,
+        }
+
+        if raw_path in task_artifact_map:
+            artifact_dirs = task_artifact_map[raw_path](PACKAGE_ROOT)
+            # Find the adapter directory (should be only one in adapters/)
+            adapters_dir = artifact_dirs["adapters"]
+
+            # Look for adapter subdirectories
+            adapter_subdirs = [d for d in adapters_dir.iterdir() if d.is_dir()]
+            if not adapter_subdirs:
+                raise ValueError(f"No adapter found for task '{raw_path}'")
+
+            # Use the first adapter directory found (or could make this configurable)
+            adapter_base = adapter_subdirs[0]
+
+            # Now resolve run_id
+            run_to_use = run_id or "best"
+            if run_to_use in ["best", "latest"]:
+                adapter_path = adapter_base / run_to_use
+                if not adapter_path.exists():
+                    raise ValueError(f"No '{run_to_use}' run found for {raw_path} adapter at {adapter_base}")
+            else:
+                # Specific run_id
+                adapter_path = adapter_base / "runs" / run_to_use
+                if not adapter_path.exists():
+                    raise ValueError(f"Run '{run_to_use}' not found for {raw_path} adapter")
+
+            return adapter_path.resolve(), raw_path
+
+    # Otherwise, treat as a path
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
         path = PACKAGE_ROOT / path
-    return path
+
+    # If run_id is specified, append it to the path
+    if run_id:
+        if run_id in ["best", "latest"]:
+            path = path / run_id
+        else:
+            path = path / "runs" / run_id
+
+    return path, trained_on_task
 
 
 def _get_model_path(config: Dict, task: str) -> Path:
@@ -166,10 +233,76 @@ def _print_metrics(label: str, task: str, split: str, metrics: Dict[str, Any]) -
             print(f"  {key}: {value}")
 
 
+def _save_metrics_to_locations(
+    metrics: Dict[str, Any],
+    adapter_path: Optional[Path],
+    metrics_dir: Path,
+    task: str,
+    split: str,
+    trained_on_task: Optional[str] = None,
+    show_summary: bool = True,
+) -> list[Path]:
+    """Save metrics to task-centric evaluation structure.
+
+    For cross-task evaluation (adapter from task X on task Y data):
+    - Saves to Y's eval folder as best_X_adapter.json
+    - Makes it easy to compare all adapters on the same test set
+
+    Args:
+        metrics: Evaluation metrics dictionary
+        adapter_path: Path to the adapter being evaluated (None for base model)
+        metrics_dir: Base metrics directory for the evaluated task
+        task: Task being evaluated on (e.g., "asr")
+        split: Dataset split (e.g., "test")
+        trained_on_task: Task the adapter was trained on (for cross-task eval)
+        show_summary: Whether to print save confirmations
+
+    Returns:
+        List of paths where metrics were saved
+    """
+    saved_paths = []
+
+    # Save to task-centric eval directory
+    eval_dir = ensure_dir(metrics_dir / "eval" / split)
+
+    # Determine filename based on what's being evaluated
+    if adapter_path is None:
+        # Base model evaluation
+        filename = "base_model.json"
+    elif trained_on_task is not None and trained_on_task != task:
+        # Cross-task evaluation: adapter from trained_on_task evaluated on task
+        filename = f"best_{trained_on_task}_adapter.json"
+    else:
+        # Same-task evaluation: task's own adapter
+        filename = f"best_{task}_adapter.json"
+
+    save_path = eval_dir / filename
+    with save_path.open("w") as handle:
+        json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
+    saved_paths.append(save_path)
+
+    if show_summary:
+        print(f"💾 Saved metrics to: {save_path}")
+
+    # Also save to adapter directory for reference (timestamped)
+    if adapter_path is not None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        adapter_metrics_path = adapter_path / f"{split}_metrics_{timestamp}.json"
+        with adapter_metrics_path.open("w") as handle:
+            json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
+        saved_paths.append(adapter_metrics_path)
+        if show_summary:
+            print(f"💾 Also saved to adapter directory: {adapter_metrics_path}")
+
+    return saved_paths
+
+
 def evaluate(
     task: str = ASR_TASK_NAME,
     config_name: Optional[str] = None,
     adapter: Optional[str] = None,
+    run_id: Optional[str] = None,
+    trained_on_task: Optional[str] = None,
     split: str = "validation",
     batch_size: Optional[int] = None,
     save_json: Optional[str] = None,
@@ -200,7 +333,12 @@ def evaluate(
     config = _prepare_dataset_cache(config, artifact_dirs)
 
     model_path = _get_model_path(config, task)
-    adapter_path = _resolve_adapter_path(adapter)
+    adapter_path, detected_trained_on_task = _resolve_adapter_path(adapter, run_id, trained_on_task)
+
+    # Use detected task if not explicitly provided
+    if detected_trained_on_task:
+        trained_on_task = detected_trained_on_task
+
     resolved_batch_size = _resolve_batch_size(
         argparse.Namespace(batch_size=batch_size),
         config,
@@ -259,6 +397,22 @@ def evaluate(
                 print(f"💾 Cached base metrics to {cache_path}")
 
     save_path: Optional[Path] = None
+    saved_paths: list[Path] = []
+
+    # Save metrics to task-centric evaluation structure
+    saved_paths = _save_metrics_to_locations(
+        metrics=metrics,
+        adapter_path=adapter_path,
+        metrics_dir=artifact_dirs["metrics"],
+        task=task,
+        split=split,
+        trained_on_task=trained_on_task,
+        show_summary=show_summary,
+    )
+    if saved_paths:
+        save_path = saved_paths[0]
+
+    # Handle custom save_json path if provided
     if save_json:
         save_path = Path(save_json).expanduser()
         if not save_path.is_absolute():
@@ -266,8 +420,9 @@ def evaluate(
         save_path.parent.mkdir(parents=True, exist_ok=True)
         with save_path.open("w") as handle:
             json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
+        saved_paths.append(save_path)
         if show_summary:
-            print(f"💾 Saved metrics to {save_path}")
+            print(f"💾 Saved metrics to custom path: {save_path}")
 
     target_label = "base model" if adapter_path is None else f"adapter@{adapter_path.name}"
     if show_summary:
@@ -289,6 +444,8 @@ def main() -> None:
         task=args.task,
         config_name=args.config,
         adapter=args.adapter,
+        run_id=args.run_id,
+        trained_on_task=args.trained_on_task,
         split=args.split,
         batch_size=args.batch_size,
         save_json=args.save_json,

@@ -165,7 +165,9 @@ def save_history_to_csv(
             metric_value = _to_float(value)
             if metric_value is None:
                 continue
-            record[key] = metric_value
+            # Normalize "loss" to "train_loss" for consistency
+            normalized_key = "train_loss" if key == "loss" else key
+            record[normalized_key] = metric_value
 
         return record
 
@@ -194,7 +196,7 @@ def save_history_to_csv(
         return []
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    field_priorities = ["step", "epoch", "loss", "eval_loss", "wer", "eval_wer", "learning_rate"]
+    field_priorities = ["step", "epoch", "train_loss", "eval_loss", "wer", "eval_wer", "learning_rate"]
     discovered_fields = {key for row in relevant_rows for key in row.keys()}
     ordered_fields = [field for field in field_priorities if field in discovered_fields]
     remaining_fields = sorted(discovered_fields - set(ordered_fields))

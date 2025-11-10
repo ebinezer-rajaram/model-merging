@@ -1,9 +1,9 @@
 """Shared metric helper functions."""
 
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Literal, Sequence
 
 import numpy as np
-from jiwer import wer
+from jiwer import wer, wer_default, wer_standardize
 
 
 def sanitize_token_array(array: Sequence[int], pad_id: int) -> List[int]:
@@ -38,6 +38,23 @@ def decode_tokens(batch: Sequence[int], tokenizer) -> str:
         return tokenizer.convert_tokens_to_string(token_strs)
 
 
-def compute_wer_from_texts(reference_texts: Iterable[str], predicted_texts: Iterable[str]) -> float:
-    """Compute WER score given reference and predicted texts."""
-    return wer(list(reference_texts), list(predicted_texts))
+def compute_wer_from_texts(
+    reference_texts: Iterable[str],
+    predicted_texts: Iterable[str],
+    normalization: Literal["default", "standardize"] = "default",
+) -> float:
+    """Compute WER score given reference and predicted texts.
+
+    Args:
+        reference_texts: Ground truth texts
+        predicted_texts: Model predicted texts
+        normalization: Normalization mode
+            - 'default': Minimal normalization (remove extra spaces, strip whitespace)
+            - 'standardize': Aggressive normalization (lowercase, remove punctuation,
+                           expand contractions, remove Kaldi non-words)
+
+    Returns:
+        Word error rate as a float
+    """
+    transformation = wer_standardize if normalization == "standardize" else wer_default
+    return wer(list(reference_texts), list(predicted_texts), truth_transform=transformation, hypothesis_transform=transformation)

@@ -231,18 +231,21 @@ def build_training_arguments(
     config: TrainingConfig,
     *,
     output_dir: str,
+    run_name: Optional[str] = None,
 ) -> TrainingArguments:
     """Build HuggingFace TrainingArguments from parsed config.
 
     Args:
         config: Parsed training configuration
         output_dir: Output directory for checkpoints
+        run_name: Optional run name for wandb logging
 
     Returns:
         TrainingArguments instance
     """
     return TrainingArguments(
         output_dir=output_dir,
+        run_name=run_name,
         per_device_train_batch_size=config.per_device_train_batch_size,
         per_device_eval_batch_size=config.per_device_eval_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,

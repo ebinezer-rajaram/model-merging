@@ -1,14 +1,33 @@
 """Task-specific metric computation for ASR."""
 
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 import numpy as np
 
 from core import compute_wer_from_texts, decode_tokens
 
 
-def compute_asr_metrics(eval_pred: Any, processor) -> Dict[str, float]:
-    """Compute word error rate for ASR evaluation."""
+def compute_asr_metrics(
+    eval_pred: Any,
+    processor,
+    wer_normalization: Literal["default", "standardize", "both"] = "default",
+) -> Dict[str, float]:
+    """Compute word error rate for ASR evaluation.
+
+    Args:
+        eval_pred: Evaluation predictions (preds, labels) from trainer
+        processor: Model processor with tokenizer
+        wer_normalization: WER normalization mode
+            - 'default': Minimal normalization (remove extra spaces, strip whitespace)
+            - 'standardize': Aggressive normalization (lowercase, remove punctuation,
+                           expand contractions, remove Kaldi non-words)
+            - 'both': Compute both metrics (returns wer_default and wer_standardize)
+
+    Returns:
+        Dictionary with WER metric(s):
+            - If 'default' or 'standardize': {"wer": <value>}
+            - If 'both': {"wer_default": <value>, "wer_standardize": <value>}
+    """
     preds, labels = eval_pred
     if isinstance(preds, tuple):
         preds = preds[0]
@@ -26,4 +45,10 @@ def compute_asr_metrics(eval_pred: Any, processor) -> Dict[str, float]:
     pred_texts = [decode_tokens(p, processor.tokenizer) for p in preds]
     label_texts = [decode_tokens(l, processor.tokenizer) for l in labels]
 
-    return {"wer": compute_wer_from_texts(label_texts, pred_texts)}
+    if wer_normalization == "both":
+        return {
+            "wer_default": compute_wer_from_texts(label_texts, pred_texts, normalization="default"),
+            "wer_standardize": compute_wer_from_texts(label_texts, pred_texts, normalization="standardize"),
+        }
+    else:
+        return {"wer": compute_wer_from_texts(label_texts, pred_texts, normalization=wer_normalization)}

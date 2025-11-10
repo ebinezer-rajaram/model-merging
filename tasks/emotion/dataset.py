@@ -127,6 +127,7 @@ def load_superb_emotion_dataset(
     max_train_samples: Optional[int] = None,
     max_validation_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
+    max_duration: Optional[float] = None,
     seed: int = 0,
     num_proc: Optional[int | str] = None,
     cache_dir: Optional[Path | str] = None,
@@ -140,6 +141,8 @@ def load_superb_emotion_dataset(
     validation_split: Optional[str] = "validation",
     test_split: Optional[str] = "test",
     stratify_by_column: Optional[str] = None,
+    revision: Optional[str] = None,
+    data_dir: Optional[str | Path] = None,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], List[str]]:
     """
     Load a speech emotion recognition dataset with optional sub-sampling.
@@ -151,7 +154,14 @@ def load_superb_emotion_dataset(
     max_validation_samples = _normalize_target_count("max_validation_samples", max_validation_samples)
     max_test_samples = _normalize_target_count("max_test_samples", max_test_samples)
 
-    dataset: DatasetDict = load_dataset(dataset_name, dataset_config)
+    # Handle local MELD dataset
+    if dataset_name == "local_meld":
+        from .meld_loader import load_meld_from_local
+        if data_dir is None:
+            data_dir = "data/meld"
+        dataset: DatasetDict = load_meld_from_local(data_dir=data_dir)
+    else:
+        dataset: DatasetDict = load_dataset(dataset_name, dataset_config, revision=revision)
 
     if label_column and label_column != "label":
         dataset = _rename_column(dataset, label_column, "label")
@@ -262,16 +272,43 @@ def load_superb_emotion_dataset(
     dataset, audio_column = _ensure_audio_column(dataset, preferred=preferred_audio_column)
 
     effective_num_proc = resolve_num_proc(num_proc)
-    map_kwargs = num_proc_map_kwargs(effective_num_proc)
-    duration_fn = partial(add_duration, audio_column=audio_column)
-    dataset = dataset.map(duration_fn, **map_kwargs)
-
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
+
+    # Cache the dataset with durations to avoid reprocessing every time
+    processed_cache_dir = cache_root / "processed" / f"{dataset_name}_{dataset_config}"
+
+    if processed_cache_dir.exists() and not force_rebuild:
+        # Load preprocessed dataset from cache
+        from datasets import load_from_disk
+        dataset = load_from_disk(str(processed_cache_dir))
+    else:
+        # Add duration and save to cache
+        map_kwargs = num_proc_map_kwargs(effective_num_proc)
+        duration_fn = partial(add_duration, audio_column=audio_column)
+        dataset = dataset.map(duration_fn, **map_kwargs)
+
+        # Save to disk for future runs
+        if cache_splits:
+            processed_cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            dataset.save_to_disk(str(processed_cache_dir))
+
+    # Filter out extremely long audio samples to prevent OOM
+    if max_duration is not None and max_duration > 0:
+        original_sizes = {name: len(split) for name, split in dataset.items()}
+        dataset = dataset.filter(lambda x: x.get("duration", 0) <= max_duration)
+        filtered_sizes = {name: len(split) for name, split in dataset.items()}
+        removed = {name: original_sizes[name] - filtered_sizes[name] for name in original_sizes}
+        if any(count > 0 for count in removed.values()):
+            removed_info = ", ".join(f"{name}={count}" for name, count in removed.items() if count > 0)
+            print(f"⚠️  Filtered out {removed_info} samples exceeding max_duration={max_duration}s")
+    # Include max_duration in cache key to invalidate cache when filtering changes
+    duration_key = "none" if max_duration is None else f"{int(max_duration)}s"
     cache_name = (
         f"{dataset_name}_{dataset_config}"
         f"_train_{_samples_key(max_train_samples)}"
         f"_val_{_samples_key(max_validation_samples)}"
         f"_test_{_samples_key(max_test_samples)}"
+        f"_maxdur_{duration_key}"
         f"_seed_{int(seed)}.json"
     )
     cache_path = cache_root / cache_name
@@ -378,15 +415,30 @@ class EmotionDataCollator:
         """Assemble the textual prompt for the model."""
         # Format class options for the prompt
         class_options = ", ".join(self.label_names)
+
+        # Previous prompt (commented out):
+        # base = (
+        #     f"{self.processor.audio_token}"
+        #     f"Listen carefully to the audio and identify the speaker's emotional state. "
+        #     f"Choose the most appropriate emotion from: {class_options}."
+        # )
+        # transcript = (transcript or "").strip()
+        # if transcript and self.include_transcript:
+        #     base += f"\n\nTranscript: \"{transcript}\"\n\nEmotion:"
+        # else:
+        #     base += "\n\nEmotion:"
+
+        # New prompt format (refined)
         base = (
-            f"{self.processor.audio_token}"
-            f"What is the speaker's emotion in the provided audio clip? Choose from: {class_options}."
+            f"{self.processor.audio_token}\n"
+            f"Determine the speaker's emotion based on the audio and transcript.\n"
         )
         transcript = (transcript or "").strip()
         if transcript and self.include_transcript:
-            base += f"\nTranscript: {transcript}\nEmotion:"
-        else:
-            base += "\nEmotion:"
+            base += f"\nTranscript: \"{transcript}\"\n"
+        base += f"\nPossible emotions: {class_options}\n"
+        base += f"\nEmotion:"
+
         return base
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:

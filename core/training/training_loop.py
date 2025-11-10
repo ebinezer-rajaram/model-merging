@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +12,7 @@ from datasets import Dataset
 from core.data.io_utils import ensure_dir
 from core.evaluation.plotting import plot_loss_and_wer
 
+from .run_manager import RunManager
 from .trainer import CustomTrainer, save_artifacts, save_history_to_csv
 
 
@@ -35,30 +38,46 @@ def build_history_record(metrics: Dict[str, Any], *, step: int) -> Optional[Dict
         except (TypeError, ValueError):
             return None
 
-    # Extract common metrics with backward compatibility
-    loss = _to_float(metrics.get("loss"))
-    eval_loss = _to_float(metrics.get("eval_loss"))
-    learning_rate = _to_float(metrics.get("learning_rate"))
+    def _is_metric_key(key: str) -> bool:
+        """Check if a key represents a metric (same logic as save_history_to_csv)."""
+        if key in {"step", "epoch"}:
+            return False
+        if key in {"loss", "learning_rate"}:
+            return True
+        if key.startswith(("eval_", "train_", "test_")):
+            excluded_suffixes = ("runtime", "samples_per_second", "steps_per_second")
+            if any(key.endswith(suffix) for suffix in excluded_suffixes):
+                return False
+            return True
+        metric_tokens = ("loss", "accuracy", "precision", "recall", "f1", "wer", "rate", "perplexity")
+        return any(token in key for token in metric_tokens)
 
-    # Extract eval metric (could be WER, F1, accuracy, etc.)
-    # Priority: eval_wer > wer > eval_f1 > f1 > eval_macro_f1 > macro_f1 > eval_accuracy > accuracy
-    eval_metric = None
-    for key in ["eval_wer", "wer", "eval_f1", "f1", "eval_macro_f1", "macro_f1", "eval_accuracy", "accuracy"]:
-        if key in metrics:
-            eval_metric = _to_float(metrics.get(key))
-            if eval_metric is not None:
-                break
+    # Build record with step
+    record: Dict[str, Any] = {"step": int(step)}
 
-    if all(value is None for value in (loss, eval_loss, eval_metric, learning_rate)):
+    # Add epoch if present
+    epoch_value = metrics.get("epoch")
+    if epoch_value is not None:
+        epoch_float = _to_float(epoch_value)
+        if epoch_float is not None:
+            record["epoch"] = epoch_float
+
+    # Extract all numeric metrics dynamically
+    has_metric = False
+    for key, value in metrics.items():
+        if not _is_metric_key(key):
+            continue
+        metric_value = _to_float(value)
+        if metric_value is None:
+            continue
+        record[key] = metric_value
+        has_metric = True
+
+    # Return None if no valid metrics found
+    if not has_metric:
         return None
 
-    return {
-        "step": int(step),
-        "loss": loss,
-        "eval_loss": eval_loss,
-        "wer": eval_metric,  # Column name kept as "wer" for backward compatibility with plotting
-        "learning_rate": learning_rate,
-    }
+    return record
 
 
 def run_training_with_evaluation(
@@ -70,6 +89,11 @@ def run_training_with_evaluation(
     history_csv_path: Path,
     loss_plot_path: Optional[Path],
     final_adapter_dir: Path,
+    config: Optional[Dict[str, Any]] = None,
+    config_path: Optional[Path] = None,
+    metrics_dir: Optional[Path] = None,
+    test_dataset: Optional[Dataset] = None,
+    test_split_name: str = "test",
 ) -> None:
     """Execute training loop with optional initial eval, training, final eval, and artifact saving.
 
@@ -81,6 +105,11 @@ def run_training_with_evaluation(
         history_csv_path: Path to save training history CSV
         loss_plot_path: Optional path to save loss plot
         final_adapter_dir: Directory to save final adapter
+        config: Full configuration dictionary (for run registration)
+        config_path: Path to config file (for copying to run directory)
+        metrics_dir: Base metrics directory (for copying best/latest metrics)
+        test_dataset: Optional test dataset for final evaluation
+        test_split_name: Name of the test split for logging (default: "test")
     """
     seed_history_rows: List[Dict[str, Any]] = []
 
@@ -97,6 +126,19 @@ def run_training_with_evaluation(
             if scalar_metrics:
                 formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_metrics.items())
                 print(f"📊 Initial metrics: {formatted}")
+
+            # Log initial metrics to wandb if available
+            if "wandb" in trainer.args.report_to:
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        # Log initial metrics with step 0
+                        wandb_metrics = {k: v for k, v in scalar_metrics.items() if isinstance(v, (int, float))}
+                        wandb.log(wandb_metrics, step=0)
+                        print(f"📊 Logged initial metrics to wandb")
+                except ImportError:
+                    pass
+
             record = build_history_record(initial_metrics, step=0)
             if record is not None:
                 seed_history_rows.append(record)
@@ -105,8 +147,8 @@ def run_training_with_evaluation(
     print("🚀 Starting LoRA fine-tuning...")
     trainer.train()
 
-    # Final evaluation on full dataset
-    print(f"🎯 Running evaluation on held-out split ({len(full_eval_dataset)} samples)...")
+    # Final evaluation on full validation dataset
+    print(f"🎯 Running evaluation on validation split ({len(full_eval_dataset)} samples)...")
     final_eval_metrics = trainer.evaluate(eval_dataset=full_eval_dataset)
     if isinstance(final_eval_metrics, dict) and final_eval_metrics:
         scalar_final_metrics = {
@@ -114,18 +156,212 @@ def run_training_with_evaluation(
         }
         if scalar_final_metrics:
             formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_final_metrics.items())
-            print(f"🏁 Final evaluation metrics: {formatted}")
+            print(f"🏁 Final validation metrics: {formatted}")
 
-    # Save training history
-    history_rows = save_history_to_csv(trainer, history_csv_path, extra_rows=seed_history_rows)
-    if history_rows and loss_plot_path:
-        plot_loss_and_wer(history_csv_path, loss_plot_path)
+    # IMPORTANT: Capture training history NOW, before test evaluation
+    # This ensures test metrics never contaminate the training history CSV/plots
+    # We make a deep copy of the log_history to freeze the state before test eval
+    import copy
+    training_log_history = copy.deepcopy(getattr(trainer.state, "log_history", []))
 
-    # Save final artifacts
-    print("💾 Saving LoRA adapter and processor...")
-    ensure_dir(final_adapter_dir)
-    save_artifacts(trainer, processor, final_adapter_dir)
-    print(f"✅ Done: {final_adapter_dir}")
+    # Optional test set evaluation (only if test dataset provided)
+    # IMPORTANT: Test metrics should NOT be added to training history
+    # We evaluate test set AFTER capturing training history to keep them separate
+    test_metrics: Optional[Dict[str, Any]] = None
+    if test_dataset is not None:
+        print(f"🧪 Running evaluation on {test_split_name} split ({len(test_dataset)} samples)...")
+        # Evaluate test set - these metrics are captured separately and saved to test_metrics.json
+        test_metrics = trainer.evaluate(eval_dataset=test_dataset)
+        if isinstance(test_metrics, dict) and test_metrics:
+            scalar_test_metrics = {
+                key: value for key, value in test_metrics.items() if isinstance(value, (int, float))
+            }
+            if scalar_test_metrics:
+                formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_test_metrics.items())
+                print(f"📦 Test set metrics: {formatted}")
+
+    # Restore the training history before saving (excluding test metrics)
+    trainer.state.log_history = training_log_history
+
+    # Determine if we're using the new run management system
+    adapter_dir = final_adapter_dir.parent  # This is the adapter base directory
+    use_run_manager = config is not None and trainer.args.metric_for_best_model is not None
+
+    if use_run_manager:
+        # New run management system
+        metric_for_ranking = trainer.args.metric_for_best_model
+        greater_is_better = getattr(trainer.args, "greater_is_better", False)
+
+        # Create run manager
+        run_manager = RunManager(
+            adapter_dir=adapter_dir,
+            metric_for_ranking=metric_for_ranking,
+            greater_is_better=greater_is_better,
+        )
+
+        # Create new run directory
+        run_dir = run_manager.create_run_directory()
+        print(f"📁 Created run directory: {run_dir.name}")
+
+        # Save training history to run directory (only contains validation metrics)
+        run_history_csv = run_dir / "training_history.csv"
+        history_rows = save_history_to_csv(trainer, run_history_csv, extra_rows=seed_history_rows)
+        if history_rows and loss_plot_path:
+            # Also save plot to run directory (only validation metrics)
+            run_plot_path = run_dir / loss_plot_path.name
+            plot_loss_and_wer(run_history_csv, run_plot_path)
+
+        # Save adapter artifacts to run directory
+        print("💾 Saving LoRA adapter and processor...")
+        save_artifacts(trainer, processor, run_dir)
+
+        # Use test metrics for ranking if available, otherwise validation metrics
+        metrics_for_ranking = test_metrics if test_metrics is not None else final_eval_metrics
+
+        # Register the run (saves config, metrics for ranking, updates registry)
+        run_manager.register_run(
+            run_dir=run_dir,
+            metrics=metrics_for_ranking,
+            config=config,
+            config_path=config_path,
+        )
+
+        # Save both validation and test metrics separately
+        # These are saved independently and NOT included in training_history.csv
+        import json
+
+        # Save validation metrics (final eval on full validation set)
+        validation_metrics_path = run_dir / "validation_metrics.json"
+        with validation_metrics_path.open("w") as f:
+            json.dump(final_eval_metrics, f, indent=2)
+
+        # Save test metrics if available (separate from training history)
+        if test_metrics is not None:
+            test_metrics_path = run_dir / "test_metrics.json"
+            with test_metrics_path.open("w") as f:
+                json.dump(test_metrics, f, indent=2)
+            print(f"💾 Saved validation and test metrics to run directory (ranked by {'test' if test_metrics is not None else 'validation'} set)")
+
+        # Copy metrics to metrics/best and metrics/latest directories
+        # This includes validation, test, history CSV, and plots
+        if metrics_dir is not None:
+            _copy_metrics_to_subdirs(
+                run_manager,
+                metrics_dir,
+                history_csv_path,
+                loss_plot_path,
+                has_test_metrics=(test_metrics is not None),
+            )
+
+        # Clean up intermediate checkpoints
+        _cleanup_checkpoints(adapter_dir)
+
+        print(f"✅ Done: {run_dir.name} (registered and ranked)")
+    else:
+        # Legacy system (fallback)
+        history_rows = save_history_to_csv(trainer, history_csv_path, extra_rows=seed_history_rows)
+        if history_rows and loss_plot_path:
+            plot_loss_and_wer(history_csv_path, loss_plot_path)
+
+        print("💾 Saving LoRA adapter and processor...")
+        ensure_dir(final_adapter_dir)
+        save_artifacts(trainer, processor, final_adapter_dir)
+        print(f"✅ Done: {final_adapter_dir}")
+
+
+def _copy_metrics_to_subdirs(
+    run_manager: RunManager,
+    metrics_dir: Path,
+    history_csv_path: Path,
+    loss_plot_path: Optional[Path],
+    has_test_metrics: bool = False,
+) -> None:
+    """Copy metrics from best and latest runs to metrics/best and metrics/latest directories.
+
+    Args:
+        run_manager: RunManager instance
+        metrics_dir: Base metrics directory
+        history_csv_path: Path to training history CSV
+        loss_plot_path: Optional path to loss plot
+        has_test_metrics: Whether test metrics were generated
+    """
+    best_run_path = run_manager.get_best_run_path()
+    latest_run_path = run_manager.get_latest_run_path()
+
+    # Copy best run metrics
+    if best_run_path:
+        best_metrics_dir = ensure_dir(metrics_dir / "best")
+        _copy_run_metrics(
+            best_run_path,
+            best_metrics_dir,
+            history_csv_path.name,
+            loss_plot_path.name if loss_plot_path else None,
+            has_test_metrics=has_test_metrics,
+        )
+
+    # Copy latest run metrics
+    if latest_run_path:
+        latest_metrics_dir = ensure_dir(metrics_dir / "latest")
+        _copy_run_metrics(
+            latest_run_path,
+            latest_metrics_dir,
+            history_csv_path.name,
+            loss_plot_path.name if loss_plot_path else None,
+            has_test_metrics=has_test_metrics,
+        )
+
+
+def _copy_run_metrics(
+    run_dir: Path,
+    dest_dir: Path,
+    history_csv_name: str,
+    loss_plot_name: Optional[str],
+    has_test_metrics: bool = False,
+) -> None:
+    """Copy training history, plots, and metrics from run directory to destination.
+
+    Args:
+        run_dir: Source run directory
+        dest_dir: Destination directory (e.g., metrics/best or metrics/latest)
+        history_csv_name: Name for the training history CSV
+        loss_plot_name: Optional name for the loss plot
+        has_test_metrics: Whether to copy test metrics
+    """
+    # Copy training history CSV (validation metrics only)
+    src_csv = run_dir / "training_history.csv"
+    if src_csv.exists():
+        dest_csv = dest_dir / history_csv_name
+        shutil.copy(src_csv, dest_csv)
+
+    # Copy loss plot (validation metrics only)
+    if loss_plot_name:
+        # Try to find the plot in the run directory
+        for item in run_dir.iterdir():
+            if item.suffix == ".png" and "plot" in item.name.lower():
+                dest_plot = dest_dir / loss_plot_name
+                shutil.copy(item, dest_plot)
+                break
+
+    # Copy validation metrics JSON
+    src_validation_metrics = run_dir / "validation_metrics.json"
+    if src_validation_metrics.exists():
+        dest_validation_metrics = dest_dir / "validation_metrics.json"
+        shutil.copy(src_validation_metrics, dest_validation_metrics)
+
+    # Copy test metrics JSON if available
+    if has_test_metrics:
+        src_test_metrics = run_dir / "test_metrics.json"
+        if src_test_metrics.exists():
+            dest_test_metrics = dest_dir / "test_metrics.json"
+            shutil.copy(src_test_metrics, dest_test_metrics)
+
+
+def _cleanup_checkpoints(adapter_dir: Path) -> None:
+    """Remove intermediate checkpoint directories after training completes."""
+    for item in adapter_dir.iterdir():
+        if item.is_dir() and item.name.startswith("checkpoint-"):
+            shutil.rmtree(item)
+            print(f"🗑️  Removed checkpoint: {item.name}")
 
 
 __all__ = [

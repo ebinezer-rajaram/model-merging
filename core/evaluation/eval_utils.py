@@ -35,6 +35,8 @@ CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "validation_split",
     "test_split",
     "stratify_by_column",
+    "revision",
+    "data_dir",
 )
 
 SPEAKER_EXTRA_EVAL_KEYS: Tuple[str, ...] = (
@@ -352,6 +354,12 @@ def _build_generic_eval_setup(
     metrics_kwargs = {"processor": processor, **task_config.metrics_params}
     if label_names is not None and "label_names" not in metrics_kwargs:
         metrics_kwargs["label_names"] = list(label_names or [])
+
+    # Add config-specific metric parameters (e.g., wer_normalization for ASR)
+    metrics_cfg = cfg.get("metrics", {})
+    for key in ("wer_normalization",):
+        if key in metrics_cfg:
+            metrics_kwargs[key] = metrics_cfg[key]
 
     # Handle Speech QA special case with answers_map
     if answers_map is not None:

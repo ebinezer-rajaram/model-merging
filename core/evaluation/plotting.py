@@ -104,61 +104,56 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
 
     current_ax_idx = 0
 
-    def _plot_series(ax, series_dict, ylabel: str):
+    def _plot_series(ax, series_dict, ylabel: str, is_wer: bool = False):
         """Plot a set of metrics on the given axis."""
         plotted = False
-        # Separate train and eval metrics
-        train_metrics = {k: v for k, v in series_dict.items() if k.startswith("train_")}
-        eval_metrics = {k: v for k, v in series_dict.items() if k.startswith("eval_")}
+        all_y_values = []  # Collect all y values for custom scaling
 
         colors = plt.cm.tab10.colors
         color_idx = 0
 
-        for name, values in sorted(train_metrics.items()):
+        # Plot all metrics in sorted order, each with its own color
+        for name, values in sorted(series_dict.items()):
             points = [(s, v) for s, v in zip(steps, values) if s is not None and v is not None]
             if not points:
                 continue
             xs, ys = zip(*points)
-            label = name.replace("train_", "").replace("_", " ").title()
-            ax.plot(xs, ys, label=f"Train {label}", marker='o', markersize=3,
-                   linewidth=2, color=colors[color_idx % len(colors)], alpha=0.8)
-            plotted = True
+            all_y_values.extend(ys)
 
-            # Plot corresponding eval metric if it exists
-            eval_name = name.replace("train_", "eval_")
-            if eval_name in eval_metrics:
-                eval_values = eval_metrics[eval_name]
-                eval_points = [(s, v) for s, v in zip(steps, eval_values) if s is not None and v is not None]
-                if eval_points:
-                    eval_xs, eval_ys = zip(*eval_points)
-                    ax.plot(eval_xs, eval_ys, label=f"Eval {label}", marker='s', markersize=4,
-                           linewidth=2, color=colors[color_idx % len(colors)], linestyle='--', alpha=0.8)
+            # Create clean label
+            if name.startswith("train_"):
+                label = "Train " + name.replace("train_", "").replace("_", " ").title()
+            elif name.startswith("eval_"):
+                label = "Eval " + name.replace("eval_", "").replace("_", " ").title()
+            else:
+                label = name.replace("_", " ").title()
 
-            color_idx += 1
-
-        # Plot eval-only metrics (no corresponding train metric)
-        for name, values in sorted(eval_metrics.items()):
-            train_name = name.replace("eval_", "train_")
-            if train_name in train_metrics:
-                continue  # Already plotted with its train counterpart
-
-            points = [(s, v) for s, v in zip(steps, values) if s is not None and v is not None]
-            if not points:
-                continue
-            xs, ys = zip(*points)
-            label = name.replace("eval_", "").replace("_", " ").title()
-            ax.plot(xs, ys, label=f"Eval {label}", marker='s', markersize=4,
-                   linewidth=2, color=colors[color_idx % len(colors)], linestyle='--', alpha=0.8)
+            ax.plot(xs, ys, label=label, linewidth=2,
+                   color=colors[color_idx % len(colors)], alpha=0.9)
             plotted = True
             color_idx += 1
 
         if plotted:
             ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
             ax.set_xlabel("Training Step", fontsize=11, fontweight='bold')
-            ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.7)
+
+            # Enhanced grid - major and minor
+            ax.grid(True, which='major', alpha=0.4, linestyle='-', linewidth=0.8, color='gray')
+            ax.grid(True, which='minor', alpha=0.2, linestyle=':', linewidth=0.5, color='gray')
+            ax.minorticks_on()
+
             ax.legend(loc="best", framealpha=0.95, fontsize=9)
-            # Set smart y-axis limits with some padding
-            ax.margins(y=0.1)
+
+            # Custom y-axis scaling for WER plots - add/subtract 20% of value for better visibility
+            if is_wer and all_y_values:
+                y_min, y_max = min(all_y_values), max(all_y_values)
+                # Add 20% to max, subtract 20% from min
+                y_min_scaled = y_min - (y_min * 0.20)
+                y_max_scaled = y_max + (y_max * 0.20)
+                ax.set_ylim(y_min_scaled, y_max_scaled)
+            else:
+                # Default padding for non-WER plots
+                ax.margins(y=0.1)
 
         return plotted
 
@@ -175,18 +170,24 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
 
         if any("wer" in name.lower() for name in metric_names):
             ylabel = "WER"
+            is_wer = True
         elif any("exact_match" in name.lower() for name in metric_names):
             ylabel = "Score"
+            is_wer = False
         elif any("accuracy" in name.lower() for name in metric_names) and any("f1" in name.lower() for name in metric_names):
             ylabel = "Accuracy / F1"
+            is_wer = False
         elif any("accuracy" in name.lower() for name in metric_names):
             ylabel = "Accuracy"
+            is_wer = False
         elif any("f1" in name.lower() for name in metric_names):
             ylabel = "F1 Score"
+            is_wer = False
         else:
             ylabel = "Metric Value"
+            is_wer = False
 
-        if _plot_series(axes[current_ax_idx], task_metrics, ylabel):
+        if _plot_series(axes[current_ax_idx], task_metrics, ylabel, is_wer=is_wer):
             axes[current_ax_idx].set_title("Task Metrics", fontsize=12, fontweight='bold', pad=10)
 
     plt.suptitle("Training Progress", fontsize=14, fontweight='bold', y=0.995)

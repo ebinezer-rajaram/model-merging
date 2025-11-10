@@ -62,25 +62,32 @@ def add_duration(
     target_field: str = "duration",
 ) -> Dict[str, Any]:
     """Attach utterance duration (in seconds) using the provided audio column."""
-    audio = batch.get(audio_column)
-    if isinstance(audio, dict):
-        array = audio.get("array")
-        sampling_rate = audio.get("sampling_rate")
-    else:
-        array = getattr(audio, "array", None)
-        sampling_rate = getattr(audio, "sampling_rate", None)
+    try:
+        audio = batch.get(audio_column)
 
-    if array is None or sampling_rate in (None, 0):
+        # Handle AudioDecoder objects (from torchcodec)
+        if hasattr(audio, "metadata") and hasattr(audio.metadata, "duration_seconds_from_header"):
+            batch[target_field] = float(audio.metadata.duration_seconds_from_header)
+            return batch
+
+        if isinstance(audio, dict):
+            array = audio.get("array")
+            sampling_rate = audio.get("sampling_rate")
+        else:
+            array = getattr(audio, "array", None)
+            sampling_rate = getattr(audio, "sampling_rate", None)
+
+        if array is None or sampling_rate in (None, 0):
+            batch[target_field] = 0.0
+            return batch
+
+        length = len(array)
+        batch[target_field] = float(length) / float(sampling_rate) if sampling_rate else 0.0
+        return batch
+    except (TypeError, RuntimeError, Exception):
+        # Handle corrupted files, decoding errors, or other issues
         batch[target_field] = 0.0
         return batch
-
-    try:
-        length = len(array)
-    except TypeError:
-        length = getattr(array, "shape", (0,))[0]
-
-    batch[target_field] = float(length) / float(sampling_rate) if sampling_rate else 0.0
-    return batch
 
 
 def hours_to_seconds(hours: float | int | None) -> float:
@@ -150,7 +157,14 @@ def compute_split_hours(
     """Compute total duration (in hours) for a subset of dataset indices."""
     if not indices or duration_field not in dataset.column_names:
         return 0.0
-    total_seconds = sum(float(dataset[duration_field][i]) for i in indices)
+    total_seconds = 0.0
+    for i in indices:
+        try:
+            duration = float(dataset[duration_field][i])
+            total_seconds += duration
+        except (RuntimeError, Exception):
+            # Skip corrupted files that can't be accessed
+            continue
     return total_seconds / 3600.0
 
 
@@ -169,32 +183,42 @@ def build_manifest(
         return manifest
 
     field_set = list(fields or [])
+    skipped_count = 0
     for position, idx in enumerate(indices):
-        example = ds[int(idx)]
-        if not isinstance(example, dict):
-            raise TypeError(
-                f"Expected dataset row to be a mapping, received {type(example)!r}"
-            )
+        try:
+            example = ds[int(idx)]
+            if not isinstance(example, dict):
+                raise TypeError(
+                    f"Expected dataset row to be a mapping, received {type(example)!r}"
+                )
 
-        entry: Dict[str, Any] = {}
-        if include_index:
-            entry["index"] = int(idx)
-            entry["order"] = position
+            entry: Dict[str, Any] = {}
+            if include_index:
+                entry["index"] = int(idx)
+                entry["order"] = position
 
-        for field in field_set:
-            entry[field] = example.get(field)
+            for field in field_set:
+                entry[field] = example.get(field)
 
-        if duration_field in example and example[duration_field] is not None:
-            entry[duration_field] = float(example[duration_field])
+            if duration_field in example and example[duration_field] is not None:
+                entry[duration_field] = float(example[duration_field])
 
-        audio_info = example.get(audio_column) if audio_column else None
-        if audio_info is not None:
-            if isinstance(audio_info, dict):
-                entry.setdefault("audio_path", audio_info.get("path"))
-            else:
-                entry.setdefault("audio_path", getattr(audio_info, "path", None))
+            audio_info = example.get(audio_column) if audio_column else None
+            if audio_info is not None:
+                if isinstance(audio_info, dict):
+                    entry.setdefault("audio_path", audio_info.get("path"))
+                else:
+                    entry.setdefault("audio_path", getattr(audio_info, "path", None))
 
-        manifest.append(entry)
+            manifest.append(entry)
+        except (RuntimeError, Exception):
+            # Skip corrupted audio files that can't be decoded
+            skipped_count += 1
+            continue
+
+    if skipped_count > 0:
+        print(f"  Skipped {skipped_count} corrupted files during manifest building")
+
     return manifest
 
 
