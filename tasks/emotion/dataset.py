@@ -456,12 +456,18 @@ def load_superb_emotion_dataset(
 
 @dataclass
 class EmotionDataCollator:
-    """Prepare batches for emotion recognition fine-tuning."""
+    """Prepare batches for emotion recognition fine-tuning.
+
+    Supports two modes:
+    - train: Uses chat template with both user message (audio + instruction) and assistant response (ground truth)
+    - eval: Uses chat template with only user message (audio + instruction) and add_generation_prompt=True
+    """
 
     processor: Any
     sampling_rate: int
     label_names: Sequence[str]
     include_transcript: bool = True
+    mode: str = "train"  # "train" or "eval"
 
     def _label_to_text(self, value: Any) -> str:
         if value is None:
@@ -474,25 +480,43 @@ class EmotionDataCollator:
             return str(self.label_names[index])
         return str(index)
 
-    def _build_prompt(self, transcript: str) -> str:
-        """Assemble the textual prompt for the model."""
+    def _build_instruction(self, transcript: str) -> str:
+        """Build the instruction text for the user message."""
         # Format class options for the prompt
         class_options = ", ".join(self.label_names)
 
         # Optimized prompt (based on prompt comparison results)
         # This format performed best in zero-shot evaluation (51.5% accuracy, 0.267 F1)
-        base = (
-            f"{self.processor.audio_token}"
+        instruction = (
             f"Listen carefully to the audio and identify the speaker's emotional state. "
             f"Choose the most appropriate emotion from: {class_options}."
         )
         transcript = (transcript or "").strip()
         if transcript and self.include_transcript:
-            base += f"\n\nTranscript: \"{transcript}\"\n\nEmotion:"
-        else:
-            base += "\n\nEmotion:"
+            instruction += f"\n\nTranscript: \"{transcript}\""
 
-        return base
+        return instruction
+
+    # OLD PROMPT METHOD (kept as backup):
+    # def _build_prompt(self, transcript: str) -> str:
+    #     """Assemble the textual prompt for the model."""
+    #     # Format class options for the prompt
+    #     class_options = ", ".join(self.label_names)
+    #
+    #     # Optimized prompt (based on prompt comparison results)
+    #     # This format performed best in zero-shot evaluation (51.5% accuracy, 0.267 F1)
+    #     base = (
+    #         f"{self.processor.audio_token}"
+    #         f"Listen carefully to the audio and identify the speaker's emotional state. "
+    #         f"Choose the most appropriate emotion from: {class_options}."
+    #     )
+    #     transcript = (transcript or "").strip()
+    #     if transcript and self.include_transcript:
+    #         base += f"\n\nTranscript: \"{transcript}\"\n\nEmotion:"
+    #     else:
+    #         base += "\n\nEmotion:"
+    #
+    #     return base
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Convert dataset rows into model-ready tensors."""
@@ -504,56 +528,94 @@ class EmotionDataCollator:
         if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
             tokenizer.padding_side = "left"
 
-        prompts = [self._build_prompt(text) for text in transcripts]
-        full_texts = [
-            f"{prompt} {label}".strip()
-            for prompt, label in zip(prompts, label_strings)
-        ]
+        # Build prompts using chat template format (matching ASR approach)
+        prompts = []
+        for text, label in zip(transcripts, label_strings):
+            instruction = self._build_instruction(text)
+
+            if self.mode == "train":
+                # Training: include both user message and assistant response with ground truth
+                conversation = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio", "audio_url": None},
+                            {"type": "text", "text": instruction}
+                        ]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": label}
+                        ]
+                    }
+                ]
+                prompt = self.processor.apply_chat_template(
+                    conversation,
+                    add_generation_prompt=False,
+                    tokenize=False
+                )
+            else:
+                # Evaluation: only user message, no ground truth
+                conversation = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio", "audio_url": None},
+                            {"type": "text", "text": instruction}
+                        ]
+                    }
+                ]
+                prompt = self.processor.apply_chat_template(
+                    conversation,
+                    add_generation_prompt=True,
+                    tokenize=False
+                )
+            prompts.append(prompt)
 
         inputs = self.processor(
             audio=audio_arrays,
             sampling_rate=self.sampling_rate,
-            text=full_texts,
+            text=prompts,
             return_tensors="pt",
             padding=True,
         )
 
         labels = inputs["input_ids"].clone()
         pad_id = self.processor.tokenizer.pad_token_id
-        if pad_id is not None:
-            labels = labels.masked_fill(labels == pad_id, -100)
-
         audio_token_id = self.processor.tokenizer.convert_tokens_to_ids(
             self.processor.audio_token
         )
-        if audio_token_id is not None:
-            labels = labels.masked_fill(labels == audio_token_id, -100)
 
-        prompt_token_ids = self.processor.tokenizer(
-            prompts,
-            add_special_tokens=False,
-        )["input_ids"]
+        # Mask padding and audio tokens
+        labels = labels.masked_fill(labels == pad_id, -100)
+        labels = labels.masked_fill(labels == audio_token_id, -100)
 
-        for row_idx, tokens in enumerate(prompt_token_ids):
-            prompt_tokens = list(tokens or [])
-            if audio_token_id is not None:
-                prompt_tokens = [tok for tok in prompt_tokens if tok != audio_token_id]
-            prompt_len = len(prompt_tokens)
-            if prompt_len == 0:
-                continue
+        # Mask everything except the assistant's emotion response
+        if self.mode == "train":
+            for i, label in enumerate(label_strings):
+                # Tokenize the ground truth emotion label to identify it in the full sequence
+                label_tokens = tokenizer.encode(label, add_special_tokens=False)
 
-            sequence = inputs["input_ids"][row_idx].tolist()
-            start_idx = None
-            limit = len(sequence) - prompt_len + 1
-            for idx in range(max(limit, 0)):
-                if sequence[idx : idx + prompt_len] == prompt_tokens:
-                    start_idx = idx
-                    break
+                # Find where the label appears in the input_ids
+                input_ids = inputs["input_ids"][i]
+                label_length = len(label_tokens)
 
-            if start_idx is None:
-                labels[row_idx, :prompt_len] = -100
-            else:
-                labels[row_idx, start_idx : start_idx + prompt_len] = -100
+                # Search for the label tokens in the sequence
+                found = False
+                for j in range(len(input_ids) - label_length + 1):
+                    if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
+                        # Mask everything before the label
+                        labels[i, :j] = -100
+                        found = True
+                        break
+
+                # Fallback: mask based on sequence structure
+                if not found:
+                    non_masked = (labels[i] != -100).nonzero(as_tuple=False)
+                    if len(non_masked) > label_length:
+                        mask_until = non_masked[-label_length].item()
+                        labels[i, :mask_until] = -100
 
         inputs["labels"] = labels
         return inputs

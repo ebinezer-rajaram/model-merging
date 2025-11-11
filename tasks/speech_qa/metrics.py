@@ -106,8 +106,25 @@ def compute_speech_qa_metrics(
     labels = np.array(labels)
 
     tokenizer = processor.tokenizer
-    pred_texts = _safe_batch_decode(tokenizer, preds, skip_special_tokens=True)
-    label_texts = _decode_labels(labels, tokenizer)
+    pred_texts_raw = _safe_batch_decode(tokenizer, preds, skip_special_tokens=True)
+    label_texts_raw = _decode_labels(labels, tokenizer)
+
+    # Post-process to remove chat template artifacts (matching ASR approach)
+    pred_texts = []
+    for text in pred_texts_raw:
+        text = text.strip()
+        # Extract answer from chat response format if needed
+        if "assistant\n" in text:
+            text = text.split("assistant\n", 1)[1].strip()
+        pred_texts.append(text)
+
+    label_texts = []
+    for text in label_texts_raw:
+        text = text.strip()
+        # Extract answer from chat response format if needed
+        if "assistant\n" in text:
+            text = text.split("assistant\n", 1)[1].strip()
+        label_texts.append(text)
 
     total = min(len(pred_texts), len(reference_answers))
     if total == 0:

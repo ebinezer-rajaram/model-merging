@@ -493,7 +493,7 @@ def _get_emotion_task_config() -> TaskConfig:
         loader_config_keys=CLASSIFICATION_EVAL_KEYS,
         has_label_names=True,
         collator_class=EmotionDataCollator,
-        collator_params={},
+        collator_params={"mode": "eval"},  # Use eval mode for evaluation
         compute_metrics_fn=compute_emotion_metrics,
         metrics_params={},
         required_columns=("audio", "label"),
@@ -514,7 +514,7 @@ def _get_speaker_task_config() -> TaskConfig:
         loader_config_keys=CLASSIFICATION_EVAL_KEYS + SPEAKER_EXTRA_EVAL_KEYS,
         has_label_names=True,
         collator_class=SpeakerIdentificationCollator,
-        collator_params={},
+        collator_params={"mode": "eval"},  # Use eval mode for evaluation
         compute_metrics_fn=compute_speaker_id_metrics,
         metrics_params={},
         required_columns=("audio", "label"),
@@ -535,7 +535,7 @@ def _get_intent_task_config() -> TaskConfig:
         loader_config_keys=CLASSIFICATION_EVAL_KEYS,
         has_label_names=True,
         collator_class=IntentClassificationCollator,
-        collator_params={},
+        collator_params={"mode": "eval"},  # Use eval mode for evaluation
         compute_metrics_fn=compute_intent_metrics,
         metrics_params={},
         required_columns=("audio", "label"),
@@ -557,7 +557,7 @@ def _get_speech_qa_task_config() -> TaskConfig:
         has_label_names=False,
         has_answers_map=True,
         collator_class=SpeechQACollator,
-        collator_params={},
+        collator_params={"mode": "eval"},  # Use eval mode for evaluation
         compute_metrics_fn=compute_speech_qa_metrics,
         metrics_params={},
         required_columns=("audio", "question", "answers", "label_text"),

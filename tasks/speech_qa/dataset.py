@@ -402,12 +402,18 @@ def load_speech_qa_dataset(
 
 @dataclass
 class SpeechQACollator:
-    """Prepare batches for speech question answering fine-tuning."""
+    """Prepare batches for speech question answering fine-tuning.
+
+    Supports two modes:
+    - train: Uses chat template with both user message (audio + instruction) and assistant response (ground truth)
+    - eval: Uses chat template with only user message (audio + instruction) and add_generation_prompt=True
+    """
 
     processor: Any
     sampling_rate: int
     include_transcript: bool = True
     include_context: bool = False
+    mode: str = "train"  # "train" or "eval"
 
     def _select_label(self, feature: Dict[str, Any]) -> str:
         if "label_text" in feature and feature["label_text"]:
@@ -417,66 +423,137 @@ class SpeechQACollator:
             return str(answers[0])
         return ""
 
-    def _build_prompt(self, feature: Dict[str, Any]) -> str:
+    def _build_instruction(self, feature: Dict[str, Any]) -> str:
+        """Build the instruction text for the user message."""
         question = str(feature.get("question", "")).strip()
         transcript = str(feature.get("transcript", "") or "").strip()
         context = str(feature.get("context", "") or "").strip()
 
-        prompt = (
-            f"{self.processor.audio_token}"
-            "Listen to the audio segment and answer the question."
-        )
+        instruction = "Listen to the audio segment and answer the question."
         if question:
-            prompt += f"\nQuestion: {question}"
+            instruction += f"\nQuestion: {question}"
         if transcript and self.include_transcript:
-            prompt += f"\nTranscript: {transcript}"
+            instruction += f"\nTranscript: {transcript}"
         if context and self.include_context:
-            prompt += f"\nContext: {context}"
-        prompt += "\nAnswer:"
-        return prompt
+            instruction += f"\nContext: {context}"
+
+        return instruction
+
+    # OLD PROMPT METHOD (kept as backup):
+    # def _build_prompt(self, feature: Dict[str, Any]) -> str:
+    #     question = str(feature.get("question", "")).strip()
+    #     transcript = str(feature.get("transcript", "") or "").strip()
+    #     context = str(feature.get("context", "") or "").strip()
+    #
+    #     prompt = (
+    #         f"{self.processor.audio_token}"
+    #         "Listen to the audio segment and answer the question."
+    #     )
+    #     if question:
+    #         prompt += f"\nQuestion: {question}"
+    #     if transcript and self.include_transcript:
+    #         prompt += f"\nTranscript: {transcript}"
+    #     if context and self.include_context:
+    #         prompt += f"\nContext: {context}"
+    #     prompt += "\nAnswer:"
+    #     return prompt
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [feature["audio"]["array"] for feature in features]
         labels = [self._select_label(feature) for feature in features]
-        prompts = [self._build_prompt(feature) for feature in features]
 
         tokenizer = getattr(self.processor, "tokenizer", None)
         if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
             tokenizer.padding_side = "left"
 
-        full_texts = [
-            f"{prompt} {label}".strip()
-            for prompt, label in zip(prompts, labels)
-        ]
+        # Build prompts using chat template format (matching ASR approach)
+        prompts = []
+        for feature, label in zip(features, labels):
+            instruction = self._build_instruction(feature)
+
+            if self.mode == "train":
+                # Training: include both user message and assistant response with ground truth
+                conversation = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio", "audio_url": None},
+                            {"type": "text", "text": instruction}
+                        ]
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": label}
+                        ]
+                    }
+                ]
+                prompt = self.processor.apply_chat_template(
+                    conversation,
+                    add_generation_prompt=False,
+                    tokenize=False
+                )
+            else:
+                # Evaluation: only user message, no ground truth
+                conversation = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio", "audio_url": None},
+                            {"type": "text", "text": instruction}
+                        ]
+                    }
+                ]
+                prompt = self.processor.apply_chat_template(
+                    conversation,
+                    add_generation_prompt=True,
+                    tokenize=False
+                )
+            prompts.append(prompt)
 
         inputs = self.processor(
             audio=audio_arrays,
             sampling_rate=self.sampling_rate,
-            text=full_texts,
+            text=prompts,
             return_tensors="pt",
             padding=True,
         )
 
         label_ids = inputs["input_ids"].clone()
         pad_id = self.processor.tokenizer.pad_token_id
-        if pad_id is not None:
-            label_ids = label_ids.masked_fill(label_ids == pad_id, -100)
-
         audio_token_id = self.processor.tokenizer.convert_tokens_to_ids(
             self.processor.audio_token
         )
-        if audio_token_id is not None:
-            label_ids = label_ids.masked_fill(label_ids == audio_token_id, -100)
 
-        prompt_token_ids = self.processor.tokenizer(
-            prompts,
-            add_special_tokens=False,
-        )["input_ids"]
+        # Mask padding and audio tokens
+        label_ids = label_ids.masked_fill(label_ids == pad_id, -100)
+        label_ids = label_ids.masked_fill(label_ids == audio_token_id, -100)
 
-        for row_idx, tokens in enumerate(prompt_token_ids):
-            prompt_len = len(tokens)
-            if prompt_len > 0:
-                label_ids[row_idx, :prompt_len] = -100
+        # Mask everything except the assistant's answer response
+        if self.mode == "train":
+            for i, label in enumerate(labels):
+                # Tokenize the ground truth answer to identify it in the full sequence
+                label_tokens = tokenizer.encode(label, add_special_tokens=False)
+
+                # Find where the label appears in the input_ids
+                input_ids = inputs["input_ids"][i]
+                label_length = len(label_tokens)
+
+                # Search for the label tokens in the sequence
+                found = False
+                for j in range(len(input_ids) - label_length + 1):
+                    if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
+                        # Mask everything before the label
+                        label_ids[i, :j] = -100
+                        found = True
+                        break
+
+                # Fallback: mask based on sequence structure
+                if not found:
+                    non_masked = (label_ids[i] != -100).nonzero(as_tuple=False)
+                    if len(non_masked) > label_length:
+                        mask_until = non_masked[-label_length].item()
+                        label_ids[i, :mask_until] = -100
 
         inputs["labels"] = label_ids
         return inputs
