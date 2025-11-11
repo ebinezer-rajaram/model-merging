@@ -34,9 +34,9 @@ def parse_args() -> argparse.Namespace:
         help="Reuse cached metrics for individual evaluations when available.",
     )
     eval_parser.add_argument(
-        "--no-compare",
+        "--compare",
         action="store_true",
-        help="Skip base-model comparison even if an adapter is provided.",
+        help="Compare adapter with base model performance (runs base model eval automatically).",
     )
 
     return parser.parse_args()
@@ -55,7 +55,7 @@ def dispatch_train(args: argparse.Namespace) -> None:
 
 def dispatch_evaluate(args: argparse.Namespace) -> None:
     """Invoke the evaluation workflow."""
-    compare = bool(args.adapter) and not args.no_compare
+    compare = bool(args.adapter) and args.compare
 
     if compare:
         base_result = evaluate_task.evaluate(
