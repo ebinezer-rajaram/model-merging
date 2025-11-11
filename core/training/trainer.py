@@ -2,9 +2,11 @@
 
 import csv
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Sampler
 from transformers import Trainer
 
 
@@ -17,11 +19,15 @@ class CustomTrainer(Trainer):
         generation_kwargs: Optional[Dict[str, Any]] = None,
         enable_generation: bool = True,
         constrained_decoding_fn: Optional[Callable] = None,
+        custom_loss_fn: Optional[nn.Module] = None,
+        custom_sampler: Optional[Sampler] = None,
         **kwargs,
     ):
         self.generation_kwargs = generation_kwargs or {"max_new_tokens": 128, "do_sample": False}
         self.enable_generation = enable_generation
         self.constrained_decoding_fn = constrained_decoding_fn
+        self.custom_loss_fn = custom_loss_fn
+        self.custom_sampler = custom_sampler
         super().__init__(*args, **kwargs)
 
     def prediction_step(
@@ -107,6 +113,59 @@ class CustomTrainer(Trainer):
         label_ids = inputs["labels"].detach().cpu() if has_labels else None
 
         return loss, preds, label_ids
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """Compute loss using custom loss function if provided."""
+        if self.custom_loss_fn is None:
+            # Use default loss computation
+            return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+
+        # Extract labels
+        labels = inputs.get("labels")
+        if labels is None:
+            raise ValueError("Labels must be provided when using custom loss function")
+
+        # Forward pass
+        outputs = model(**inputs)
+
+        # Get logits from model outputs
+        logits = outputs.get("logits")
+        if logits is None:
+            raise ValueError("Model outputs must contain 'logits' when using custom loss function")
+
+        # Compute custom loss
+        loss = self.custom_loss_fn(logits, labels)
+
+        return (loss, outputs) if return_outputs else loss
+
+    def get_train_dataloader(self) -> DataLoader:
+        """Override to support custom samplers (batch samplers or regular samplers)."""
+        if self.custom_sampler is None:
+            return super().get_train_dataloader()
+
+        # Use custom sampler
+        from torch.utils.data import BatchSampler
+
+        if isinstance(self.custom_sampler, BatchSampler):
+            # Batch sampler - handles batching internally
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=self.custom_sampler,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+        else:
+            # Regular sampler - need to specify batch size
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                sampler=self.custom_sampler,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+                drop_last=self.args.dataloader_drop_last,
+            )
 
 
 def save_history_to_csv(
