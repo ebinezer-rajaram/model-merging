@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from datasets import Dataset
 
 from core.data.io_utils import ensure_dir
-from core.evaluation.plotting import plot_loss_and_wer
+from core.evaluation.plotting import plot_confusion_matrix, plot_loss_and_wer
 
 from .run_manager import RunManager
 from .trainer import CustomTrainer, save_artifacts, save_history_to_csv
@@ -94,6 +94,9 @@ def run_training_with_evaluation(
     metrics_dir: Optional[Path] = None,
     test_dataset: Optional[Dataset] = None,
     test_split_name: str = "test",
+    confusion_matrix_path: Optional[Path] = None,
+    confusion_matrix_normalize: bool = True,
+    label_names: Optional[List[str]] = None,
 ) -> None:
     """Execute training loop with optional initial eval, training, final eval, and artifact saving.
 
@@ -110,6 +113,9 @@ def run_training_with_evaluation(
         metrics_dir: Base metrics directory (for copying best/latest metrics)
         test_dataset: Optional test dataset for final evaluation
         test_split_name: Name of the test split for logging (default: "test")
+        confusion_matrix_path: Optional path to save confusion matrix plot
+        confusion_matrix_normalize: Whether to normalize confusion matrix (default: True)
+        label_names: List of label names for confusion matrix axis labels
     """
     seed_history_rows: List[Dict[str, Any]] = []
 
@@ -170,8 +176,31 @@ def run_training_with_evaluation(
     test_metrics: Optional[Dict[str, Any]] = None
     if test_dataset is not None:
         print(f"🧪 Running evaluation on {test_split_name} split ({len(test_dataset)} samples)...")
+
+        # Temporarily enable prediction storage for confusion matrix if needed
+        original_compute_metrics = trainer.compute_metrics
+        if confusion_matrix_path and label_names and original_compute_metrics is not None:
+            # Wrap the compute_metrics to enable store_predictions
+            def compute_metrics_with_predictions(eval_pred):
+                # Call original with store_predictions=True if it supports it
+                import inspect
+                sig = inspect.signature(original_compute_metrics)
+                if 'store_predictions' in sig.parameters:
+                    # Use functools to add the parameter
+                    from functools import partial
+                    temp_fn = partial(original_compute_metrics.func if hasattr(original_compute_metrics, 'func') else original_compute_metrics, store_predictions=True)
+                    return temp_fn(eval_pred)
+                return original_compute_metrics(eval_pred)
+
+            trainer.compute_metrics = compute_metrics_with_predictions
+
         # Evaluate test set - these metrics are captured separately and saved to test_metrics.json
         test_metrics = trainer.evaluate(eval_dataset=test_dataset)
+
+        # Restore original compute_metrics
+        if original_compute_metrics is not None:
+            trainer.compute_metrics = original_compute_metrics
+
         if isinstance(test_metrics, dict) and test_metrics:
             scalar_test_metrics = {
                 key: value for key, value in test_metrics.items() if isinstance(value, (int, float))
@@ -179,6 +208,21 @@ def run_training_with_evaluation(
             if scalar_test_metrics:
                 formatted = ", ".join(f"{k}={v:.4f}" for k, v in scalar_test_metrics.items())
                 print(f"📦 Test set metrics: {formatted}")
+
+            # Generate confusion matrix if predictions and labels are available
+            if confusion_matrix_path and label_names:
+                predictions = test_metrics.get("_predictions")
+                labels = test_metrics.get("_labels")
+                if predictions is not None and labels is not None:
+                    print("📊 Generating confusion matrix...")
+                    plot_confusion_matrix(
+                        y_true=labels,
+                        y_pred=predictions,
+                        label_names=label_names,
+                        plot_path=confusion_matrix_path,
+                        title=f"Confusion Matrix - {test_split_name.title()} Set",
+                        normalize=confusion_matrix_normalize,
+                    )
 
     # Restore the training history before saving (excluding test metrics)
     trainer.state.log_history = training_log_history
@@ -210,6 +254,11 @@ def run_training_with_evaluation(
             # Also save plot to run directory (only validation metrics)
             run_plot_path = run_dir / loss_plot_path.name
             plot_loss_and_wer(run_history_csv, run_plot_path)
+
+        # Save confusion matrix to run directory if it was generated
+        if confusion_matrix_path and confusion_matrix_path.exists():
+            run_confusion_matrix_path = run_dir / confusion_matrix_path.name
+            shutil.copy(confusion_matrix_path, run_confusion_matrix_path)
 
         # Save adapter artifacts to run directory
         print("💾 Saving LoRA adapter and processor...")
@@ -250,6 +299,7 @@ def run_training_with_evaluation(
                 metrics_dir,
                 history_csv_path,
                 loss_plot_path,
+                confusion_matrix_path,
                 has_test_metrics=(test_metrics is not None),
             )
 
@@ -274,6 +324,7 @@ def _copy_metrics_to_subdirs(
     metrics_dir: Path,
     history_csv_path: Path,
     loss_plot_path: Optional[Path],
+    confusion_matrix_path: Optional[Path],
     has_test_metrics: bool = False,
 ) -> None:
     """Copy metrics from best and latest runs to metrics/best and metrics/latest directories.
@@ -283,6 +334,7 @@ def _copy_metrics_to_subdirs(
         metrics_dir: Base metrics directory
         history_csv_path: Path to training history CSV
         loss_plot_path: Optional path to loss plot
+        confusion_matrix_path: Optional path to confusion matrix plot
         has_test_metrics: Whether test metrics were generated
     """
     best_run_path = run_manager.get_best_run_path()
@@ -296,6 +348,7 @@ def _copy_metrics_to_subdirs(
             best_metrics_dir,
             history_csv_path.name,
             loss_plot_path.name if loss_plot_path else None,
+            confusion_matrix_path.name if confusion_matrix_path else None,
             has_test_metrics=has_test_metrics,
         )
 
@@ -307,6 +360,7 @@ def _copy_metrics_to_subdirs(
             latest_metrics_dir,
             history_csv_path.name,
             loss_plot_path.name if loss_plot_path else None,
+            confusion_matrix_path.name if confusion_matrix_path else None,
             has_test_metrics=has_test_metrics,
         )
 
@@ -316,6 +370,7 @@ def _copy_run_metrics(
     dest_dir: Path,
     history_csv_name: str,
     loss_plot_name: Optional[str],
+    confusion_matrix_name: Optional[str],
     has_test_metrics: bool = False,
 ) -> None:
     """Copy training history, plots, and metrics from run directory to destination.
@@ -325,6 +380,7 @@ def _copy_run_metrics(
         dest_dir: Destination directory (e.g., metrics/best or metrics/latest)
         history_csv_name: Name for the training history CSV
         loss_plot_name: Optional name for the loss plot
+        confusion_matrix_name: Optional name for the confusion matrix plot
         has_test_metrics: Whether to copy test metrics
     """
     # Copy training history CSV (validation metrics only)
@@ -337,10 +393,17 @@ def _copy_run_metrics(
     if loss_plot_name:
         # Try to find the plot in the run directory
         for item in run_dir.iterdir():
-            if item.suffix == ".png" and "plot" in item.name.lower():
+            if item.suffix == ".png" and "plot" in item.name.lower() and "confusion" not in item.name.lower():
                 dest_plot = dest_dir / loss_plot_name
                 shutil.copy(item, dest_plot)
                 break
+
+    # Copy confusion matrix plot if available
+    if confusion_matrix_name:
+        src_confusion_matrix = run_dir / confusion_matrix_name
+        if src_confusion_matrix.exists():
+            dest_confusion_matrix = dest_dir / confusion_matrix_name
+            shutil.copy(src_confusion_matrix, dest_confusion_matrix)
 
     # Copy validation metrics JSON
     src_validation_metrics = run_dir / "validation_metrics.json"

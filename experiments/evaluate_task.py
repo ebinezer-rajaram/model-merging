@@ -14,6 +14,7 @@ from core import (
     ensure_dir,
     load_config,
     load_model_and_processor,
+    plot_confusion_matrix,
     prepare_task_for_evaluation,
     run_evaluation,
 )
@@ -78,6 +79,11 @@ def parse_args() -> argparse.Namespace:
         help="Reuse cached base-model metrics when available.",
     )
     parser.add_argument("--trained-on-task", default=None, help="Task the adapter was trained on (for cross-task eval).")
+    parser.add_argument(
+        "--confusion-matrix",
+        action="store_true",
+        help="Generate confusion matrix for classification tasks.",
+    )
     return parser.parse_args()
 
 
@@ -309,6 +315,7 @@ def evaluate(
     *,
     enable_cache: bool = False,
     show_summary: bool = True,
+    generate_confusion_matrix: bool = False,
 ) -> EvaluationResult:
     """Run evaluation with optional caching for the base model."""
     if task == ASR_TASK_NAME:
@@ -380,13 +387,53 @@ def evaluate(
             config=config,
         )
 
+        # Enable prediction storage if confusion matrix is requested
+        store_predictions = generate_confusion_matrix and eval_setup.label_names is not None
+
         metrics = run_evaluation(
             model,
             eval_setup,
             batch_size=resolved_batch_size,
             generation_kwargs=generation_kwargs,
             output_dir=eval_output_dir,
+            store_predictions=store_predictions,
         )
+
+        # Generate confusion matrix if requested and predictions are available
+        if generate_confusion_matrix and eval_setup.label_names:
+            predictions = metrics.get("_predictions")
+            labels = metrics.get("_labels")
+            if predictions is not None and labels is not None:
+                # Get confusion matrix settings from config
+                metrics_cfg = config.get("metrics", {})
+                normalize = metrics_cfg.get("normalize_confusion_matrix", True)
+
+                # Determine save path
+                eval_dir = ensure_dir(artifact_dirs["metrics"] / "eval" / split)
+                if adapter_path is None:
+                    cm_filename = "confusion_matrix_base_model.png"
+                elif trained_on_task is not None and trained_on_task != task:
+                    cm_filename = f"confusion_matrix_{trained_on_task}_adapter.png"
+                else:
+                    cm_filename = f"confusion_matrix_{task}_adapter.png"
+
+                cm_path = eval_dir / cm_filename
+
+                if show_summary:
+                    print(f"📊 Generating confusion matrix...")
+
+                plot_confusion_matrix(
+                    y_true=labels,
+                    y_pred=predictions,
+                    label_names=eval_setup.label_names,
+                    plot_path=cm_path,
+                    title=f"Confusion Matrix - {split.title()} Set",
+                    normalize=normalize,
+                )
+
+                # Remove prediction data from metrics before saving
+                metrics.pop("_predictions", None)
+                metrics.pop("_labels", None)
 
         if cache_path is not None:
             with cache_path.open("w") as handle:
@@ -451,6 +498,7 @@ def main() -> None:
         save_json=args.save_json,
         enable_cache=args.use_cache,
         show_summary=True,
+        generate_confusion_matrix=args.confusion_matrix,
     )
 
 

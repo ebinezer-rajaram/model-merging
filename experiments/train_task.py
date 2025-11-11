@@ -19,6 +19,7 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from core import (
+    BalancedBatchSampler,
     build_early_stopping_kwargs,
     build_training_arguments,
     CustomTrainer,
@@ -29,6 +30,12 @@ from core import (
     parse_training_config,
     run_training_with_evaluation,
     set_global_seed,
+    WeightedClassSampler,
+)
+from core.training.losses import (
+    FocalLoss,
+    WeightedCrossEntropyLoss,
+    compute_class_weights,
 )
 from core.models.models import create_lora_config_from_dict
 from tasks.asr import (
@@ -158,32 +165,69 @@ def _setup_common_components(
     }
 
 
-def _truncate_eval_dataset(full_eval_ds, max_eval_samples: Optional[int]):
-    """Truncate evaluation dataset if max_eval_samples is specified."""
+def _truncate_eval_dataset(full_eval_ds, max_eval_samples: Optional[int], seed: Optional[int] = None, shuffle: bool = False):
+    """Truncate evaluation dataset if max_eval_samples is specified.
+
+    Args:
+        full_eval_ds: Full evaluation dataset
+        max_eval_samples: Maximum number of samples to use (None = use all)
+        seed: Random seed for shuffling (only used if shuffle=True)
+        shuffle: If True, randomly sample instead of taking first N samples
+    """
     if max_eval_samples is None:
         return full_eval_ds
 
     max_eval_samples = int(max(0, max_eval_samples))
     if 0 < max_eval_samples < len(full_eval_ds):
-        truncated = full_eval_ds.select(range(max_eval_samples))
-        print(f"🔍 Validation truncated to {len(truncated)} samples for faster eval.")
+        if shuffle:
+            # Random sampling with optional seed
+            import random
+            indices = list(range(len(full_eval_ds)))
+            if seed is not None:
+                random.Random(seed).shuffle(indices)
+            else:
+                random.shuffle(indices)
+            selected_indices = sorted(indices[:max_eval_samples])
+            truncated = full_eval_ds.select(selected_indices)
+            print(f"🔍 Validation randomly sampled to {len(truncated)} samples (seed={seed}).")
+        else:
+            # Sequential sampling (first N samples)
+            truncated = full_eval_ds.select(range(max_eval_samples))
+            print(f"🔍 Validation truncated to {len(truncated)} samples for faster eval.")
         return truncated
     return full_eval_ds
 
 
-def _filter_by_duration(dataset, max_duration_seconds: Optional[float], split_name: str = "dataset"):
-    """Filter dataset to keep only samples within max duration."""
-    if max_duration_seconds is None:
+def _filter_by_duration(
+    dataset,
+    max_duration_seconds: Optional[float],
+    split_name: str = "dataset",
+    min_duration_seconds: Optional[float] = None,
+):
+    """Filter dataset to keep only samples within duration range."""
+    if max_duration_seconds is None and min_duration_seconds is None:
         return dataset
 
     def _keep_duration(example: dict) -> bool:
         duration = example.get("duration") or 0.0
-        return float(duration) <= max_duration_seconds
+        duration_float = float(duration)
+        if max_duration_seconds is not None and duration_float > max_duration_seconds:
+            return False
+        if min_duration_seconds is not None and duration_float < min_duration_seconds:
+            return False
+        return True
 
     before = len(dataset)
     filtered = dataset.filter(_keep_duration)
     if len(filtered) != before:
-        print(f"⏱️ Filtered {before - len(filtered)} {split_name} samples longer than {max_duration_seconds:.1f}s.")
+        filtered_count = before - len(filtered)
+        duration_info = []
+        if max_duration_seconds is not None:
+            duration_info.append(f">{max_duration_seconds:.1f}s")
+        if min_duration_seconds is not None:
+            duration_info.append(f"<{min_duration_seconds:.1f}s")
+        duration_str = " or ".join(duration_info)
+        print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
     return filtered
 
 
@@ -236,6 +280,7 @@ CLASSIFICATION_BASE_KEYS: Tuple[str, ...] = (
     "max_validation_samples",
     "max_test_samples",
     "max_duration",
+    "min_duration",
     "label_column",
     "text_column",
     "audio_column",
@@ -246,6 +291,9 @@ CLASSIFICATION_BASE_KEYS: Tuple[str, ...] = (
     "stratify_by_column",
     "revision",
     "data_dir",
+    "normalize_audio",
+    "normalize_per_speaker",
+    "target_rms_db",
 )
 
 SPEECH_QA_LOADER_KEYS: Tuple[str, ...] = (
@@ -284,7 +332,11 @@ def _build_classification_loader_kwargs(
     }
     for key in CLASSIFICATION_BASE_KEYS:
         if key in dataset_cfg and dataset_cfg[key] is not None:
-            loader_kwargs[key] = dataset_cfg[key]
+            # Handle parameter name mapping
+            if key == "normalize_audio":
+                loader_kwargs["normalize_audio_flag"] = dataset_cfg[key]
+            else:
+                loader_kwargs[key] = dataset_cfg[key]
     for key in extra_keys:
         if key in dataset_cfg and dataset_cfg[key] is not None:
             loader_kwargs[key] = dataset_cfg[key]
@@ -354,11 +406,12 @@ def _build_intent_collator(
     )
 
 
-def _build_emotion_metrics(processor, label_names: Sequence[str]):
+def _build_emotion_metrics(processor, label_names: Sequence[str], store_predictions: bool = False):
     return partial(
         compute_emotion_metrics,
         processor=processor,
         label_names=list(label_names or []),
+        store_predictions=store_predictions,
     )
 
 
@@ -376,6 +429,70 @@ def _build_intent_metrics(processor, label_names: Sequence[str]):
         processor=processor,
         label_names=list(label_names or []),
     )
+
+
+def _create_loss_function(
+    loss_config: Optional[Dict[str, Any]],
+    train_dataset,
+    num_classes: int,
+    label_column: str = "label",
+):
+    """Create custom loss function based on configuration.
+
+    Args:
+        loss_config: Loss configuration from YAML
+        train_dataset: Training dataset (for computing class weights)
+        num_classes: Number of classes
+        label_column: Name of the label column in dataset
+
+    Returns:
+        Custom loss function or None (to use default)
+    """
+    if loss_config is None:
+        return None
+
+    loss_type = loss_config.get("type", "default")
+
+    if loss_type == "default":
+        return None
+
+    elif loss_type == "focal":
+        focal_cfg = loss_config.get("focal", {})
+        gamma = focal_cfg.get("gamma", 2.0)
+        alpha = focal_cfg.get("alpha")
+
+        print(f"🎯 Using Focal Loss (gamma={gamma}, alpha={alpha})")
+        return FocalLoss(gamma=gamma, alpha=alpha, ignore_index=-100)
+
+    elif loss_type == "weighted":
+        weighted_cfg = loss_config.get("weighted", {})
+        weights = weighted_cfg.get("weights")
+        auto_compute = weighted_cfg.get("auto_compute", False)
+
+        if weights is not None:
+            # Use explicitly provided weights
+            print(f"⚖️  Using Weighted Cross-Entropy with manual weights: {weights}")
+            return WeightedCrossEntropyLoss(weights=weights, ignore_index=-100)
+
+        elif auto_compute:
+            # Auto-compute weights from training data
+            method = weighted_cfg.get("method", "inverse")
+            print(f"⚖️  Computing class weights using method: {method}")
+
+            # Extract labels from training dataset
+            labels = [example[label_column] for example in train_dataset]
+            weights = compute_class_weights(labels, num_classes, method=method)
+
+            print(f"   Computed weights: {weights.tolist()}")
+            return WeightedCrossEntropyLoss(weights=weights, ignore_index=-100)
+
+        else:
+            print("⚠️  Weighted loss requested but no weights provided. Using default loss.")
+            return None
+
+    else:
+        print(f"⚠️  Unknown loss type '{loss_type}'. Using default loss.")
+        return None
 
 
 CLASSIFICATION_TASK_SPECS: Dict[str, ClassificationTaskSpec] = {
@@ -472,7 +589,14 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         # We have both validation and test, so use test for final evaluation
         test_ds_for_eval = filter_dataset_columns(test_ds, spec.keep_columns, always_keep=["duration"])
 
-    eval_ds_for_trainer = _truncate_eval_dataset(full_eval_ds, training_cfg.get("max_eval_samples"))
+    # Get eval sampling configuration
+    shuffle_eval = training_cfg.get("shuffle_eval_subset", False)
+    eval_ds_for_trainer = _truncate_eval_dataset(
+        full_eval_ds,
+        training_cfg.get("max_eval_samples"),
+        seed=seed,
+        shuffle=shuffle_eval
+    )
 
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     collator = spec.collator_builder(processor, dataset_cfg, label_names, target_sr)
@@ -495,6 +619,42 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
     early_stopping_kwargs = build_early_stopping_kwargs(train_config)
     compute_metrics_fn = spec.metrics_builder(processor, label_names or [])
 
+    # Create custom loss function if configured
+    loss_config = config.get("loss")
+    custom_loss_fn = _create_loss_function(
+        loss_config,
+        train_ds,
+        num_classes=len(label_names),
+        label_column="label",
+    )
+
+    # Create custom sampler for balanced training if configured
+    custom_sampler = None
+    balanced_sampling = training_cfg.get("balanced_sampling")
+    if balanced_sampling:
+        if balanced_sampling == "balanced_batch":
+            # Create balanced batch sampler (each batch has equal class representation)
+            custom_sampler = BalancedBatchSampler(
+                dataset=train_ds,
+                batch_size=training_args.per_device_train_batch_size,
+                num_classes=len(label_names),
+                drop_last=training_args.dataloader_drop_last,
+                shuffle=True,
+            )
+            # When using batch sampler, disable group_by_length
+            if training_args.group_by_length:
+                print("⚠️  Disabling group_by_length since balanced_batch sampler is used")
+                training_args.group_by_length = False
+        elif balanced_sampling == "weighted":
+            # Create weighted sampler (oversample minority classes)
+            custom_sampler = WeightedClassSampler(
+                dataset=train_ds,
+                num_samples=len(train_ds),
+                replacement=True,
+            )
+        else:
+            print(f"⚠️  Unknown balanced_sampling option: {balanced_sampling}")
+
     trainer = CustomTrainer(
         model=model,
         args=training_args,
@@ -506,7 +666,17 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
         generation_kwargs=train_config.generation_kwargs,
         constrained_decoding_fn=None,
+        custom_loss_fn=custom_loss_fn,
+        custom_sampler=custom_sampler,
     )
+
+    # Extract confusion matrix configuration
+    metrics_cfg = config.get("metrics", {})
+    confusion_matrix_filename = metrics_cfg.get("confusion_matrix")
+    confusion_matrix_normalize = metrics_cfg.get("normalize_confusion_matrix", True)
+    confusion_matrix_path = None
+    if confusion_matrix_filename:
+        confusion_matrix_path = metrics_dir / confusion_matrix_filename
 
     # Run training with evaluation
     run_training_with_evaluation(
@@ -522,6 +692,9 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         metrics_dir=metrics_dir,
         test_dataset=test_ds_for_eval,
         test_split_name="test",
+        confusion_matrix_path=confusion_matrix_path,
+        confusion_matrix_normalize=confusion_matrix_normalize,
+        label_names=label_names,
     )
 
 
@@ -589,13 +762,17 @@ def run_asr_task(config_path: Path) -> None:
         raw_full_val_ds = val_ds
 
     max_duration_seconds = dataset_cfg.get("max_duration_seconds")
-    if max_duration_seconds is not None:
-        max_duration_seconds = float(max_duration_seconds)
-        train_ds = _filter_by_duration(train_ds, max_duration_seconds, "training")
-        val_ds = _filter_by_duration(val_ds, max_duration_seconds, "validation")
-        raw_full_val_ds = _filter_by_duration(raw_full_val_ds, max_duration_seconds, "full-eval")
+    min_duration_seconds = dataset_cfg.get("min_duration_seconds")
+    if max_duration_seconds is not None or min_duration_seconds is not None:
+        if max_duration_seconds is not None:
+            max_duration_seconds = float(max_duration_seconds)
+        if min_duration_seconds is not None:
+            min_duration_seconds = float(min_duration_seconds)
+        train_ds = _filter_by_duration(train_ds, max_duration_seconds, "training", min_duration_seconds)
+        val_ds = _filter_by_duration(val_ds, max_duration_seconds, "validation", min_duration_seconds)
+        raw_full_val_ds = _filter_by_duration(raw_full_val_ds, max_duration_seconds, "full-eval", min_duration_seconds)
         if test_ds is not None:
-            test_ds = _filter_by_duration(test_ds, max_duration_seconds, "test")
+            test_ds = _filter_by_duration(test_ds, max_duration_seconds, "test", min_duration_seconds)
 
     # Filter datasets to keep only necessary columns
     keep_columns = ["audio", "text", "duration"]
@@ -605,7 +782,14 @@ def run_asr_task(config_path: Path) -> None:
     if test_ds is not None:
         test_ds = filter_dataset_columns(test_ds, keep_columns)
 
-    eval_val_ds = _truncate_eval_dataset(val_ds, training_cfg.get("max_eval_samples"))
+    # Get eval sampling configuration
+    shuffle_eval = training_cfg.get("shuffle_eval_subset", False)
+    eval_val_ds = _truncate_eval_dataset(
+        val_ds,
+        training_cfg.get("max_eval_samples"),
+        seed=seed,
+        shuffle=shuffle_eval
+    )
 
     target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
     collator = OmniASRCollator(processor=processor, sampling_rate=target_sr)
@@ -740,7 +924,13 @@ def run_speech_qa_task(config_path: Path) -> None:
         raise RuntimeError('Speech QA dataset requires a validation or test split.')
 
     max_eval_samples = training_cfg.get('max_eval_samples')
-    eval_ds_for_trainer = _truncate_eval_dataset(eval_ds_full, max_eval_samples)
+    shuffle_eval = training_cfg.get("shuffle_eval_subset", False)
+    eval_ds_for_trainer = _truncate_eval_dataset(
+        eval_ds_full,
+        max_eval_samples,
+        seed=seed,
+        shuffle=shuffle_eval
+    )
 
     # Truncate answers to match truncated dataset
     if max_eval_samples is not None and len(eval_ds_for_trainer) < len(eval_ds_full):
