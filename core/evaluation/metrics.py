@@ -57,4 +57,4 @@ def compute_wer_from_texts(
         Word error rate as a float
     """
     transformation = wer_standardize if normalization == "standardize" else wer_default
-    return wer(list(reference_texts), list(predicted_texts), truth_transform=transformation, hypothesis_transform=transformation)
+    return wer(list(reference_texts), list(predicted_texts), reference_transform=transformation, hypothesis_transform=transformation)

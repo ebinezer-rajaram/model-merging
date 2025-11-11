@@ -69,6 +69,7 @@ class TaskEvalSetup:
     dataset: Any  # HuggingFace Dataset
     data_collator: Callable[[Any], Dict[str, Any]]
     compute_metrics: Callable[[Any], Dict[str, float]]
+    label_names: Optional[List[str]] = None  # For classification tasks (confusion matrix)
 
 
 @dataclass
@@ -209,8 +210,21 @@ def run_evaluation(
     batch_size: int = 4,
     generation_kwargs: Optional[Dict[str, Any]] = None,
     output_dir: Path | None = None,
+    store_predictions: bool = False,
 ) -> Dict[str, float]:
-    """Execute evaluation on the provided dataset and return metric scores."""
+    """Execute evaluation on the provided dataset and return metric scores.
+
+    Args:
+        model: Model to evaluate
+        setup: TaskEvalSetup with dataset, collator, and metrics
+        batch_size: Per-device batch size
+        generation_kwargs: Generation parameters
+        output_dir: Output directory for evaluation artifacts
+        store_predictions: If True, enable prediction storage in compute_metrics (for confusion matrix)
+
+    Returns:
+        Dictionary of evaluation metrics
+    """
     generation_kwargs = {**DEFAULT_GENERATION_KWARGS, **(generation_kwargs or {})}
     output_dir = ensure_dir(Path(output_dir or "runs/eval"))
 
@@ -226,12 +240,24 @@ def run_evaluation(
         logging_strategy=IntervalStrategy.NO,
     )
 
+    # Wrap compute_metrics to enable prediction storage if requested
+    compute_metrics = setup.compute_metrics
+    if store_predictions and compute_metrics is not None:
+        import inspect
+        sig = inspect.signature(compute_metrics)
+        if 'store_predictions' in sig.parameters:
+            from functools import partial
+            compute_metrics = partial(
+                compute_metrics.func if hasattr(compute_metrics, 'func') else compute_metrics,
+                store_predictions=True
+            )
+
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         eval_dataset=setup.dataset,
         data_collator=setup.data_collator,
-        compute_metrics=setup.compute_metrics,
+        compute_metrics=compute_metrics,
         generation_kwargs=generation_kwargs,
     )
 
@@ -386,7 +412,12 @@ def _build_generic_eval_setup(
         # Standard case: use partial
         metrics_fn = partial(task_config.compute_metrics_fn, **metrics_kwargs)
 
-    return TaskEvalSetup(dataset=dataset, data_collator=collator, compute_metrics=metrics_fn)
+    return TaskEvalSetup(
+        dataset=dataset,
+        data_collator=collator,
+        compute_metrics=metrics_fn,
+        label_names=label_names,
+    )
 
 
 # ---------------------------------------------------------------------------

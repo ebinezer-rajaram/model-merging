@@ -3,12 +3,14 @@
 import csv
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 try:
     import matplotlib.pyplot as plt
+    import numpy as np
 except ImportError:
     plt = None
+    np = None
 
 
 def _parse_float(value: Optional[str]) -> Optional[float]:
@@ -117,6 +119,15 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
             points = [(s, v) for s, v in zip(steps, values) if s is not None and v is not None]
             if not points:
                 continue
+
+            # Deduplicate points with the same x-value (step) by keeping the first occurrence
+            # This prevents vertical lines when validation and test metrics share the same step
+            seen_steps = {}
+            for s, v in points:
+                if s not in seen_steps:  # First value wins for each step
+                    seen_steps[s] = v
+            points = sorted(seen_steps.items())  # Sort by step
+
             xs, ys = zip(*points)
             all_y_values.extend(ys)
 
@@ -198,3 +209,108 @@ def plot_loss_and_wer(csv_path: Path, plot_path: Path) -> None:
     plt.close(fig)
 
     print(f"🖼️ Saved training metrics plot to {plot_path}")
+
+
+def plot_confusion_matrix(
+    y_true: Sequence[int],
+    y_pred: Sequence[int],
+    label_names: Sequence[str],
+    plot_path: Path,
+    title: str = "Confusion Matrix",
+    normalize: bool = True,
+) -> None:
+    """Plot a confusion matrix for classification results.
+
+    Args:
+        y_true: True labels (as integer indices)
+        y_pred: Predicted labels (as integer indices)
+        label_names: Names of the emotion labels
+        plot_path: Path to save the plot
+        title: Title for the plot
+        normalize: If True, normalize the confusion matrix by row (true label)
+    """
+    if plt is None or np is None:
+        print("⚠️ Matplotlib/NumPy not available; skipping confusion matrix generation.")
+        return
+
+    # Filter out invalid labels (-1 means unrecognized)
+    valid_indices = [i for i in range(len(y_true)) if y_true[i] >= 0]
+    if not valid_indices:
+        print("⚠️ No valid predictions found; skipping confusion matrix generation.")
+        return
+
+    y_true_filtered = [y_true[i] for i in valid_indices]
+    y_pred_filtered = [y_pred[i] for i in valid_indices]
+
+    num_classes = len(label_names)
+
+    # Create confusion matrix
+    cm = np.zeros((num_classes, num_classes), dtype=int)
+    for true_label, pred_label in zip(y_true_filtered, y_pred_filtered):
+        if 0 <= true_label < num_classes and 0 <= pred_label < num_classes:
+            cm[true_label, pred_label] += 1
+
+    # Normalize if requested
+    if normalize:
+        # Normalize by row (each true label sums to 1)
+        row_sums = cm.sum(axis=1, keepdims=True)
+        # Avoid division by zero
+        cm_normalized = np.divide(
+            cm.astype(float), row_sums, out=np.zeros_like(cm, dtype=float), where=row_sums != 0
+        )
+        cm_display = cm_normalized
+        fmt = ".2f"
+        vmin, vmax = 0.0, 1.0
+    else:
+        cm_display = cm
+        fmt = "d"
+        vmin, vmax = None, None
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Plot heatmap
+    im = ax.imshow(cm_display, interpolation='nearest', cmap=plt.cm.Blues, vmin=vmin, vmax=vmax)
+    ax.figure.colorbar(im, ax=ax)
+
+    # Set ticks and labels
+    ax.set(
+        xticks=np.arange(num_classes),
+        yticks=np.arange(num_classes),
+        xticklabels=label_names,
+        yticklabels=label_names,
+        ylabel='True Label',
+        xlabel='Predicted Label',
+        title=title
+    )
+
+    # Rotate x-axis labels for better readability
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+    # Add text annotations
+    thresh = cm_display.max() / 2.0
+    for i in range(num_classes):
+        for j in range(num_classes):
+            value = cm_display[i, j]
+            if normalize:
+                # Show percentage
+                text = f"{value:.1%}"
+            else:
+                # Show count
+                text = f"{int(value)}"
+
+            ax.text(
+                j, i, text,
+                ha="center", va="center",
+                color="white" if value > thresh else "black",
+                fontsize=9
+            )
+
+    plt.tight_layout()
+
+    # Save plot
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    print(f"🖼️ Saved confusion matrix to {plot_path}")
