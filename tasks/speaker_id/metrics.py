@@ -135,6 +135,47 @@ def _compute_macro_f1(y_true: Iterable[int], y_pred: Iterable[int], num_classes:
     return float(np.mean(scores)) if scores else 0.0
 
 
+def _compute_weighted_f1(y_true: Iterable[int], y_pred: Iterable[int], num_classes: int) -> float:
+    """Compute weighted-F1 treating out-of-vocabulary predictions as false negatives."""
+    tp = [0] * num_classes
+    fp = [0] * num_classes
+    fn = [0] * num_classes
+
+    for true_label, pred_label in zip(y_true, y_pred):
+        if true_label < 0 or true_label >= num_classes:
+            continue
+        if 0 <= pred_label < num_classes:
+            if pred_label == true_label:
+                tp[true_label] += 1
+            else:
+                fp[pred_label] += 1
+                fn[true_label] += 1
+        else:
+            fn[true_label] += 1
+
+    weighted_sum = 0.0
+    total_support = 0
+    for idx in range(num_classes):
+        support = tp[idx] + fn[idx]
+        if support == 0:
+            continue
+
+        precision_den = tp[idx] + fp[idx]
+        recall_den = tp[idx] + fn[idx]
+        precision = tp[idx] / precision_den if precision_den > 0 else 0.0
+        recall = tp[idx] / recall_den if recall_den > 0 else 0.0
+
+        if precision + recall == 0.0:
+            f1 = 0.0
+        else:
+            f1 = 2 * precision * recall / (precision + recall)
+
+        weighted_sum += f1 * support
+        total_support += support
+
+    return float(weighted_sum / total_support) if total_support > 0 else 0.0
+
+
 def compute_speaker_id_metrics(
     eval_pred: Any,
     *,
@@ -183,12 +224,14 @@ def compute_speaker_id_metrics(
     accuracy = float(correct / total) if total else 0.0
 
     macro_f1 = _compute_macro_f1(target_indices, pred_indices, default_total)
+    weighted_f1 = _compute_weighted_f1(target_indices, pred_indices, default_total)
 
     recognized_rate = float(recognized / total) if total else 0.0
 
     return {
         "accuracy": accuracy,
         "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
         "recognized_rate": recognized_rate,
         "num_samples": float(total),
     }

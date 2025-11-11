@@ -8,12 +8,15 @@ from pathlib import Path
 from random import Random
 from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
 from datasets import Dataset
 
 __all__ = [
     "safe_cpu_count",
     "resolve_num_proc",
     "add_duration",
+    "normalize_audio",
+    "compute_speaker_stats",
     "hours_to_seconds",
     "hours_key",
     "select_indices_by_duration",
@@ -87,6 +90,171 @@ def add_duration(
     except (TypeError, RuntimeError, Exception):
         # Handle corrupted files, decoding errors, or other issues
         batch[target_field] = 0.0
+        return batch
+
+
+def compute_speaker_stats(
+    dataset: Dataset,
+    speaker_column: str = "Speaker",
+    audio_column: str = "audio",
+) -> Dict[str, Dict[str, float]]:
+    """
+    Compute RMS statistics for each speaker in the dataset.
+
+    Args:
+        dataset: Dataset containing audio and speaker information
+        speaker_column: Column name containing speaker identifiers
+        audio_column: Column name containing audio data
+
+    Returns:
+        Dictionary mapping speaker IDs to their RMS statistics (mean, std)
+    """
+    from collections import defaultdict
+
+    speaker_rms_values = defaultdict(list)
+
+    print(f"Computing speaker statistics from {len(dataset)} samples...")
+
+    for idx, example in enumerate(dataset):
+        try:
+            speaker = example.get(speaker_column)
+            audio = example.get(audio_column)
+
+            if speaker is None or audio is None:
+                continue
+
+            # Extract audio array
+            if isinstance(audio, dict):
+                array = audio.get("array")
+            else:
+                array = getattr(audio, "array", None)
+
+            if array is None:
+                continue
+
+            # Convert to numpy array if needed
+            if not isinstance(array, np.ndarray):
+                array = np.array(array)
+
+            # Compute RMS
+            rms = np.sqrt(np.mean(array ** 2))
+            if rms > 0:  # Skip silent audio
+                speaker_rms_values[speaker].append(rms)
+
+        except (TypeError, RuntimeError, Exception) as e:
+            # Skip corrupted files
+            continue
+
+    # Compute mean and std for each speaker
+    speaker_stats = {}
+    for speaker, rms_values in speaker_rms_values.items():
+        if len(rms_values) > 0:
+            speaker_stats[speaker] = {
+                "mean_rms": float(np.mean(rms_values)),
+                "std_rms": float(np.std(rms_values)),
+                "count": len(rms_values),
+            }
+
+    print(f"Computed statistics for {len(speaker_stats)} speakers")
+    return speaker_stats
+
+
+def normalize_audio(
+    batch: Dict[str, Any],
+    *,
+    audio_column: str = "audio",
+    speaker_column: Optional[str] = None,
+    speaker_stats: Optional[Dict[str, Dict[str, float]]] = None,
+    target_rms_db: float = -25.0,
+    normalize_per_speaker: bool = False,
+) -> Dict[str, Any]:
+    """
+    Normalize audio to a target RMS level, optionally using speaker-level statistics.
+
+    Args:
+        batch: Dataset batch containing audio and optional speaker info
+        audio_column: Column name containing audio data
+        speaker_column: Column name containing speaker identifiers (required if normalize_per_speaker=True)
+        speaker_stats: Pre-computed speaker statistics (required if normalize_per_speaker=True)
+        target_rms_db: Target RMS level in decibels (typical range: -20 to -30 dB)
+        normalize_per_speaker: If True, normalize using speaker-level statistics
+
+    Returns:
+        Batch with normalized audio
+    """
+    try:
+        audio = batch.get(audio_column)
+
+        if audio is None:
+            return batch
+
+        # Extract audio array and sampling rate
+        if isinstance(audio, dict):
+            array = audio.get("array")
+            sampling_rate = audio.get("sampling_rate")
+        else:
+            array = getattr(audio, "array", None)
+            sampling_rate = getattr(audio, "sampling_rate", None)
+
+        if array is None:
+            return batch
+
+        # Convert to numpy array if needed
+        if not isinstance(array, np.ndarray):
+            array = np.array(array)
+
+        # Convert target RMS from dB to linear scale
+        target_rms = 10 ** (target_rms_db / 20.0)
+
+        if normalize_per_speaker and speaker_stats and speaker_column:
+            # Speaker-level normalization
+            speaker = batch.get(speaker_column)
+
+            if speaker and speaker in speaker_stats:
+                # Use speaker's mean RMS as baseline
+                speaker_mean_rms = speaker_stats[speaker]["mean_rms"]
+
+                if speaker_mean_rms > 0:
+                    # Scale to target RMS relative to speaker's baseline
+                    scaling_factor = target_rms / speaker_mean_rms
+                    normalized_array = array * scaling_factor
+                else:
+                    normalized_array = array
+            else:
+                # Fallback to global normalization if speaker not found
+                current_rms = np.sqrt(np.mean(array ** 2))
+                if current_rms > 0:
+                    scaling_factor = target_rms / current_rms
+                    normalized_array = array * scaling_factor
+                else:
+                    normalized_array = array
+        else:
+            # Global normalization
+            current_rms = np.sqrt(np.mean(array ** 2))
+
+            if current_rms > 0:
+                scaling_factor = target_rms / current_rms
+                normalized_array = array * scaling_factor
+            else:
+                normalized_array = array
+
+        # Clip to prevent overflow
+        normalized_array = np.clip(normalized_array, -1.0, 1.0)
+
+        # Update audio in batch
+        if isinstance(audio, dict):
+            batch[audio_column] = {
+                "array": normalized_array,
+                "sampling_rate": sampling_rate,
+            }
+        else:
+            # For other audio object types, try to update the array attribute
+            batch[audio_column].array = normalized_array
+
+        return batch
+
+    except (TypeError, RuntimeError, Exception) as e:
+        # Handle errors gracefully, return original batch
         return batch
 
 

@@ -13,7 +13,9 @@ from datasets import Dataset, DatasetDict, load_dataset
 from core import (
     add_duration,
     build_split_metadata,
+    compute_speaker_stats,
     load_cached_split,
+    normalize_audio,
     normalize_split_metadata,
     num_proc_map_kwargs,
     resolve_num_proc,
@@ -128,6 +130,7 @@ def load_superb_emotion_dataset(
     max_validation_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
     max_duration: Optional[float] = None,
+    min_duration: Optional[float] = None,
     seed: int = 0,
     num_proc: Optional[int | str] = None,
     cache_dir: Optional[Path | str] = None,
@@ -143,6 +146,9 @@ def load_superb_emotion_dataset(
     stratify_by_column: Optional[str] = None,
     revision: Optional[str] = None,
     data_dir: Optional[str | Path] = None,
+    normalize_audio_flag: bool = False,
+    normalize_per_speaker: bool = False,
+    target_rms_db: float = -25.0,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], List[str]]:
     """
     Load a speech emotion recognition dataset with optional sub-sampling.
@@ -274,33 +280,90 @@ def load_superb_emotion_dataset(
     effective_num_proc = resolve_num_proc(num_proc)
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
 
-    # Cache the dataset with durations to avoid reprocessing every time
-    processed_cache_dir = cache_root / "processed" / f"{dataset_name}_{dataset_config}"
+    # Build cache key that includes all preprocessing parameters
+    norm_key = "nonorm"
+    if normalize_audio_flag:
+        norm_key = f"norm_spk{normalize_per_speaker}_rms{int(target_rms_db)}"
+    min_dur_key = "nomin" if min_duration is None else f"min{int(min_duration*1000)}ms"
+    max_dur_key = "nomax" if max_duration is None else f"max{int(max_duration)}s"
+
+    processed_cache_dir = (
+        cache_root / "processed" /
+        f"{dataset_name}_{dataset_config}_{min_dur_key}_{max_dur_key}_{norm_key}"
+    )
 
     if processed_cache_dir.exists() and not force_rebuild:
         # Load preprocessed dataset from cache
         from datasets import load_from_disk
+        print(f"Loading preprocessed dataset from cache: {processed_cache_dir.name}")
         dataset = load_from_disk(str(processed_cache_dir))
     else:
-        # Add duration and save to cache
+        print(f"Preprocessing dataset (will be cached for future runs)...")
         map_kwargs = num_proc_map_kwargs(effective_num_proc)
+
+        # Add duration
         duration_fn = partial(add_duration, audio_column=audio_column)
         dataset = dataset.map(duration_fn, **map_kwargs)
+
+        # Filter by duration (min and max in a single pass)
+        if min_duration is not None or max_duration is not None:
+            original_sizes = {name: len(split) for name, split in dataset.items()}
+
+            def duration_filter(example):
+                duration = example.get("duration", 0)
+                if min_duration is not None and duration < min_duration:
+                    return False
+                if max_duration is not None and duration > max_duration:
+                    return False
+                return True
+
+            dataset = dataset.filter(duration_filter)
+            filtered_sizes = {name: len(split) for name, split in dataset.items()}
+            removed = {name: original_sizes[name] - filtered_sizes[name] for name in original_sizes}
+
+            if any(count > 0 for count in removed.values()):
+                removed_info = ", ".join(f"{name}={count}" for name, count in removed.items() if count > 0)
+                filter_desc = []
+                if min_duration is not None:
+                    filter_desc.append(f"min={min_duration}s")
+                if max_duration is not None:
+                    filter_desc.append(f"max={max_duration}s")
+                print(f"⚠️  Filtered out {removed_info} samples outside duration range ({', '.join(filter_desc)})")
+
+        # Apply audio normalization if requested
+        if normalize_audio_flag:
+            speaker_stats = None
+
+            # Compute speaker statistics if speaker-level normalization is enabled
+            if normalize_per_speaker:
+                # Use train split for computing speaker statistics
+                train_data = dataset.get("train")
+                if train_data is not None and "Speaker" in train_data.column_names:
+                    speaker_stats = compute_speaker_stats(
+                        train_data,
+                        speaker_column="Speaker",
+                        audio_column=audio_column,
+                    )
+                else:
+                    print("⚠️  Speaker-level normalization requested but Speaker column not found, falling back to global normalization")
+
+            # Apply normalization to all splits
+            print(f"Normalizing audio (speaker-level={normalize_per_speaker}, target_rms={target_rms_db} dB)...")
+            normalize_fn = partial(
+                normalize_audio,
+                audio_column=audio_column,
+                speaker_column="Speaker" if normalize_per_speaker else None,
+                speaker_stats=speaker_stats,
+                target_rms_db=target_rms_db,
+                normalize_per_speaker=normalize_per_speaker,
+            )
+            dataset = dataset.map(normalize_fn, **map_kwargs)
 
         # Save to disk for future runs
         if cache_splits:
             processed_cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Saving preprocessed dataset to cache: {processed_cache_dir.name}")
             dataset.save_to_disk(str(processed_cache_dir))
-
-    # Filter out extremely long audio samples to prevent OOM
-    if max_duration is not None and max_duration > 0:
-        original_sizes = {name: len(split) for name, split in dataset.items()}
-        dataset = dataset.filter(lambda x: x.get("duration", 0) <= max_duration)
-        filtered_sizes = {name: len(split) for name, split in dataset.items()}
-        removed = {name: original_sizes[name] - filtered_sizes[name] for name in original_sizes}
-        if any(count > 0 for count in removed.values()):
-            removed_info = ", ".join(f"{name}={count}" for name, count in removed.items() if count > 0)
-            print(f"⚠️  Filtered out {removed_info} samples exceeding max_duration={max_duration}s")
     # Include max_duration in cache key to invalidate cache when filtering changes
     duration_key = "none" if max_duration is None else f"{int(max_duration)}s"
     cache_name = (
@@ -416,28 +479,18 @@ class EmotionDataCollator:
         # Format class options for the prompt
         class_options = ", ".join(self.label_names)
 
-        # Previous prompt (commented out):
-        # base = (
-        #     f"{self.processor.audio_token}"
-        #     f"Listen carefully to the audio and identify the speaker's emotional state. "
-        #     f"Choose the most appropriate emotion from: {class_options}."
-        # )
-        # transcript = (transcript or "").strip()
-        # if transcript and self.include_transcript:
-        #     base += f"\n\nTranscript: \"{transcript}\"\n\nEmotion:"
-        # else:
-        #     base += "\n\nEmotion:"
-
-        # New prompt format (refined)
+        # Optimized prompt (based on prompt comparison results)
+        # This format performed best in zero-shot evaluation (51.5% accuracy, 0.267 F1)
         base = (
-            f"{self.processor.audio_token}\n"
-            f"Determine the speaker's emotion based on the audio and transcript.\n"
+            f"{self.processor.audio_token}"
+            f"Listen carefully to the audio and identify the speaker's emotional state. "
+            f"Choose the most appropriate emotion from: {class_options}."
         )
         transcript = (transcript or "").strip()
         if transcript and self.include_transcript:
-            base += f"\nTranscript: \"{transcript}\"\n"
-        base += f"\nPossible emotions: {class_options}\n"
-        base += f"\nEmotion:"
+            base += f"\n\nTranscript: \"{transcript}\"\n\nEmotion:"
+        else:
+            base += "\n\nEmotion:"
 
         return base
 
