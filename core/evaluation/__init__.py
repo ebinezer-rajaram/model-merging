@@ -9,7 +9,7 @@ from .eval_utils import (
     run_evaluation,
 )
 from .metrics import compute_wer_from_texts, decode_tokens, sanitize_token_array
-from .plotting import plot_loss_and_wer
+from .plotting import plot_confusion_matrix, plot_loss_and_wer
 
 __all__ = [
     "TaskEvalSetup",
@@ -22,4 +22,5 @@ __all__ = [
     "decode_tokens",
     "sanitize_token_array",
     "plot_loss_and_wer",
+    "plot_confusion_matrix",
 ]
