@@ -471,7 +471,7 @@ def _get_asr_task_config() -> TaskConfig:
         loader_config_keys=("train_hours", "val_hours", "test_hours", "test_split"),
         has_label_names=False,
         collator_class=OmniASRCollator,
-        collator_params={},
+        collator_params={"mode": "eval"},  # Use eval mode for evaluation
         compute_metrics_fn=compute_asr_metrics,
         metrics_params={},
         required_columns=("audio", "text"),

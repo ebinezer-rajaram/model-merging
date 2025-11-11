@@ -107,6 +107,42 @@ class CustomTrainer(Trainer):
         if self.constrained_decoding_fn is not None:
             final_gen_kwargs["prefix_allowed_tokens_fn"] = self.constrained_decoding_fn
 
+        # Ensure EOS token handling is properly configured
+        # Build list of EOS token IDs (matching reference test script)
+        if "eos_token_id" not in final_gen_kwargs or final_gen_kwargs["eos_token_id"] is None:
+            # Get tokenizer from processor
+            tokenizer = getattr(self, "tokenizer", None) or getattr(self.processing_class, "tokenizer", None)
+            if tokenizer is not None:
+                # Start with base EOS token
+                eos_token_ids = [tokenizer.eos_token_id]
+
+                # Add newline token if it exists and is not UNK
+                newline_id = tokenizer.convert_tokens_to_ids("\n")
+                if newline_id is not None and newline_id != tokenizer.unk_token_id:
+                    eos_token_ids.append(newline_id)
+
+                # Add im_end token if it exists and is not UNK
+                im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+                if im_end_id is not None and im_end_id != tokenizer.unk_token_id:
+                    eos_token_ids.append(im_end_id)
+
+                final_gen_kwargs["eos_token_id"] = eos_token_ids
+            else:
+                # Fallback to model's configured EOS token ID
+                eos_token_id = getattr(model.config, "eos_token_id", None)
+                if eos_token_id is not None:
+                    final_gen_kwargs["eos_token_id"] = eos_token_id
+
+        if "pad_token_id" not in final_gen_kwargs or final_gen_kwargs["pad_token_id"] is None:
+            # Use model's configured pad token ID
+            pad_token_id = getattr(model.config, "pad_token_id", None)
+            if pad_token_id is not None:
+                final_gen_kwargs["pad_token_id"] = pad_token_id
+
+        # Enable early stopping for beam search to stop when EOS is generated
+        if final_gen_kwargs.get("num_beams", 1) > 1:
+            final_gen_kwargs.setdefault("early_stopping", True)
+
         generated = model.generate(**gen_inputs, **final_gen_kwargs)
 
         preds = generated.detach().cpu()

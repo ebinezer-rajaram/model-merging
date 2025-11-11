@@ -4,7 +4,7 @@ from typing import Any, Dict, Literal
 
 import numpy as np
 
-from core import compute_wer_from_texts, decode_tokens
+from core import compute_wer_from_texts
 
 
 def compute_asr_metrics(
@@ -42,8 +42,26 @@ def compute_asr_metrics(
     preds = np.where((preds < 0) | ~np.isfinite(preds), pad_id, preds).astype(np.int64)
     labels = np.where((labels < 0) | ~np.isfinite(labels), pad_id, labels).astype(np.int64)
 
-    pred_texts = [decode_tokens(p, processor.tokenizer) for p in preds]
-    label_texts = [decode_tokens(l, processor.tokenizer) for l in labels]
+    # Decode using batch_decode (matching reference test script)
+    pred_texts_raw = processor.batch_decode(preds, skip_special_tokens=True)
+    label_texts_raw = processor.batch_decode(labels, skip_special_tokens=True)
+
+    # Post-process to remove assistant prefix and clean up (matching reference test script)
+    pred_texts = []
+    for text in pred_texts_raw:
+        text = text.strip()
+        # Extract transcription from chat response format if needed
+        if "assistant\n" in text:
+            text = text.split("assistant\n", 1)[1].strip()
+        pred_texts.append(text)
+
+    label_texts = []
+    for text in label_texts_raw:
+        text = text.strip()
+        # Extract transcription from chat response format if needed
+        if "assistant\n" in text:
+            text = text.split("assistant\n", 1)[1].strip()
+        label_texts.append(text)
 
     if wer_normalization == "both":
         return {
