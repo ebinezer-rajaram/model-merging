@@ -82,8 +82,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--confusion-matrix",
         action="store_true",
+        dest="confusion_matrix",
         help="Generate confusion matrix for classification tasks.",
     )
+    parser.add_argument(
+        "--no-confusion-matrix",
+        action="store_false",
+        dest="confusion_matrix",
+        help="Disable confusion matrix generation (default: False).",
+    )
+    parser.set_defaults(confusion_matrix=True)
     return parser.parse_args()
 
 
@@ -397,6 +405,7 @@ def evaluate(
             generation_kwargs=generation_kwargs,
             output_dir=eval_output_dir,
             store_predictions=store_predictions,
+            processor=processor,
         )
 
         # Generate confusion matrix if requested and predictions are available

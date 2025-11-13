@@ -38,6 +38,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Compare adapter with base model performance (runs base model eval automatically).",
     )
+    eval_parser.add_argument(
+        "--confusion-matrix",
+        action="store_true",
+        dest="confusion_matrix",
+        help="Generate confusion matrix for classification tasks.",
+    )
+    eval_parser.add_argument(
+        "--no-confusion-matrix",
+        action="store_false",
+        dest="confusion_matrix",
+        help="Disable confusion matrix generation (default: True).",
+    )
+    eval_parser.set_defaults(confusion_matrix=True)
 
     return parser.parse_args()
 
@@ -111,6 +124,7 @@ def dispatch_evaluate(args: argparse.Namespace) -> None:
             save_json=args.save_json,
             enable_cache=args.use_cache,
             show_summary=True,
+            generate_confusion_matrix=args.confusion_matrix,
         )
 
 
