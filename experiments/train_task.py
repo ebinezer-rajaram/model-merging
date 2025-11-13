@@ -647,10 +647,14 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
                 training_args.group_by_length = False
         elif balanced_sampling == "weighted":
             # Create weighted sampler (oversample minority classes)
+            # Get weighting method from training config
+            weighting_method = training_cfg.get("sampling_method", "inverse")
+
             custom_sampler = WeightedClassSampler(
                 dataset=train_ds,
                 num_samples=len(train_ds),
                 replacement=True,
+                method=weighting_method,
             )
         else:
             print(f"⚠️  Unknown balanced_sampling option: {balanced_sampling}")
@@ -678,6 +682,13 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
     if confusion_matrix_filename:
         confusion_matrix_path = metrics_dir / confusion_matrix_filename
 
+    # Resolve checkpoint path for resuming
+    from core.training.training_loop import resolve_checkpoint_path
+    checkpoint_path = resolve_checkpoint_path(
+        train_config.resume_from_checkpoint,
+        output_dir,
+    )
+
     # Run training with evaluation
     run_training_with_evaluation(
         trainer,
@@ -695,6 +706,7 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
         confusion_matrix_path=confusion_matrix_path,
         confusion_matrix_normalize=confusion_matrix_normalize,
         label_names=label_names,
+        resume_from_checkpoint=checkpoint_path,
     )
 
 
@@ -834,6 +846,13 @@ def run_asr_task(config_path: Path) -> None:
         generation_kwargs=train_config.generation_kwargs,
     )
 
+    # Resolve checkpoint path for resuming
+    from core.training.training_loop import resolve_checkpoint_path
+    checkpoint_path = resolve_checkpoint_path(
+        train_config.resume_from_checkpoint,
+        output_dir,
+    )
+
     # Run training with evaluation
     run_training_with_evaluation(
         trainer,
@@ -848,6 +867,7 @@ def run_asr_task(config_path: Path) -> None:
         metrics_dir=metrics_dir,
         test_dataset=test_ds,
         test_split_name=dataset_cfg.get("test_split", "test.clean"),
+        resume_from_checkpoint=checkpoint_path,
     )
 
 

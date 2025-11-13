@@ -181,8 +181,19 @@ def compute_intent_metrics(
     *,
     processor,
     label_names: Sequence[str],
+    store_predictions: bool = False,
 ) -> Dict[str, float]:
-    """Compute accuracy and macro-F1 for generated intent labels."""
+    """Compute accuracy and macro-F1 for generated intent labels.
+
+    Args:
+        eval_pred: Tuple of (predictions, labels)
+        processor: Model processor containing tokenizer
+        label_names: List of intent label names
+        store_predictions: If True, store predictions and labels for confusion matrix
+
+    Returns:
+        Dictionary containing metrics and optionally prediction data
+    """
     preds, labels = eval_pred
     if isinstance(preds, tuple):
         preds = preds[0]
@@ -245,13 +256,20 @@ def compute_intent_metrics(
 
     recognized_rate = float(recognized / total) if total else 0.0
 
-    return {
+    result = {
         "accuracy": accuracy,
         "macro_f1": macro_f1,
         "weighted_f1": weighted_f1,
         "recognized_rate": recognized_rate,
         "num_samples": float(total),
     }
+
+    # Store predictions for confusion matrix if requested
+    if store_predictions:
+        result["_predictions"] = pred_indices
+        result["_labels"] = target_indices
+
+    return result
 
 
 __all__ = ["compute_intent_metrics"]

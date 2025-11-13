@@ -73,6 +73,9 @@ class TrainingConfig:
     # Evaluation
     initial_eval: bool
 
+    # Resume from checkpoint
+    resume_from_checkpoint: Optional[str]
+
 
 def parse_training_config(
     training_cfg: Dict[str, Any],
@@ -223,6 +226,9 @@ def parse_training_config(
         ),
         initial_eval=training_cfg.get(
             "initial_eval", defaults.get("initial_eval", False)
+        ),
+        resume_from_checkpoint=training_cfg.get(
+            "resume_from_checkpoint", defaults.get("resume_from_checkpoint")
         ),
     )
 

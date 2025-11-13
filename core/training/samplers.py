@@ -128,9 +128,10 @@ class WeightedClassSampler(Sampler[int]):
         dataset: The dataset to sample from (must have 'label' column)
         num_samples: Number of samples to draw per epoch (default: len(dataset))
         replacement: Whether to sample with replacement
+        method: Weighting method - "inverse", "sqrt_inverse", or "balanced"
 
     Example:
-        >>> sampler = WeightedClassSampler(train_dataset)
+        >>> sampler = WeightedClassSampler(train_dataset, method="sqrt_inverse")
         >>> dataloader = DataLoader(dataset, sampler=sampler, batch_size=16)
     """
 
@@ -139,10 +140,12 @@ class WeightedClassSampler(Sampler[int]):
         dataset: Dataset,
         num_samples: Optional[int] = None,
         replacement: bool = True,
+        method: str = "inverse",
     ):
         self.dataset = dataset
         self.num_samples = num_samples if num_samples is not None else len(dataset)
         self.replacement = replacement
+        self.method = method
 
         # Count samples per class
         labels = [dataset[idx]['label'] for idx in range(len(dataset))]
@@ -152,13 +155,24 @@ class WeightedClassSampler(Sampler[int]):
         class_counts = torch.bincount(torch.tensor(labels))
         num_classes = len(class_counts)
 
-        # Compute weights: inverse of class frequency
-        class_weights = 1.0 / class_counts.float()
+        # Compute weights based on method
+        if method == "inverse":
+            # Inverse of class frequency (full rebalancing)
+            class_weights = 1.0 / class_counts.float()
+        elif method == "sqrt_inverse":
+            # Square root of inverse (gentler rebalancing)
+            class_weights = 1.0 / torch.sqrt(class_counts.float())
+        elif method == "balanced":
+            # Balanced: scale to make expected samples equal
+            total_samples = class_counts.sum().float()
+            class_weights = total_samples / (num_classes * class_counts.float())
+        else:
+            raise ValueError(f"Unknown weighting method: {method}. Use 'inverse', 'sqrt_inverse', or 'balanced'")
 
         # Assign weight to each sample based on its class
         self.weights = torch.tensor([class_weights[label] for label in labels])
 
-        print(f"📊 WeightedClassSampler initialized:")
+        print(f"📊 WeightedClassSampler initialized (method={method}):")
         print(f"   - Dataset size: {len(dataset)}")
         print(f"   - Samples per epoch: {self.num_samples}")
         print(f"   - Class counts: {class_counts.tolist()}")

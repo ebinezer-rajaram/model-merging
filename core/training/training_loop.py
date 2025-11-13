@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,112 @@ from core.evaluation.plotting import plot_confusion_matrix, plot_loss_and_wer
 
 from .run_manager import RunManager
 from .trainer import CustomTrainer, save_artifacts, save_history_to_csv
+
+
+def find_latest_checkpoint(output_dir: str | Path) -> Optional[str]:
+    """Find the latest checkpoint in the output directory.
+
+    Args:
+        output_dir: Directory to search for checkpoints
+
+    Returns:
+        Path to the latest checkpoint directory, or None if no checkpoints found
+    """
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        return None
+
+    # Find all checkpoint directories
+    checkpoint_dirs = []
+    checkpoint_pattern = re.compile(r"checkpoint-(\d+)$")
+
+    for item in output_path.iterdir():
+        if not item.is_dir():
+            continue
+        match = checkpoint_pattern.search(item.name)
+        if match:
+            step = int(match.group(1))
+            # Verify checkpoint is complete by checking for required files
+            if _is_checkpoint_complete(item):
+                checkpoint_dirs.append((step, item))
+
+    if not checkpoint_dirs:
+        return None
+
+    # Sort by step number and return the latest
+    checkpoint_dirs.sort(key=lambda x: x[0])
+    latest_checkpoint = checkpoint_dirs[-1][1]
+    return str(latest_checkpoint)
+
+
+def _is_checkpoint_complete(checkpoint_dir: Path) -> bool:
+    """Check if a checkpoint directory contains all required files.
+
+    Args:
+        checkpoint_dir: Path to checkpoint directory
+
+    Returns:
+        True if checkpoint is complete, False otherwise
+    """
+    required_files = [
+        "trainer_state.json",
+        "optimizer.pt",
+        "scheduler.pt",
+    ]
+
+    for file in required_files:
+        if not (checkpoint_dir / file).exists():
+            return False
+
+    # Check for either adapter_model.safetensors or model weights
+    has_model = (
+        (checkpoint_dir / "adapter_model.safetensors").exists() or
+        (checkpoint_dir / "adapter_model.bin").exists() or
+        (checkpoint_dir / "pytorch_model.bin").exists() or
+        (checkpoint_dir / "model.safetensors").exists()
+    )
+
+    return has_model
+
+
+def resolve_checkpoint_path(
+    resume_from_checkpoint: Optional[str],
+    output_dir: str | Path,
+) -> Optional[str]:
+    """Resolve the checkpoint path to use for resuming training.
+
+    Args:
+        resume_from_checkpoint: Config value - can be "auto", a path, or None
+        output_dir: Training output directory
+
+    Returns:
+        Resolved checkpoint path, or None if no checkpoint should be used
+    """
+    if resume_from_checkpoint is None:
+        return None
+
+    if resume_from_checkpoint == "auto":
+        # Auto-detect latest checkpoint
+        checkpoint_path = find_latest_checkpoint(output_dir)
+        if checkpoint_path:
+            print(f"🔄 Auto-detected checkpoint: {checkpoint_path}")
+        else:
+            print("ℹ️  No existing checkpoint found, starting from scratch")
+        return checkpoint_path
+
+    # Treat as explicit path
+    checkpoint_path = Path(resume_from_checkpoint)
+    if not checkpoint_path.exists():
+        raise ValueError(f"Checkpoint path does not exist: {resume_from_checkpoint}")
+
+    if not checkpoint_path.is_dir():
+        raise ValueError(f"Checkpoint path is not a directory: {resume_from_checkpoint}")
+
+    if not _is_checkpoint_complete(checkpoint_path):
+        raise ValueError(f"Checkpoint is incomplete: {resume_from_checkpoint}")
+
+    print(f"🔄 Resuming from checkpoint: {checkpoint_path}")
+    return str(checkpoint_path)
 
 
 def build_history_record(metrics: Dict[str, Any], *, step: int) -> Optional[Dict[str, Any]]:
@@ -97,6 +204,7 @@ def run_training_with_evaluation(
     confusion_matrix_path: Optional[Path] = None,
     confusion_matrix_normalize: bool = True,
     label_names: Optional[List[str]] = None,
+    resume_from_checkpoint: Optional[str] = None,
 ) -> None:
     """Execute training loop with optional initial eval, training, final eval, and artifact saving.
 
@@ -116,6 +224,7 @@ def run_training_with_evaluation(
         confusion_matrix_path: Optional path to save confusion matrix plot
         confusion_matrix_normalize: Whether to normalize confusion matrix (default: True)
         label_names: List of label names for confusion matrix axis labels
+        resume_from_checkpoint: Optional checkpoint path to resume from
     """
     seed_history_rows: List[Dict[str, Any]] = []
 
@@ -151,7 +260,7 @@ def run_training_with_evaluation(
 
     # Training
     print("🚀 Starting LoRA fine-tuning...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Final evaluation on full validation dataset
     print(f"🎯 Running evaluation on validation split ({len(full_eval_dataset)} samples)...")
@@ -184,13 +293,29 @@ def run_training_with_evaluation(
             def compute_metrics_with_predictions(eval_pred):
                 # Call original with store_predictions=True if it supports it
                 import inspect
-                sig = inspect.signature(original_compute_metrics)
-                if 'store_predictions' in sig.parameters:
-                    # Use functools to add the parameter
-                    from functools import partial
-                    temp_fn = partial(original_compute_metrics.func if hasattr(original_compute_metrics, 'func') else original_compute_metrics, store_predictions=True)
-                    return temp_fn(eval_pred)
-                return original_compute_metrics(eval_pred)
+                from functools import partial
+
+                # Handle both regular functions and partial functions
+                if hasattr(original_compute_metrics, 'func'):
+                    # It's already a partial - extract the underlying function and keywords
+                    base_func = original_compute_metrics.func
+                    existing_keywords = original_compute_metrics.keywords.copy()
+                    sig = inspect.signature(base_func)
+
+                    if 'store_predictions' in sig.parameters:
+                        # Add store_predictions to existing keywords
+                        existing_keywords['store_predictions'] = True
+                        temp_fn = partial(base_func, **existing_keywords)
+                        return temp_fn(eval_pred)
+                    else:
+                        return original_compute_metrics(eval_pred)
+                else:
+                    # It's a regular function
+                    sig = inspect.signature(original_compute_metrics)
+                    if 'store_predictions' in sig.parameters:
+                        temp_fn = partial(original_compute_metrics, store_predictions=True)
+                        return temp_fn(eval_pred)
+                    return original_compute_metrics(eval_pred)
 
             trainer.compute_metrics = compute_metrics_with_predictions
 
