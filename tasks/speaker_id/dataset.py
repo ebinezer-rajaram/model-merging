@@ -495,16 +495,14 @@ def load_voxceleb_speaker_dataset(
 class SpeakerIdentificationCollator:
     """Prepare batches for speaker identification fine-tuning.
 
-    Supports two modes:
-    - train: Uses chat template with both user message (audio + instruction) and assistant response (ground truth)
-    - eval: Uses chat template with only user message (audio + instruction) and add_generation_prompt=True
+    Always uses chat template with both user message (audio + instruction) and assistant response (ground truth).
+    During evaluation, the CustomTrainer's prediction_step will strip out the ground truth before generation.
     """
 
     processor: Any
     sampling_rate: int
     label_names: Sequence[str]
     include_transcript: bool = False
-    mode: str = "train"  # "train" or "eval"
 
     def _label_to_text(self, value: Any) -> str:
         if value is None:
@@ -554,48 +552,32 @@ class SpeakerIdentificationCollator:
             tokenizer.padding_side = "left"
 
         # Build prompts using chat template format (matching ASR approach)
+        # Always include both user message and assistant response with ground truth
+        # During evaluation, CustomTrainer's prediction_step will truncate before generation
         prompts = []
         for text, label in zip(transcripts, label_strings):
             instruction = self._build_instruction(text)
 
-            if self.mode == "train":
-                # Training: include both user message and assistant response with ground truth
-                conversation = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "audio", "audio_url": None},
-                            {"type": "text", "text": instruction}
-                        ]
-                    },
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": label}
-                        ]
-                    }
-                ]
-                prompt = self.processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=False,
-                    tokenize=False
-                )
-            else:
-                # Evaluation: only user message, no ground truth
-                conversation = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "audio", "audio_url": None},
-                            {"type": "text", "text": instruction}
-                        ]
-                    }
-                ]
-                prompt = self.processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=True,
-                    tokenize=False
-                )
+            conversation = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio_url": None},
+                        {"type": "text", "text": instruction}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": label}
+                    ]
+                }
+            ]
+            prompt = self.processor.apply_chat_template(
+                conversation,
+                add_generation_prompt=False,
+                tokenize=False
+            )
             prompts.append(prompt)
 
         inputs = self.processor(
@@ -617,30 +599,29 @@ class SpeakerIdentificationCollator:
         labels = labels.masked_fill(labels == audio_token_id, -100)
 
         # Mask everything except the assistant's speaker response
-        if self.mode == "train":
-            for i, label in enumerate(label_strings):
-                # Tokenize the ground truth speaker label to identify it in the full sequence
-                label_tokens = tokenizer.encode(label, add_special_tokens=False)
+        for i, label in enumerate(label_strings):
+            # Tokenize the ground truth speaker label to identify it in the full sequence
+            label_tokens = tokenizer.encode(label, add_special_tokens=False)
 
-                # Find where the label appears in the input_ids
-                input_ids = inputs["input_ids"][i]
-                label_length = len(label_tokens)
+            # Find where the label appears in the input_ids
+            input_ids = inputs["input_ids"][i]
+            label_length = len(label_tokens)
 
-                # Search for the label tokens in the sequence
-                found = False
-                for j in range(len(input_ids) - label_length + 1):
-                    if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
-                        # Mask everything before the label
-                        labels[i, :j] = -100
-                        found = True
-                        break
+            # Search for the label tokens in the sequence
+            found = False
+            for j in range(len(input_ids) - label_length + 1):
+                if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
+                    # Mask everything before the label
+                    labels[i, :j] = -100
+                    found = True
+                    break
 
-                # Fallback: mask based on sequence structure
-                if not found:
-                    non_masked = (labels[i] != -100).nonzero(as_tuple=False)
-                    if len(non_masked) > label_length:
-                        mask_until = non_masked[-label_length].item()
-                        labels[i, :mask_until] = -100
+            # Fallback: mask based on sequence structure
+            if not found:
+                non_masked = (labels[i] != -100).nonzero(as_tuple=False)
+                if len(non_masked) > label_length:
+                    mask_until = non_masked[-label_length].item()
+                    labels[i, :mask_until] = -100
 
         inputs["labels"] = labels
         return inputs

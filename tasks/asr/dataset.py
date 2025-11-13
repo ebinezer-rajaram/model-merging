@@ -193,14 +193,12 @@ def load_librispeech_10h() -> Tuple[Dataset, Dataset]:
 class OmniASRCollator:
     """Data collator for Omni ASR inputs.
 
-    Supports two modes:
-    - train: Uses chat template with both user message (audio + instruction) and assistant response (ground truth)
-    - eval: Uses chat template with only user message (audio + instruction) and add_generation_prompt=True
+    Always uses chat template with both user message (audio + instruction) and assistant response (ground truth).
+    During evaluation, the CustomTrainer's prediction_step will strip out the ground truth before generation.
     """
 
     processor: Any
     sampling_rate: int
-    mode: str = "train"  # "train" or "eval"
     instruction: str = "Only output the transcription of this audio. Do not include any explanations, summaries, or questions."
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -209,48 +207,30 @@ class OmniASRCollator:
         texts = [feature["text"] for feature in features]
 
         # Build prompts using chat template format (matching reference test script)
+        # Always include both user message and assistant response with ground truth
+        # During evaluation, CustomTrainer's prediction_step will truncate before generation
         prompts = []
         for text in texts:
-            if self.mode == "train":
-                # Training: include both user message and assistant response with ground truth
-                conversation = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "audio", "audio_url": None},
-                            {"type": "text", "text": self.instruction}
-                        ]
-                    },
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": text}
-                        ]
-                    }
-                ]
-                # Don't add generation prompt for training (we have the full conversation)
-                prompt = self.processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=False,
-                    tokenize=False
-                )
-            else:
-                # Evaluation: only user message, no ground truth
-                conversation = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "audio", "audio_url": None},
-                            {"type": "text", "text": self.instruction}
-                        ]
-                    }
-                ]
-                # Add generation prompt for evaluation (model should generate assistant response)
-                prompt = self.processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=True,
-                    tokenize=False
-                )
+            conversation = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio_url": None},
+                        {"type": "text", "text": self.instruction}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": text}
+                    ]
+                }
+            ]
+            prompt = self.processor.apply_chat_template(
+                conversation,
+                add_generation_prompt=False,
+                tokenize=False
+            )
             prompts.append(prompt)
 
         tokenizer = getattr(self.processor, "tokenizer", None)
@@ -279,36 +259,35 @@ class OmniASRCollator:
         # Mask everything except the assistant's transcription response
         # With chat template, the format is: <user_message><audio><instruction><assistant_header>TRANSCRIPTION
         # We only want to train on predicting TRANSCRIPTION, not the prompts/headers
-        if self.mode == "train":
-            # For each sample, find where the assistant's actual transcription starts
-            # The chat template adds role markers, so we need to mask everything before the transcription
-            for i, text in enumerate(texts):
-                # Tokenize the ground truth transcription to identify it in the full sequence
-                transcription_tokens = tokenizer.encode(text, add_special_tokens=False)
+        # For each sample, find where the assistant's actual transcription starts
+        # The chat template adds role markers, so we need to mask everything before the transcription
+        for i, text in enumerate(texts):
+            # Tokenize the ground truth transcription to identify it in the full sequence
+            transcription_tokens = tokenizer.encode(text, add_special_tokens=False)
 
-                # Find where the transcription appears in the input_ids
-                input_ids = inputs["input_ids"][i]
-                transcription_length = len(transcription_tokens)
+            # Find where the transcription appears in the input_ids
+            input_ids = inputs["input_ids"][i]
+            transcription_length = len(transcription_tokens)
 
-                # Search for the transcription tokens in the sequence
-                found = False
-                for j in range(len(input_ids) - transcription_length + 1):
-                    # Check if transcription matches at this position
-                    if torch.all(input_ids[j:j + transcription_length] == torch.tensor(transcription_tokens, device=input_ids.device)):
-                        # Mask everything before the transcription
-                        labels[i, :j] = -100
-                        found = True
-                        break
+            # Search for the transcription tokens in the sequence
+            found = False
+            for j in range(len(input_ids) - transcription_length + 1):
+                # Check if transcription matches at this position
+                if torch.all(input_ids[j:j + transcription_length] == torch.tensor(transcription_tokens, device=input_ids.device)):
+                    # Mask everything before the transcription
+                    labels[i, :j] = -100
+                    found = True
+                    break
 
-                # If we didn't find an exact match, fall back to masking based on sequence structure
-                if not found:
-                    # Mask everything except the last tokens (likely the transcription)
-                    # This is a fallback and may not be perfect
-                    non_masked = (labels[i] != -100).nonzero(as_tuple=False)
-                    if len(non_masked) > transcription_length:
-                        # Mask all but the last transcription_length tokens
-                        mask_until = non_masked[-transcription_length].item()
-                        labels[i, :mask_until] = -100
+            # If we didn't find an exact match, fall back to masking based on sequence structure
+            if not found:
+                # Mask everything except the last tokens (likely the transcription)
+                # This is a fallback and may not be perfect
+                non_masked = (labels[i] != -100).nonzero(as_tuple=False)
+                if len(non_masked) > transcription_length:
+                    # Mask all but the last transcription_length tokens
+                    mask_until = non_masked[-transcription_length].item()
+                    labels[i, :mask_until] = -100
 
         inputs["labels"] = labels
         return inputs

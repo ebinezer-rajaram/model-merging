@@ -27,6 +27,8 @@ CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "max_train_samples",
     "max_validation_samples",
     "max_test_samples",
+    "max_duration",
+    "min_duration",
     "label_column",
     "text_column",
     "audio_column",
@@ -37,6 +39,9 @@ CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "stratify_by_column",
     "revision",
     "data_dir",
+    "normalize_audio",
+    "normalize_per_speaker",
+    "target_rms_db",
 )
 
 SPEAKER_EXTRA_EVAL_KEYS: Tuple[str, ...] = (
@@ -163,19 +168,23 @@ def load_model_and_processor(
     model_path: Path,
     adapter_path: Optional[Path] = None,
 ) -> tuple[Any, Qwen2_5OmniProcessor]:
-    """Load the base Qwen Omni model and optionally attach a LoRA adapter."""
-    processor = Qwen2_5OmniProcessor.from_pretrained(str(model_path), use_fast=False)
-    tokenizer = getattr(processor, "tokenizer", None)
-    if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
-        tokenizer.padding_side = "left"
-    model = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(
-        str(model_path),
+    """Load the base Qwen Omni model and optionally attach a LoRA adapter.
+
+    For evaluation, we load the base model without LoRA, then attach a saved adapter.
+    This is different from training which creates a new LoRA adapter.
+    """
+    from core.models.models import load_qwen_model
+
+    # Load base model without creating new LoRA adapter (apply_lora=False)
+    model, processor = load_qwen_model(
+        model_path,
+        apply_lora=False,
         torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map="auto",
+        use_fast_tokenizer=False,
     )
 
-    _configure_special_tokens(model, processor)
-
+    # Load saved adapter if provided
     if adapter_path is not None:
         model = PeftModel.from_pretrained(model, str(adapter_path))
 
@@ -211,6 +220,7 @@ def run_evaluation(
     generation_kwargs: Optional[Dict[str, Any]] = None,
     output_dir: Path | None = None,
     store_predictions: bool = False,
+    processor: Optional[Any] = None,
 ) -> Dict[str, float]:
     """Execute evaluation on the provided dataset and return metric scores.
 
@@ -221,6 +231,7 @@ def run_evaluation(
         generation_kwargs: Generation parameters
         output_dir: Output directory for evaluation artifacts
         store_predictions: If True, enable prediction storage in compute_metrics (for confusion matrix)
+        processor: Optional processor for the model (ensures correct tokenizer settings)
 
     Returns:
         Dictionary of evaluation metrics
@@ -244,19 +255,25 @@ def run_evaluation(
     compute_metrics = setup.compute_metrics
     if store_predictions and compute_metrics is not None:
         import inspect
-        sig = inspect.signature(compute_metrics)
+        # Get the underlying function signature (handles partial objects correctly)
+        base_func = compute_metrics.func if hasattr(compute_metrics, 'func') else compute_metrics
+        sig = inspect.signature(base_func)
         if 'store_predictions' in sig.parameters:
             from functools import partial
-            compute_metrics = partial(
-                compute_metrics.func if hasattr(compute_metrics, 'func') else compute_metrics,
-                store_predictions=True
-            )
+            # If it's already a partial, preserve existing kwargs and add store_predictions
+            if hasattr(compute_metrics, 'func'):
+                existing_kwargs = compute_metrics.keywords.copy()
+                existing_kwargs['store_predictions'] = True
+                compute_metrics = partial(base_func, **existing_kwargs)
+            else:
+                compute_metrics = partial(compute_metrics, store_predictions=True)
 
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         eval_dataset=setup.dataset,
         data_collator=setup.data_collator,
+        processing_class=processor,
         compute_metrics=compute_metrics,
         generation_kwargs=generation_kwargs,
     )
@@ -310,7 +327,11 @@ def _build_generic_eval_setup(
     # Add task-specific config keys
     for key in task_config.loader_config_keys:
         if key in dataset_cfg and dataset_cfg[key] is not None:
-            loader_kwargs[key] = dataset_cfg[key]
+            # Handle parameter name mapping
+            if key == "normalize_audio":
+                loader_kwargs["normalize_audio_flag"] = dataset_cfg[key]
+            else:
+                loader_kwargs[key] = dataset_cfg[key]
 
     # Load dataset
     dataset_bundle = task_config.dataset_loader(**loader_kwargs)
@@ -426,24 +447,67 @@ def _build_generic_eval_setup(
 
 
 def _asr_post_load_hook(dataset: Any, dataset_cfg: Dict[str, Any], split: str) -> Any:
-    """Filter ASR dataset by max duration if specified."""
+    """Filter ASR dataset by duration if specified."""
     max_duration_seconds = dataset_cfg.get("max_duration_seconds")
-    if max_duration_seconds is None:
+    min_duration_seconds = dataset_cfg.get("min_duration_seconds")
+
+    if max_duration_seconds is None and min_duration_seconds is None:
         return dataset
 
-    max_duration_seconds = float(max_duration_seconds)
-
-    def _keep_duration(example: Dict[str, Any], *, _max: float = max_duration_seconds) -> bool:
+    def _keep_duration(example: Dict[str, Any]) -> bool:
         duration = example.get("duration") or 0.0
-        return float(duration) <= _max
+        duration_float = float(duration)
+        if max_duration_seconds is not None and duration_float > max_duration_seconds:
+            return False
+        if min_duration_seconds is not None and duration_float < min_duration_seconds:
+            return False
+        return True
 
     before = len(dataset)
     dataset = dataset.filter(_keep_duration)
     if len(dataset) != before:
-        print(
-            f"⏱️ Filtered {before - len(dataset)} samples longer than"
-            f" {max_duration_seconds:.1f}s from split '{split}'."
-        )
+        filtered_count = before - len(dataset)
+        duration_info = []
+        if max_duration_seconds is not None:
+            duration_info.append(f">{max_duration_seconds:.1f}s")
+        if min_duration_seconds is not None:
+            duration_info.append(f"<{min_duration_seconds:.1f}s")
+        duration_str = " or ".join(duration_info)
+        print(f"⏱️ Filtered {filtered_count} samples ({duration_str}) from split '{split}'.")
+    return dataset
+
+
+def _classification_post_load_hook(dataset: Any, dataset_cfg: Dict[str, Any], split: str) -> Any:
+    """Filter classification dataset by duration if specified.
+
+    This ensures evaluation uses the same duration filtering as training.
+    """
+    max_duration = dataset_cfg.get("max_duration")
+    min_duration = dataset_cfg.get("min_duration")
+
+    if max_duration is None and min_duration is None:
+        return dataset
+
+    def _keep_duration(example: Dict[str, Any]) -> bool:
+        duration = example.get("duration") or 0.0
+        duration_float = float(duration)
+        if max_duration is not None and duration_float > max_duration:
+            return False
+        if min_duration is not None and duration_float < min_duration:
+            return False
+        return True
+
+    before = len(dataset)
+    dataset = dataset.filter(_keep_duration)
+    if len(dataset) != before:
+        filtered_count = before - len(dataset)
+        duration_info = []
+        if max_duration is not None:
+            duration_info.append(f">{max_duration:.1f}s")
+        if min_duration is not None:
+            duration_info.append(f"<{min_duration:.1f}s")
+        duration_str = " or ".join(duration_info)
+        print(f"⏱️ Filtered {filtered_count} samples ({duration_str}) from split '{split}'.")
     return dataset
 
 
@@ -471,7 +535,7 @@ def _get_asr_task_config() -> TaskConfig:
         loader_config_keys=("train_hours", "val_hours", "test_hours", "test_split"),
         has_label_names=False,
         collator_class=OmniASRCollator,
-        collator_params={"mode": "eval"},  # Use eval mode for evaluation
+        collator_params={},
         compute_metrics_fn=compute_asr_metrics,
         metrics_params={},
         required_columns=("audio", "text"),
@@ -493,11 +557,12 @@ def _get_emotion_task_config() -> TaskConfig:
         loader_config_keys=CLASSIFICATION_EVAL_KEYS,
         has_label_names=True,
         collator_class=EmotionDataCollator,
-        collator_params={"mode": "eval"},  # Use eval mode for evaluation
+        collator_params={},
         compute_metrics_fn=compute_emotion_metrics,
         metrics_params={},
         required_columns=("audio", "label"),
         optional_columns=("duration", "text"),
+        post_load_hook=_classification_post_load_hook,
     )
 
 
@@ -514,11 +579,12 @@ def _get_speaker_task_config() -> TaskConfig:
         loader_config_keys=CLASSIFICATION_EVAL_KEYS + SPEAKER_EXTRA_EVAL_KEYS,
         has_label_names=True,
         collator_class=SpeakerIdentificationCollator,
-        collator_params={"mode": "eval"},  # Use eval mode for evaluation
+        collator_params={},
         compute_metrics_fn=compute_speaker_id_metrics,
         metrics_params={},
         required_columns=("audio", "label"),
         optional_columns=("duration", "text"),
+        post_load_hook=_classification_post_load_hook,
     )
 
 
@@ -535,11 +601,12 @@ def _get_intent_task_config() -> TaskConfig:
         loader_config_keys=CLASSIFICATION_EVAL_KEYS,
         has_label_names=True,
         collator_class=IntentClassificationCollator,
-        collator_params={"mode": "eval"},  # Use eval mode for evaluation
+        collator_params={},
         compute_metrics_fn=compute_intent_metrics,
         metrics_params={},
         required_columns=("audio", "label"),
         optional_columns=("duration", "text", "scenario", "action"),
+        post_load_hook=_classification_post_load_hook,
     )
 
 
@@ -557,7 +624,7 @@ def _get_speech_qa_task_config() -> TaskConfig:
         has_label_names=False,
         has_answers_map=True,
         collator_class=SpeechQACollator,
-        collator_params={"mode": "eval"},  # Use eval mode for evaluation
+        collator_params={},
         compute_metrics_fn=compute_speech_qa_metrics,
         metrics_params={},
         required_columns=("audio", "question", "answers", "label_text"),
