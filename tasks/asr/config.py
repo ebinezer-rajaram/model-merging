@@ -1,27 +1,15 @@
 """Configuration helpers for the ASR task."""
 
-from pathlib import Path
-from typing import Dict
+from tasks.base.config import create_simple_task_config
 
-TASK_NAME = "asr"
-DEFAULT_CONFIG_FILE = "asr.yaml"
+# Create configuration using the factory function - eliminates all boilerplate
+TASK_NAME, DEFAULT_CONFIG_FILE, get_config_path, get_artifact_directories = (
+    create_simple_task_config("asr", "asr.yaml")
+)
 
-
-def get_config_path(package_root: Path, config_name: str | None = None) -> Path:
-    """Resolve the config file path for the ASR task."""
-    config_dir = package_root / "configs"
-    filename = config_name or DEFAULT_CONFIG_FILE
-    return config_dir / filename
-
-
-def get_artifact_directories(package_root: Path) -> Dict[str, Path]:
-    """Return standard artifact directories for the ASR task."""
-    base = package_root / "artifacts" / TASK_NAME
-    return {
-        "base": base,
-        "adapters": base / "adapters",
-        "vectors": base / "vectors",
-        "metrics": base / "metrics",
-        "models": base / "models",
-        "datasets": base / "datasets",
-    }
+__all__ = [
+    "TASK_NAME",
+    "DEFAULT_CONFIG_FILE",
+    "get_config_path",
+    "get_artifact_directories",
+]

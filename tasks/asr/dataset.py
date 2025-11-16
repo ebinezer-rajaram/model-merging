@@ -30,7 +30,7 @@ from core import (
     subset_dataset_by_metadata,
 )
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "asr" / "datasets"
 
 MANIFEST_FIELDS: Tuple[str, ...] = ("id", "speaker_id", "chapter_id", "text")

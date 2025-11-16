@@ -8,26 +8,26 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import torch
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict
 
-from core import (
-    add_duration,
-    build_split_metadata,
-    load_cached_split,
-    normalize_split_metadata,
-    num_proc_map_kwargs,
-    resolve_num_proc,
-    save_cached_split,
-    select_random_indices,
-    subset_dataset_by_metadata,
+from core import resolve_num_proc
+from tasks.base.dataset import (
+    _column_exists,
+    _normalize_target_count,
+    _rename_column,
+    _samples_key,
+    _select_candidate_column,
+    add_duration_to_dataset,
+    assemble_splits,
+    cache_and_sample_splits,
+    load_dataset,
+    print_dataset_summary,
 )
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "speech_qa" / "datasets"
 
 DEFAULT_DATASET_NAME = "kresnik/spoken_squad"
-DEFAULT_AUDIO_COLUMN = "audio"
-FALLBACK_AUDIO_COLUMNS: Tuple[str, ...] = ("speech",)
 FALLBACK_QUESTION_COLUMNS: Tuple[str, ...] = ("question", "query")
 FALLBACK_TRANSCRIPT_COLUMNS: Tuple[str, ...] = ("transcript", "text", "sentence", "context")
 FALLBACK_CONTEXT_COLUMNS: Tuple[str, ...] = ("context", "passage", "paragraph")
@@ -45,76 +45,8 @@ MANIFEST_FIELDS: Tuple[str, ...] = (
 )
 
 
-def _samples_key(value: Optional[int]) -> str:
-    return "full" if value is None else str(int(value)).zfill(6)
-
-
-def _normalize_target_count(name: str, value: Optional[int]) -> Optional[int]:
-    if value is None:
-        return None
-    parsed = int(value)
-    if parsed < 0:
-        raise ValueError(f"{name} must be non-negative, received {value!r}")
-    return parsed
-
-
-def _column_exists(dataset: DatasetDict, column: str) -> bool:
-    try:
-        sample_split = next(iter(dataset.values()))
-    except StopIteration:
-        return False
-    return column in sample_split.column_names
-
-
-def _rename_column(dataset: DatasetDict, source: str, target: str) -> DatasetDict:
-    if not source or source == target:
-        return dataset
-    if not _column_exists(dataset, source):
-        raise ValueError(f"Column {source!r} not found in dataset splits.")
-    if _column_exists(dataset, target):
-        raise ValueError(
-            f"Cannot rename column {source!r} to {target!r} because {target!r} already exists."
-        )
-    return dataset.rename_column(source, target)
-
-
-def _ensure_audio_column(dataset: DatasetDict, preferred: Optional[str] = None) -> Tuple[DatasetDict, str]:
-    """Ensure the dataset has an audio column named DEFAULT_AUDIO_COLUMN."""
-    try:
-        sample_split = next(iter(dataset.values()))
-    except StopIteration as exc:
-        raise ValueError("Dataset has no splits to infer audio column from.") from exc
-
-    if preferred:
-        if preferred == DEFAULT_AUDIO_COLUMN and DEFAULT_AUDIO_COLUMN in sample_split.column_names:
-            return dataset, DEFAULT_AUDIO_COLUMN
-        if preferred in sample_split.column_names:
-            if preferred != DEFAULT_AUDIO_COLUMN:
-                dataset = dataset.rename_column(preferred, DEFAULT_AUDIO_COLUMN)
-            return dataset, DEFAULT_AUDIO_COLUMN
-
-    if DEFAULT_AUDIO_COLUMN in sample_split.column_names:
-        return dataset, DEFAULT_AUDIO_COLUMN
-
-    for candidate in FALLBACK_AUDIO_COLUMNS:
-        if candidate in sample_split.column_names:
-            dataset = dataset.rename_column(candidate, DEFAULT_AUDIO_COLUMN)
-            return dataset, DEFAULT_AUDIO_COLUMN
-
-    raise ValueError(
-        f"Could not find an audio column in dataset splits. Checked {DEFAULT_AUDIO_COLUMN!r}"
-        f" and {FALLBACK_AUDIO_COLUMNS!r}."
-    )
-
-
-def _select_candidate_column(dataset: DatasetDict, candidates: Iterable[str]) -> Optional[str]:
-    for name in candidates:
-        if _column_exists(dataset, name):
-            return name
-    return None
-
-
 def _normalize_answers(example: Dict[str, Any], answer_column: str) -> Dict[str, Any]:
+    """Normalize answer formats to a consistent list of strings."""
     answers = example.get(answer_column)
     normalized: List[str] = []
     if isinstance(answers, dict):
@@ -170,11 +102,12 @@ def load_speech_qa_dataset(
 
     Returns train, validation, test splits (None when missing) and a mapping of per-split answer sets.
     """
-
+    # Normalize sample counts
     max_train_samples = _normalize_target_count("max_train_samples", max_train_samples)
     max_validation_samples = _normalize_target_count("max_validation_samples", max_validation_samples)
     max_test_samples = _normalize_target_count("max_test_samples", max_test_samples)
 
+    # Load dataset
     if dataset_config:
         dataset = load_dataset(dataset_name, dataset_config)
     else:
@@ -183,6 +116,7 @@ def load_speech_qa_dataset(
     if not isinstance(dataset, DatasetDict):
         raise TypeError(f"Expected DatasetDict, received {type(dataset)!r}")
 
+    # Normalize column names (question, transcript, context, id, answers)
     if question_column and question_column != "question":
         dataset = _rename_column(dataset, question_column, "question")
     elif not _column_exists(dataset, "question"):
@@ -190,9 +124,7 @@ def load_speech_qa_dataset(
         if fallback_question and fallback_question != "question":
             dataset = _rename_column(dataset, fallback_question, "question")
         else:
-            raise ValueError(
-                "Dataset must contain a question column. Provide 'question_column'."
-            )
+            raise ValueError("Dataset must contain a question column. Provide 'question_column'.")
 
     if transcript_column and transcript_column != "transcript":
         dataset = _rename_column(dataset, transcript_column, "transcript")
@@ -219,86 +151,28 @@ def load_speech_qa_dataset(
     if not target_answer_column:
         raise ValueError("Dataset must include an answers column. Provide 'answer_column'.")
 
-    preferred_audio_column = audio_column
+    # Apply split percentages or assemble standard splits
+    # (Speech QA typically doesn't need stratification, so we skip that complexity)
+    dataset = assemble_splits(
+        dataset,
+        train_split=train_split,
+        validation_split=validation_split,
+        test_split=test_split,
+    )
 
-    split_ratios: Optional[Tuple[float, float, float]] = None
-    if split_percentages is not None:
-        if isinstance(split_percentages, Mapping):
-            train_ratio = float(split_percentages.get("train", 0.0))
-            val_ratio = float(split_percentages.get("validation", 0.0))
-            test_ratio = float(split_percentages.get("test", 0.0))
-            split_ratios = (train_ratio, val_ratio, test_ratio)
-        else:
-            ratios = list(split_percentages)
-            if len(ratios) != 3:
-                raise ValueError("split_percentages must contain exactly three values (train/val/test).")
-            split_ratios = tuple(float(value) for value in ratios)
+    # Ensure audio column
+    from tasks.base.dataset import _ensure_audio_column
+    dataset, audio_column_name = _ensure_audio_column(dataset, preferred=audio_column)
 
-        total = sum(split_ratios)
-        if total <= 0:
-            raise ValueError("split_percentages must sum to a positive value.")
-        split_ratios = tuple(value / total for value in split_ratios)
-
-    if split_ratios is not None:
-        if not train_split or train_split not in dataset:
-            raise ValueError(f"Requested train split {train_split!r} not found in dataset.")
-        base_train = dataset[train_split]
-
-        train_ratio, val_ratio, test_ratio = split_ratios
-
-        if not (0.0 <= test_ratio < 1.0):
-            raise ValueError("Test split percentage must be in the range [0, 1).")
-
-        if test_ratio > 0.0:
-            first_split = base_train.train_test_split(
-                test_size=test_ratio,
-                seed=seed,
-            )
-            train_portion = first_split["train"]
-            test_portion = first_split["test"]
-        else:
-            train_portion = base_train
-            test_portion = None
-
-        if val_ratio > 0.0:
-            if train_ratio + val_ratio <= 0:
-                raise ValueError("Train and validation split percentages must be positive.")
-            val_fraction = val_ratio / (train_ratio + val_ratio)
-            second_split = train_portion.train_test_split(
-                test_size=val_fraction,
-                seed=seed + 1,
-            )
-            train_portion = second_split["train"]
-            val_portion = second_split["test"]
-        else:
-            val_portion = None
-
-        new_splits: Dict[str, Dataset] = {"train": train_portion}
-        if val_portion is not None:
-            new_splits["validation"] = val_portion
-        if test_portion is not None:
-            new_splits["test"] = test_portion
-        dataset = DatasetDict(new_splits)
-    else:
-        assembled: Dict[str, Dataset] = {}
-        if train_split and train_split in dataset:
-            assembled["train"] = dataset[train_split]
-        if validation_split and validation_split in dataset:
-            assembled["validation"] = dataset[validation_split]
-        if test_split and test_split in dataset:
-            assembled["test"] = dataset[test_split]
-        dataset = DatasetDict(assembled)
-
-    dataset, audio_column_name = _ensure_audio_column(dataset, preferred=preferred_audio_column)
-
+    # Normalize answers
     normalize_fn = partial(_normalize_answers, answer_column=target_answer_column)
     dataset = dataset.map(normalize_fn)
 
+    # Add duration information
     effective_num_proc = resolve_num_proc(num_proc)
-    map_kwargs = num_proc_map_kwargs(effective_num_proc)
-    duration_fn = partial(add_duration, audio_column=audio_column_name)
-    dataset = dataset.map(duration_fn, **map_kwargs)
+    dataset = add_duration_to_dataset(dataset, audio_column=audio_column_name, num_proc=effective_num_proc)
 
+    # Build cache path
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
     dataset_key = dataset_name.replace("/", "_")
     config_key = dataset_config or "default"
@@ -311,54 +185,26 @@ def load_speech_qa_dataset(
     )
     cache_path = cache_root / cache_name
 
-    payload = load_cached_split(cache_path) if cache_splits and not force_rebuild else None
-    payload_seed = seed
+    # Cache and sample splits
+    train_subset, validation_subset, test_subset, splits_metadata, payload_seed = cache_and_sample_splits(
+        dataset,
+        cache_path=cache_path,
+        max_train_samples=max_train_samples,
+        max_validation_samples=max_validation_samples,
+        max_test_samples=max_test_samples,
+        seed=seed,
+        manifest_fields=MANIFEST_FIELDS,
+        audio_column=audio_column_name,
+        cache_splits=cache_splits,
+        force_rebuild=force_rebuild,
+        additional_metadata={
+            "dataset": dataset_name,
+            "config": dataset_config,
+            "audio_column": audio_column_name,
+        },
+    )
 
-    splits_metadata: Dict[str, Dict[str, Any]]
-    if payload is None:
-        split_targets = {
-            "train": (max_train_samples, seed),
-            "validation": (max_validation_samples, seed + 1),
-            "test": (max_test_samples, seed + 2),
-        }
-
-        splits_metadata = {}
-        for split_name, (target_count, split_seed) in split_targets.items():
-            if split_name not in dataset:
-                continue
-            split_ds = dataset[split_name]
-            indices = select_random_indices(len(split_ds), target_count, split_seed)
-            splits_metadata[split_name] = build_split_metadata(
-                split_ds,
-                indices,
-                manifest_fields=MANIFEST_FIELDS,
-                audio_column=audio_column_name,
-            )
-
-        if cache_splits:
-            save_cached_split(
-                cache_path,
-                {
-                    "seed": seed,
-                    "dataset": dataset_name,
-                    "config": dataset_config,
-                    "audio_column": audio_column_name,
-                    "splits": splits_metadata,
-                },
-            )
-    else:
-        splits_metadata = normalize_split_metadata(payload.get("splits"))
-        payload_seed = int(payload.get("seed", seed))
-
-    def _select(split_name: str) -> Optional[Dataset]:
-        if split_name not in dataset:
-            return None
-        return subset_dataset_by_metadata(dataset[split_name], splits_metadata.get(split_name))
-
-    train_subset = _select("train")
-    validation_subset = _select("validation")
-    test_subset = _select("test")
-
+    # Collect answers for evaluation
     answers_map: Dict[str, List[List[str]]] = {}
 
     def _collect_answers(ds: Optional[Dataset]) -> List[List[str]]:
@@ -377,24 +223,16 @@ def load_speech_qa_dataset(
     answers_map["validation"] = _collect_answers(validation_subset)
     answers_map["test"] = _collect_answers(test_subset)
 
-    def _summarize(split_name: str, subset: Optional[Dataset], label: Optional[str] = None) -> str:
-        if subset is None:
-            return f"{label or split_name}=∅"
-        hours = float(splits_metadata.get(split_name, {}).get("hours", 0.0) or 0.0)
-        return f"{label or split_name}={len(subset)} (~{hours:.2f} h)"
-
-    summary = ", ".join(
-        _summarize(split_name, subset, display)
-        for split_name, subset, display in (
-            ("train", train_subset, "train"),
-            ("validation", validation_subset, "val"),
-            ("test", test_subset, "test"),
-        )
-    )
-
-    print(
-        "❓ Speech-QA dataset:"
-        f" {summary} (seed={payload_seed}, num_proc={effective_num_proc})."
+    # Print summary
+    print_dataset_summary(
+        task_emoji="❓",
+        task_name="Speech-QA dataset",
+        train_subset=train_subset,
+        validation_subset=validation_subset,
+        test_subset=test_subset,
+        splits_metadata=splits_metadata,
+        seed=payload_seed,
+        num_proc=effective_num_proc,
     )
 
     return train_subset, validation_subset, test_subset, answers_map
@@ -437,25 +275,6 @@ class SpeechQACollator:
 
         return instruction
 
-    # OLD PROMPT METHOD (kept as backup):
-    # def _build_prompt(self, feature: Dict[str, Any]) -> str:
-    #     question = str(feature.get("question", "")).strip()
-    #     transcript = str(feature.get("transcript", "") or "").strip()
-    #     context = str(feature.get("context", "") or "").strip()
-    #
-    #     prompt = (
-    #         f"{self.processor.audio_token}"
-    #         "Listen to the audio segment and answer the question."
-    #     )
-    #     if question:
-    #         prompt += f"\nQuestion: {question}"
-    #     if transcript and self.include_transcript:
-    #         prompt += f"\nTranscript: {transcript}"
-    #     if context and self.include_context:
-    #         prompt += f"\nContext: {context}"
-    #     prompt += "\nAnswer:"
-    #     return prompt
-
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [feature["audio"]["array"] for feature in features]
         labels = [self._select_label(feature) for feature in features]
@@ -464,9 +283,7 @@ class SpeechQACollator:
         if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
             tokenizer.padding_side = "left"
 
-        # Build prompts using chat template format (matching ASR approach)
-        # Always include both user message and assistant response with ground truth
-        # During evaluation, CustomTrainer's prediction_step will truncate before generation
+        # Build prompts using chat template format
         prompts = []
         for feature, label in zip(features, labels):
             instruction = self._build_instruction(feature)
@@ -513,10 +330,7 @@ class SpeechQACollator:
 
         # Mask everything except the assistant's answer response
         for i, label in enumerate(labels):
-            # Tokenize the ground truth answer to identify it in the full sequence
             label_tokens = tokenizer.encode(label, add_special_tokens=False)
-
-            # Find where the label appears in the input_ids
             input_ids = inputs["input_ids"][i]
             label_length = len(label_tokens)
 
@@ -524,7 +338,6 @@ class SpeechQACollator:
             found = False
             for j in range(len(input_ids) - label_length + 1):
                 if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
-                    # Mask everything before the label
                     label_ids[i, :j] = -100
                     found = True
                     break
