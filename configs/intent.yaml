@@ -86,6 +86,8 @@ training:
   save_strategy: steps
   save_steps: 100
   save_total_limit: 3
+  # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
+  resume_from_checkpoint: null
 
   # Evaluation
   eval_strategy: steps

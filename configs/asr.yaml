@@ -13,18 +13,22 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    r: 16                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 32               # LoRA alpha scaling factor (typically 2x rank)
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - out_proj
-      - fc1
-      - fc2
+      - q_proj               # Query - what to attend to
+      - k_proj               # Key - acoustic feature matching
+      - v_proj               # Value - phoneme representation
+      - o_proj               # Output projection
+    
+      # CRITICAL: Audio-to-text grounding
+      # - audio_proj           # L731: Acoustic embeddings → LLM space
+
+      # - gate_proj      # ADD: for complex acoustic patterns
+      # - up_proj        # ADD: for representation expansion
+      # - down_proj      # ADD: for projection
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -32,9 +36,9 @@ model:
 # ============================================================================
 dataset:
   # LibriSpeech subset configuration (hours-based)
-  train_hours: 10              # Hours of training data to use
-  val_hours: 1              # Validation hours (null = use default)
-  test_hours: 1              # Test hours (null = use all)
+  train_hours: 50              # Hours of training data to use
+  val_hours: null              # Validation hours (null = use default)
+  test_hours: null              # Test hours (null = use all)
   test_split: test               # Test split name
 
   # Data processing
@@ -45,7 +49,8 @@ dataset:
   return_full_validation: false
 
   # Audio filtering
-  max_duration_seconds: 22.0     # Filter out audio longer than this
+  max_duration_seconds: 20.0     # Filter out audio longer than this
+  min_duration_seconds: 1.0      # Filter out audio shorter than this
 
 # ============================================================================
 # Training Configuration
@@ -53,28 +58,31 @@ dataset:
 training:
   # Batch sizes and accumulation
   per_device_train_batch_size: 20
-  per_device_eval_batch_size: 12
+  per_device_eval_batch_size: 16
   gradient_accumulation_steps: 2
 
   # Optimization
-  learning_rate: 7e-05
-  lr_scheduler_type: cosine
-  warmup_ratio: 0.05            # Higher warmup for ASR
-  weight_decay: 0.02
+  learning_rate: 3e-5
+  lr_scheduler_type: cosine_with_restarts
+  warmup_ratio: 0.08            # Higher warmup for ASR
+  weight_decay: 0.01
   max_grad_norm: 1.0            # Lower gradient clipping for ASR
 
   # Training duration
-  num_train_epochs: 5
+  num_train_epochs: 10
 
   # Checkpointing
   save_strategy: steps
   save_steps: 50
   save_total_limit: 4
+  # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
+  resume_from_checkpoint: null
 
   # Evaluation
   eval_strategy: steps
   eval_steps: 50
-  max_eval_samples: 0           # 0 = use all
+  max_eval_samples: null         # Use 500 samples during training for speed (full eval at end)
+  shuffle_eval_subset: true     # Randomly sample eval subset (prevents same samples every time)
   initial_eval: true
 
   # Logging
@@ -84,10 +92,10 @@ training:
     - wandb
 
   # Early stopping
-  early_stopping_patience: 2
+  early_stopping_patience: 5
   early_stopping_threshold: 0.001   # 0 = any improvement
   load_best_model_at_end: true
-  metric_for_best_model: wer_standardize    # Options: 'wer' (if using single mode) or 'wer_default'/'wer_standardize' (if using both)
+  metric_for_best_model: wer   # Options: 'wer' (if using single mode) or 'wer_default'/'wer_standardize' (if using both)
   greater_is_better: false      # WER: lower is better
 
   # Performance optimizations
@@ -118,7 +126,7 @@ training:
 # Artifacts Configuration
 # ============================================================================
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_asr_50h
+  adapter_subdir: qwen2_5_omni_lora_asr_50h_v2
 
 # ============================================================================
 # Metrics Configuration
@@ -126,4 +134,4 @@ artifacts:
 metrics:
   history_csv: training_history.csv
   loss_plot: loss_wer_plot.png
-  wer_normalization: both  # Options: 'default', 'standardize', or 'both' (compute both metrics)
+  wer_normalization: standardize  # Options: 'default', 'standardize', or 'both' (compute both metrics)

@@ -13,19 +13,18 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 128                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 256                # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.15             # Dropout probability for LoRA layers
+    r: 32                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
       - q_proj
       - k_proj
       - v_proj
-      - o_proj
-      - out_proj
-      - gate_proj  # ADD: MLP gating
-      - up_proj    # ADD: MLP expansion
-      - down_proj  # ADD: MLP projection
+      # - gate_proj  # ADD: MLP gating
+      # - up_proj    # ADD: MLP expansion
+      # - down_proj  # ADD: MLP projection
+      - audio_proj       # L731: Critical for acoustic embeddings
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -54,6 +53,17 @@ dataset:
   # MELD average is ~3s, max normal sample is ~30s
   max_duration: 30.0
 
+  # Minimum audio duration in seconds (null = no limit)
+  # Filter out very short clips that lack context
+  min_duration: 0.5
+
+  # Audio normalization
+  normalize_audio: true
+  # Speaker-level normalization (normalize per speaker to handle different conditions)
+  normalize_per_speaker: true
+  # Target RMS level for normalization (typical range: -20 to -30 dB)
+  target_rms_db: -25.0
+
   # Column mappings
   # MELD has: neutral, joy, sadness, anger, surprise, fear, disgust
   label_column: Emotion
@@ -70,19 +80,41 @@ dataset:
   include_transcript: true
 
 # ============================================================================
+# Loss Configuration
+# ============================================================================
+loss:
+  # Loss function type: "default", "focal", "weighted"
+  type: default
+
+  # Focal loss parameters (only used if type: focal)
+  focal:
+    gamma: 2.0              # Focusing parameter (higher = more focus on hard examples)
+    alpha: null             # Class weighting (null, single value, or list per class)
+
+  # Weighted cross-entropy parameters (only used if type: weighted)
+  weighted:
+    # Option 1: Provide explicit weights for each emotion class
+    # MELD emotions: neutral, joy, sadness, anger, surprise, fear, disgust
+    weights: null           # e.g., [1.0, 1.5, 1.5, 1.5, 2.0, 2.5, 2.0]
+
+    # Option 2: Auto-compute weights from training data distribution
+    auto_compute: true      # If true, computes weights automatically
+    method: sqrt_inverse    # Method for auto-compute: "inverse", "sqrt_inverse", "balanced"
+
+# ============================================================================
 # Training Configuration
 # ============================================================================
 training:
   # Batch sizes and accumulation
   per_device_train_batch_size: 16
-  per_device_eval_batch_size: 12
+  per_device_eval_batch_size: 24
   gradient_accumulation_steps: 2
 
   # Optimization
-  learning_rate: 3e-05
-  lr_scheduler_type: cosine
-  warmup_ratio: 0.15
-  weight_decay: 0.01
+  learning_rate: 2e-05
+  lr_scheduler_type: cosine_with_restarts
+  warmup_ratio: 0.1
+  weight_decay: 0.05
   max_grad_norm: 1.0
 
   # Training duration
@@ -92,11 +124,14 @@ training:
   save_strategy: steps
   save_steps: 50
   save_total_limit: 3
+  # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
+  resume_from_checkpoint: null
 
   # Evaluation
   eval_strategy: steps
   eval_steps: 50
-  max_eval_samples: null
+  max_eval_samples: null        # Use subset during training for speed (full eval at end)
+  shuffle_eval_subset: true     # Randomly sample eval subset
   initial_eval: true
 
   # Logging
@@ -123,7 +158,21 @@ training:
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: true
+
+  # Balanced sampling for imbalanced datasets
+  # Options: null (default), "balanced_batch", "weighted"
+  # - "balanced_batch": Each batch has equal samples from each class
+  # - "weighted": Oversample minority classes throughout training
+  balanced_sampling: weighted
+
+  # Weighting method for weighted sampling (only used if balanced_sampling: weighted)
+  # Options: "inverse", "sqrt_inverse", "balanced"
+  # - "inverse": Full rebalancing (minority classes sampled ~17x more)
+  # - "sqrt_inverse": Gentler rebalancing (minority classes sampled ~4x more)
+  # - "balanced": Scale to make expected samples equal per class
+  sampling_method: sqrt_inverse
+
+  group_by_length: false  # Disabled when using balanced_sampling
   length_column_name: duration
 
   # Other
@@ -148,3 +197,5 @@ artifacts:
 metrics:
   history_csv: emotion_training_history.csv
   loss_plot: loss_accuracy_plot.png
+  confusion_matrix: emotion_confusion_matrix.png
+  normalize_confusion_matrix: true  # If true, shows percentages; if false, shows counts
