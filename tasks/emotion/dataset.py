@@ -199,7 +199,7 @@ class EmotionRecognitionCollator:
         transcript = (transcript or "").strip()
         # Format class options for the prompt
         class_options = ", ".join(self.label_names)
-        instruction = f"What emotion is expressed in the spoken utterance? Choose from: {class_options}."
+        instruction = f"What emotion is expressed in the spoken utterance? Choose from: {class_options}. Output only the label."
 
         if transcript and self.include_transcript:
             instruction += f"\nTranscript: {transcript}"

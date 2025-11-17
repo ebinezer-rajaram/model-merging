@@ -300,7 +300,7 @@ class SpeakerIdentificationCollator:
         transcript = (transcript or "").strip()
         # Format class options for the prompt
         class_options = ", ".join(self.label_names)
-        instruction = f"Who is the speaker in the provided audio segment? Choose from: {class_options}."
+        instruction = f"Who is the speaker in the provided audio segment? Choose from: {class_options}. Output only the label."
 
         if transcript and self.include_transcript:
             instruction += f"\nTranscript: {transcript}"
