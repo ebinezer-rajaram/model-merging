@@ -13,8 +13,8 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 16                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 32               # LoRA alpha scaling factor (typically 2x rank)
+    r: 32                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 64               # LoRA alpha scaling factor (typically 2x rank)
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
@@ -24,11 +24,11 @@ model:
       - o_proj               # Output projection
     
       # CRITICAL: Audio-to-text grounding
-      # - audio_proj           # L731: Acoustic embeddings → LLM space
+      - audio_tower.proj            # L731: Acoustic embeddings → LLM space
 
-      # - gate_proj      # ADD: for complex acoustic patterns
-      # - up_proj        # ADD: for representation expansion
-      # - down_proj      # ADD: for projection
+      - gate_proj      # ADD: for complex acoustic patterns
+      - up_proj        # ADD: for representation expansion
+      - down_proj      # ADD: for projection
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -36,7 +36,7 @@ model:
 # ============================================================================
 dataset:
   # LibriSpeech subset configuration (hours-based)
-  train_hours: 50              # Hours of training data to use
+  train_hours: null              # Hours of training data to use
   val_hours: null              # Validation hours (null = use default)
   test_hours: null              # Test hours (null = use all)
   test_split: test               # Test split name
@@ -48,9 +48,9 @@ dataset:
   force_rebuild: false
   return_full_validation: false
 
-  # Audio filtering
-  max_duration_seconds: 20.0     # Filter out audio longer than this
-  min_duration_seconds: 1.0      # Filter out audio shorter than this
+  # Audio filtering (duration in seconds, null = no limit)
+  max_duration: 20.0     # Filter out audio longer than this
+  min_duration: 1.0      # Filter out audio shorter than this
 
 # ============================================================================
 # Training Configuration
@@ -62,14 +62,14 @@ training:
   gradient_accumulation_steps: 2
 
   # Optimization
-  learning_rate: 3e-5
-  lr_scheduler_type: cosine_with_restarts
+  learning_rate: 2e-5
+  lr_scheduler_type: cosine
   warmup_ratio: 0.08            # Higher warmup for ASR
   weight_decay: 0.01
   max_grad_norm: 1.0            # Lower gradient clipping for ASR
 
   # Training duration
-  num_train_epochs: 10
+  num_train_epochs: 3
 
   # Checkpointing
   save_strategy: steps
@@ -82,7 +82,7 @@ training:
   eval_strategy: steps
   eval_steps: 50
   max_eval_samples: null         # Use 500 samples during training for speed (full eval at end)
-  shuffle_eval_subset: true     # Randomly sample eval subset (prevents same samples every time)
+  shuffle_eval_subset: false     # Randomly sample eval subset (prevents same samples every time)
   initial_eval: true
 
   # Logging
@@ -126,7 +126,7 @@ training:
 # Artifacts Configuration
 # ============================================================================
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_asr_50h_v2
+  adapter_subdir: qwen2_5_omni_lora_asr_100h
 
 # ============================================================================
 # Metrics Configuration
@@ -134,4 +134,4 @@ artifacts:
 metrics:
   history_csv: training_history.csv
   loss_plot: loss_wer_plot.png
-  wer_normalization: standardize  # Options: 'default', 'standardize', or 'both' (compute both metrics)
+  wer_normalization: aggressive  # Options: 'default', 'standardize', 'aggressive', 'both', or 'all' (compute multiple metrics)

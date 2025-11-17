@@ -18,13 +18,17 @@ model:
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - out_proj
-      - fc1
-      - fc2
+      - q_proj               # Query - what to attend to
+      - k_proj               # Key - acoustic feature matching
+      - v_proj               # Value - phoneme representation
+      - o_proj               # Output projection
+    
+      # CRITICAL: Audio-to-text grounding
+      - audio_tower.proj            # L731: Acoustic embeddings → LLM space
+
+      - gate_proj      # ADD: for complex acoustic patterns
+      - up_proj        # ADD: for representation expansion
+      - down_proj      # ADD: for projection
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -47,7 +51,19 @@ dataset:
   max_test_samples: null
 
   # Maximum audio duration in seconds (null = no limit)
-  max_duration: null
+  # Samples exceeding this will be filtered out to prevent OOM
+  max_duration: 30.0
+
+  # Minimum audio duration in seconds (null = no limit)
+  # Filter out very short clips that lack context
+  min_duration: 0.5
+
+  # Audio normalization
+  normalize_audio: true
+  # Speaker-level normalization (normalize per speaker to handle different conditions)
+  normalize_per_speaker: false
+  # Target RMS level for normalization (typical range: -20 to -30 dB)
+  target_rms_db: -25.0
 
   # Column mappings
   label_column: speaker
@@ -65,6 +81,27 @@ dataset:
   max_speakers: 150            # Limit number of speakers
   max_samples_per_speaker: 20  # Limit samples per speaker
   include_transcript: false    # Speaker ID doesn't need transcripts
+
+# ============================================================================
+# Loss Configuration
+# ============================================================================
+loss:
+  # Loss function type: "default", "focal", "weighted"
+  type: default
+
+  # Focal loss parameters (only used if type: focal)
+  focal:
+    gamma: 2.0              # Focusing parameter (higher = more focus on hard examples)
+    alpha: null             # Class weighting (null, single value, or list per class)
+
+  # Weighted cross-entropy parameters (only used if type: weighted)
+  weighted:
+    # Option 1: Provide explicit weights for each class
+    weights: null           # e.g., [1.0, 1.5, 2.0, ...]
+
+    # Option 2: Auto-compute weights from training data distribution
+    auto_compute: false     # If true, computes weights automatically
+    method: sqrt_inverse    # Method for auto-compute: "inverse", "sqrt_inverse", "balanced"
 
 # ============================================================================
 # Training Configuration
@@ -95,11 +132,12 @@ training:
   # Evaluation
   eval_strategy: steps
   eval_steps: 100
-  max_eval_samples: null
+  max_eval_samples: null        # Use subset during training for speed (full eval at end)
+  shuffle_eval_subset: true     # Randomly sample eval subset
   initial_eval: true
 
   # Logging
-  logging_steps: 50
+  logging_steps: 10
   report_to:
     - tensorboard
     - wandb
@@ -122,16 +160,30 @@ training:
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: false
+
+  # Balanced sampling for imbalanced datasets
+  # Options: null (default), "balanced_batch", "weighted"
+  # - "balanced_batch": Each batch has equal samples from each class
+  # - "weighted": Oversample minority classes throughout training
+  balanced_sampling: weighted
+
+  # Weighting method for weighted sampling (only used if balanced_sampling: weighted)
+  # Options: "inverse", "sqrt_inverse", "balanced"
+  # - "inverse": Full rebalancing (minority classes sampled more)
+  # - "sqrt_inverse": Gentler rebalancing
+  # - "balanced": Scale to make expected samples equal per class
+  sampling_method: sqrt_inverse
+
+  group_by_length: false  # Disabled when using balanced_sampling
   length_column_name: duration
 
   # Other
-  eval_accumulation_steps: 1
+  eval_accumulation_steps: 4
   remove_unused_columns: false
 
   # Generation parameters (for constrained decoding evaluation)
   generation_kwargs:
-    max_new_tokens: 5        # Speaker IDs may vary in length, 5 provides buffer
+    max_new_tokens: 6        
     do_sample: false         # Greedy decoding for deterministic results
     num_beams: 1            # No beam search needed with constraints
 
@@ -147,3 +199,5 @@ artifacts:
 metrics:
   history_csv: speaker_id_training_history.csv
   loss_plot: speaker_id_loss_accuracy.png
+  confusion_matrix: speaker_id_confusion_matrix.png
+  normalize_confusion_matrix: true  # If true, shows percentages; if false, shows counts

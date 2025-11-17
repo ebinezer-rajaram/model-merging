@@ -15,14 +15,17 @@ model:
   lora:
     r: 32                    # LoRA rank (higher = more parameters, better fit)
     alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.15             # Dropout probability for LoRA layers
+    dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
       - q_proj
       - k_proj
       - v_proj
       - o_proj
-      - out_proj
+      - audio_tower.proj  
+      - gate_proj      # Add these for semantic understanding
+      - up_proj
+      - down_proj
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -45,7 +48,19 @@ dataset:
   max_test_samples: null
 
   # Maximum audio duration in seconds (null = no limit)
-  max_duration: null
+  # Samples exceeding this will be filtered out to prevent OOM
+  max_duration: 20.0
+
+  # Minimum audio duration in seconds (null = no limit)
+  # Filter out very short clips that lack context
+  min_duration: 0.5
+
+  # Audio normalization
+  normalize_audio: false
+  # Speaker-level normalization (normalize per speaker to handle different conditions)
+  normalize_per_speaker: false
+  # Target RMS level for normalization (typical range: -20 to -30 dB)
+  target_rms_db: -25.0
 
   # Column mappings
   label_column: intent
@@ -60,8 +75,29 @@ dataset:
   stratify_by_column: label
 
   # Task-specific options
-  include_transcript: true
+  include_transcript: false 
   prepend_scenario: false
+
+# ============================================================================
+# Loss Configuration
+# ============================================================================
+loss:
+  # Loss function type: "default", "focal", "weighted"
+  type: default
+
+  # Focal loss parameters (only used if type: focal)
+  focal:
+    gamma: 2.0              # Focusing parameter (higher = more focus on hard examples)
+    alpha: null             # Class weighting (null, single value, or list per class)
+
+  # Weighted cross-entropy parameters (only used if type: weighted)
+  weighted:
+    # Option 1: Provide explicit weights for each class
+    weights: null           # e.g., [1.0, 1.5, 2.0, ...]
+
+    # Option 2: Auto-compute weights from training data distribution
+    auto_compute: false     # If true, computes weights automatically
+    method: sqrt_inverse    # Method for auto-compute: "inverse", "sqrt_inverse", "balanced"
 
 # ============================================================================
 # Training Configuration
@@ -80,29 +116,30 @@ training:
   max_grad_norm: 1.0
 
   # Training duration
-  num_train_epochs: 8
+  num_train_epochs: 3
 
   # Checkpointing
   save_strategy: steps
-  save_steps: 100
+  save_steps: 50
   save_total_limit: 3
   # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
   resume_from_checkpoint: null
 
   # Evaluation
   eval_strategy: steps
-  eval_steps: 100
-  max_eval_samples: null
-  initial_eval: true
+  eval_steps: 50
+  max_eval_samples: 2000        # Use subset during training for speed (full eval at end)
+  shuffle_eval_subset: true     # Randomly sample eval subset
+  initial_eval: false
 
   # Logging
-  logging_steps: 50
+  logging_steps: 10
   report_to:
     - tensorboard
     - wandb
 
   # Early stopping
-  early_stopping_patience: 8
+  early_stopping_patience: 5
   early_stopping_threshold: 0.0001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1
@@ -119,16 +156,30 @@ training:
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: true
+
+  # Balanced sampling for imbalanced datasets
+  # Options: null (default), "balanced_batch", "weighted"
+  # - "balanced_batch": Each batch has equal samples from each class
+  # - "weighted": Oversample minority classes throughout training
+  balanced_sampling: weighted
+
+  # Weighting method for weighted sampling (only used if balanced_sampling: weighted)
+  # Options: "inverse", "sqrt_inverse", "balanced"
+  # - "inverse": Full rebalancing (minority classes sampled more)
+  # - "sqrt_inverse": Gentler rebalancing
+  # - "balanced": Scale to make expected samples equal per class
+  sampling_method: sqrt_inverse
+
+  group_by_length: true  # Disabled when using balanced_sampling
   length_column_name: duration
 
   # Other
-  eval_accumulation_steps: 1
+  eval_accumulation_steps: 4
   remove_unused_columns: false
 
   # Generation parameters (for constrained decoding evaluation)
   generation_kwargs:
-    max_new_tokens: 8        # Intent labels may be 2-3 tokens, 5 provides buffer
+    max_new_tokens: 5        # Intent labels may be 2-3 tokens, 5 provides buffer
     do_sample: false         # Greedy decoding for deterministic results
     num_beams: 1            # No beam search needed with constraints
 
@@ -144,3 +195,5 @@ artifacts:
 metrics:
   history_csv: intent_training_history.csv
   loss_plot: intent_loss_accuracy.png
+  confusion_matrix: intent_confusion_matrix.png
+  normalize_confusion_matrix: true  # If true, shows percentages; if false, shows counts

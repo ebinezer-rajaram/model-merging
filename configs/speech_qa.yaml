@@ -18,13 +18,17 @@ model:
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - out_proj
-      - fc1
-      - fc2
+    - q_proj               # Query - what to attend to
+    - k_proj               # Key - acoustic feature matching
+    - v_proj               # Value - phoneme representation
+    - o_proj               # Output projection
+  
+    # CRITICAL: Audio-to-text grounding
+    - audio_tower.proj            # L731: Acoustic embeddings → LLM space
+
+    - gate_proj      # ADD: for complex acoustic patterns
+    - up_proj        # ADD: for representation expansion
+    - down_proj      # ADD: for projection
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -45,6 +49,10 @@ dataset:
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
+
+  # Audio duration filtering in seconds (null = no limit)
+  max_duration: null
+  min_duration: null
 
   # Column mappings
   audio_column: audio

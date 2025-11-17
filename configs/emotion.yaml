@@ -13,18 +13,19 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    r: 64                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 128                # LoRA alpha scaling factor (typically 2x rank)
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
       - q_proj
       - k_proj
       - v_proj
+      - o_proj
       # - gate_proj  # ADD: MLP gating
       # - up_proj    # ADD: MLP expansion
       # - down_proj  # ADD: MLP projection
-      - audio_proj       # L731: Critical for acoustic embeddings
+      - audio_tower.proj       # L731: Critical for acoustic embeddings
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -58,7 +59,7 @@ dataset:
   min_duration: 0.5
 
   # Audio normalization
-  normalize_audio: true
+  normalize_audio: false
   # Speaker-level normalization (normalize per speaker to handle different conditions)
   normalize_per_speaker: true
   # Target RMS level for normalization (typical range: -20 to -30 dB)
@@ -77,7 +78,7 @@ dataset:
   test_split: test
 
   # Task-specific options
-  include_transcript: true
+  include_transcript: false
 
 # ============================================================================
 # Loss Configuration
@@ -181,7 +182,7 @@ training:
 
   # Generation parameters (for constrained decoding evaluation)
   generation_kwargs:
-    max_new_tokens: 3        # Emotion labels are 1-2 tokens, 3 provides buffer
+    max_new_tokens: 3        
     do_sample: false         # Greedy decoding for deterministic results
     num_beams: 1            # No beam search needed with constraints
 
@@ -189,7 +190,7 @@ training:
 # Artifacts Configuration
 # ============================================================================
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_emotion
+  adapter_subdir: qwen2_5_omni_lora_emotion_audio
 
 # ============================================================================
 # Metrics Configuration
