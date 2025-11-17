@@ -47,7 +47,7 @@ from tasks.asr import (
     TASK_NAME as ASR_TASK_NAME,
 )
 from tasks.emotion import (
-    EmotionDataCollator,
+    EmotionRecognitionCollator,
     compute_emotion_metrics,
     get_artifact_directories as get_emotion_artifact_directories,
     get_config_path as get_emotion_config_path,
@@ -291,9 +291,6 @@ CLASSIFICATION_BASE_KEYS: Tuple[str, ...] = (
     "stratify_by_column",
     "revision",
     "data_dir",
-    "normalize_audio",
-    "normalize_per_speaker",
-    "target_rms_db",
 )
 
 SPEECH_QA_LOADER_KEYS: Tuple[str, ...] = (
@@ -332,11 +329,7 @@ def _build_classification_loader_kwargs(
     }
     for key in CLASSIFICATION_BASE_KEYS:
         if key in dataset_cfg and dataset_cfg[key] is not None:
-            # Handle parameter name mapping
-            if key == "normalize_audio":
-                loader_kwargs["normalize_audio_flag"] = dataset_cfg[key]
-            else:
-                loader_kwargs[key] = dataset_cfg[key]
+            loader_kwargs[key] = dataset_cfg[key]
     for key in extra_keys:
         if key in dataset_cfg and dataset_cfg[key] is not None:
             loader_kwargs[key] = dataset_cfg[key]
@@ -369,7 +362,7 @@ def _build_emotion_collator(
     label_names: Sequence[str],
     sampling_rate: int,
 ):
-    return EmotionDataCollator(
+    return EmotionRecognitionCollator(
         processor=processor,
         sampling_rate=sampling_rate,
         label_names=list(label_names or []),
@@ -773,18 +766,18 @@ def run_asr_task(config_path: Path) -> None:
         train_ds, val_ds = train_val
         raw_full_val_ds = val_ds
 
-    max_duration_seconds = dataset_cfg.get("max_duration_seconds")
-    min_duration_seconds = dataset_cfg.get("min_duration_seconds")
-    if max_duration_seconds is not None or min_duration_seconds is not None:
-        if max_duration_seconds is not None:
-            max_duration_seconds = float(max_duration_seconds)
-        if min_duration_seconds is not None:
-            min_duration_seconds = float(min_duration_seconds)
-        train_ds = _filter_by_duration(train_ds, max_duration_seconds, "training", min_duration_seconds)
-        val_ds = _filter_by_duration(val_ds, max_duration_seconds, "validation", min_duration_seconds)
-        raw_full_val_ds = _filter_by_duration(raw_full_val_ds, max_duration_seconds, "full-eval", min_duration_seconds)
+    max_duration = dataset_cfg.get("max_duration")
+    min_duration = dataset_cfg.get("min_duration")
+    if max_duration is not None or min_duration is not None:
+        if max_duration is not None:
+            max_duration = float(max_duration)
+        if min_duration is not None:
+            min_duration = float(min_duration)
+        train_ds = _filter_by_duration(train_ds, max_duration, "training", min_duration)
+        val_ds = _filter_by_duration(val_ds, max_duration, "validation", min_duration)
+        raw_full_val_ds = _filter_by_duration(raw_full_val_ds, max_duration, "full-eval", min_duration)
         if test_ds is not None:
-            test_ds = _filter_by_duration(test_ds, max_duration_seconds, "test", min_duration_seconds)
+            test_ds = _filter_by_duration(test_ds, max_duration, "test", min_duration)
 
     # Filter datasets to keep only necessary columns
     keep_columns = ["audio", "text", "duration"]

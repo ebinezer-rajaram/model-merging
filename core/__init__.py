@@ -36,6 +36,13 @@ from .evaluation import (
     sanitize_token_array,
 )
 from .models import load_qwen_asr_model, load_qwen_model
+from .tasks import (
+    BaseAudioTextCollator,
+    BaseClassificationCollator,
+    BaseGenerationCollator,
+    BaseTaskConfig,
+    create_simple_task_config,
+)
 from .training import (
     BalancedBatchSampler,
     CustomTrainer,
@@ -102,4 +109,9 @@ __all__ = [
     "create_classification_constraint",
     "create_multi_token_constraint",
     "run_training_with_evaluation",
+    "BaseTaskConfig",
+    "create_simple_task_config",
+    "BaseAudioTextCollator",
+    "BaseClassificationCollator",
+    "BaseGenerationCollator",
 ]

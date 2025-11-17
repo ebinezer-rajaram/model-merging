@@ -6,13 +6,13 @@ from .config import (
     get_artifact_directories,
     get_config_path,
 )
-from .dataset import EmotionDataCollator, load_superb_emotion_dataset
+from .dataset import EmotionRecognitionCollator, load_superb_emotion_dataset
 from .metrics import compute_emotion_metrics
 
 __all__ = [
     "DEFAULT_CONFIG_FILE",
     "TASK_NAME",
-    "EmotionDataCollator",
+    "EmotionRecognitionCollator",
     "load_superb_emotion_dataset",
     "compute_emotion_metrics",
     "get_artifact_directories",

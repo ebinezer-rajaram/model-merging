@@ -11,7 +11,7 @@ import torch
 from datasets import Dataset, DatasetDict
 
 from core import resolve_num_proc
-from tasks.base.dataset import (
+from core.tasks.dataset import (
     _column_exists,
     _extract_label_names,
     _normalize_target_count,
@@ -124,6 +124,8 @@ def load_voxceleb_speaker_dataset(
     max_test_samples: Optional[int] = None,
     max_speakers: Optional[int] = None,
     max_samples_per_speaker: Optional[int] = None,
+    max_duration: Optional[float] = None,
+    min_duration: Optional[float] = None,
     seed: int = 0,
     num_proc: Optional[int | str] = None,
     cache_dir: Optional[Path | str] = None,
@@ -137,6 +139,7 @@ def load_voxceleb_speaker_dataset(
     validation_split: Optional[str] = "validation",
     test_split: Optional[str] = "test",
     stratify_by_column: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], List[str]]:
     """
     Load a speaker identification dataset derived from VoxCeleb (or compatible format).
@@ -164,6 +167,7 @@ def load_voxceleb_speaker_dataset(
         test_split=test_split,
         stratify_by_column=stratify_by_column,
         seed=seed,
+        data_dir=data_dir,
     )
 
     # Apply speaker-specific filtering
@@ -182,6 +186,31 @@ def load_voxceleb_speaker_dataset(
     # Add duration information
     effective_num_proc = resolve_num_proc(num_proc)
     dataset = add_duration_to_dataset(dataset, audio_column=audio_column_name, num_proc=effective_num_proc)
+
+    # Filter by duration if specified
+    if max_duration is not None or min_duration is not None:
+        def _keep_duration(example: dict) -> bool:
+            duration = example.get("duration") or 0.0
+            duration_float = float(duration)
+            if max_duration is not None and duration_float > max_duration:
+                return False
+            if min_duration is not None and duration_float < min_duration:
+                return False
+            return True
+
+        for split_name in list(dataset.keys()):
+            before = len(dataset[split_name])
+            dataset[split_name] = dataset[split_name].filter(_keep_duration)
+            after = len(dataset[split_name])
+            if after != before:
+                filtered_count = before - after
+                duration_info = []
+                if max_duration is not None:
+                    duration_info.append(f">{max_duration:.1f}s")
+                if min_duration is not None:
+                    duration_info.append(f"<{min_duration:.1f}s")
+                duration_str = " or ".join(duration_info)
+                print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
 
     # Build cache path
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT

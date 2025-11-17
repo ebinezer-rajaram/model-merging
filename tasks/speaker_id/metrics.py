@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Sequence
 
-from tasks.base.metrics import compute_classification_metrics
+from core.tasks.metrics import compute_classification_metrics
 
 
 def compute_speaker_id_metrics(

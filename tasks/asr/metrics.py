@@ -10,7 +10,7 @@ from core import compute_wer_from_texts
 def compute_asr_metrics(
     eval_pred: Any,
     processor,
-    wer_normalization: Literal["default", "standardize", "both"] = "default",
+    wer_normalization: Literal["default", "standardize", "aggressive", "both", "all"] = "default",
 ) -> Dict[str, float]:
     """Compute word error rate for ASR evaluation.
 
@@ -21,12 +21,16 @@ def compute_asr_metrics(
             - 'default': Minimal normalization (remove extra spaces, strip whitespace)
             - 'standardize': Aggressive normalization (lowercase, remove punctuation,
                            expand contractions, remove Kaldi non-words)
-            - 'both': Compute both metrics (returns wer_default and wer_standardize)
+            - 'aggressive': Very aggressive normalization (removes ALL punctuation properly,
+                          lowercase, removes multiple spaces)
+            - 'both': Compute default and standardize (returns wer_default and wer_standardize)
+            - 'all': Compute all three metrics (returns wer_default, wer_standardize, wer_aggressive)
 
     Returns:
         Dictionary with WER metric(s):
-            - If 'default' or 'standardize': {"wer": <value>}
+            - If 'default', 'standardize', or 'aggressive': {"wer": <value>}
             - If 'both': {"wer_default": <value>, "wer_standardize": <value>}
+            - If 'all': {"wer_default": <value>, "wer_standardize": <value>, "wer_aggressive": <value>}
     """
     preds, labels = eval_pred
     if isinstance(preds, tuple):
@@ -63,7 +67,13 @@ def compute_asr_metrics(
             text = text.split("assistant\n", 1)[1].strip()
         label_texts.append(text)
 
-    if wer_normalization == "both":
+    if wer_normalization == "all":
+        return {
+            "wer_default": compute_wer_from_texts(label_texts, pred_texts, normalization="default"),
+            "wer_standardize": compute_wer_from_texts(label_texts, pred_texts, normalization="standardize"),
+            "wer_aggressive": compute_wer_from_texts(label_texts, pred_texts, normalization="aggressive"),
+        }
+    elif wer_normalization == "both":
         return {
             "wer_default": compute_wer_from_texts(label_texts, pred_texts, normalization="default"),
             "wer_standardize": compute_wer_from_texts(label_texts, pred_texts, normalization="standardize"),

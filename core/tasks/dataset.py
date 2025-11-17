@@ -295,7 +295,29 @@ def prepare_classification_dataset(
             label_feature = dataset[probe_split].features.get("label")
             dtype = getattr(label_feature, "dtype", None)
             if dtype == "string":
-                dataset = dataset.class_encode_column("label")
+                # Collect all unique labels across all splits to ensure consistent encoding
+                all_labels = set()
+                for split_name, split_ds in dataset.items():
+                    try:
+                        unique_labels = split_ds.unique("label")
+                        all_labels.update(str(label) for label in unique_labels if label not in (None, ""))
+                    except (KeyError, TypeError):
+                        pass
+
+                if all_labels:
+                    # Create a ClassLabel feature with all labels sorted alphabetically
+                    from datasets import ClassLabel, Features
+                    sorted_labels = sorted(all_labels)
+                    class_label_feature = ClassLabel(names=sorted_labels)
+
+                    # Apply the same ClassLabel feature to all splits
+                    for split_name in dataset.keys():
+                        current_features = dataset[split_name].features.copy()
+                        current_features["label"] = class_label_feature
+                        dataset[split_name] = dataset[split_name].cast(Features(current_features))
+                else:
+                    # Fallback to default behavior if we couldn't collect labels
+                    dataset = dataset.class_encode_column("label")
 
     return dataset
 
@@ -395,6 +417,7 @@ def load_and_prepare_dataset(
     stratify_by_column: Optional[str] = None,
     seed: int = 0,
     revision: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> Tuple[DatasetDict, str]:
     """Load and prepare a dataset with standardized preprocessing.
 
@@ -419,15 +442,22 @@ def load_and_prepare_dataset(
         stratify_by_column: Column to stratify splits by
         seed: Random seed
         revision: Dataset revision
+        data_dir: Path to local data directory (for local datasets)
 
     Returns:
         (dataset, audio_column_name)
     """
     # Load dataset
-    if dataset_config:
-        dataset = load_dataset(dataset_name, dataset_config, revision=revision)
+    # Special handling for local custom datasets
+    if dataset_name == "local_meld":
+        from tasks.emotion.meld_loader import load_meld_from_local
+        if data_dir is None:
+            raise ValueError("data_dir must be specified for local_meld dataset")
+        dataset = load_meld_from_local(data_dir=data_dir)
+    elif dataset_config:
+        dataset = load_dataset(dataset_name, dataset_config, revision=revision, data_dir=data_dir)
     else:
-        dataset = load_dataset(dataset_name, revision=revision)
+        dataset = load_dataset(dataset_name, revision=revision, data_dir=data_dir)
 
     if not isinstance(dataset, DatasetDict):
         raise TypeError(f"Expected DatasetDict, received {type(dataset)!r}")

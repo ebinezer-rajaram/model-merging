@@ -10,7 +10,7 @@ import torch
 from datasets import Dataset
 
 from core import resolve_num_proc
-from tasks.base.dataset import (
+from core.tasks.dataset import (
     _extract_label_names,
     _normalize_target_count,
     _samples_key,
@@ -44,6 +44,8 @@ def load_slurp_intent_dataset(
     max_train_samples: Optional[int] = None,
     max_validation_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
+    max_duration: Optional[float] = None,
+    min_duration: Optional[float] = None,
     seed: int = 0,
     num_proc: Optional[int | str] = None,
     cache_dir: Optional[Path | str] = None,
@@ -57,6 +59,7 @@ def load_slurp_intent_dataset(
     validation_split: Optional[str] = "devel",
     test_split: Optional[str] = "test",
     stratify_by_column: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], List[str]]:
     """
     Load the SLURP dataset (or a compatible intent classification dataset).
@@ -82,11 +85,37 @@ def load_slurp_intent_dataset(
         test_split=test_split,
         stratify_by_column=stratify_by_column,
         seed=seed,
+        data_dir=data_dir,
     )
 
     # Add duration information
     effective_num_proc = resolve_num_proc(num_proc)
     dataset = add_duration_to_dataset(dataset, audio_column=audio_column_name, num_proc=effective_num_proc)
+
+    # Filter by duration if specified
+    if max_duration is not None or min_duration is not None:
+        def _keep_duration(example: dict) -> bool:
+            duration = example.get("duration") or 0.0
+            duration_float = float(duration)
+            if max_duration is not None and duration_float > max_duration:
+                return False
+            if min_duration is not None and duration_float < min_duration:
+                return False
+            return True
+
+        for split_name in list(dataset.keys()):
+            before = len(dataset[split_name])
+            dataset[split_name] = dataset[split_name].filter(_keep_duration)
+            after = len(dataset[split_name])
+            if after != before:
+                filtered_count = before - after
+                duration_info = []
+                if max_duration is not None:
+                    duration_info.append(f">{max_duration:.1f}s")
+                if min_duration is not None:
+                    duration_info.append(f"<{min_duration:.1f}s")
+                duration_str = " or ".join(duration_info)
+                print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
 
     # Filter corrupted audio files
     def _validate_audio(example):
@@ -191,7 +220,7 @@ class IntentClassificationCollator:
         transcript = (transcript or "").strip()
         # Format class options for the prompt
         class_options = ", ".join(self.label_names)
-        instruction = f"What is the user's intent from the spoken utterance? Choose from: {class_options}."
+        instruction = f"What is the user's intent from the spoken utterance? Choose from: {class_options}. Output only the label."
 
         if self.prepend_scenario:
             scenario = metadata.get("scenario")

@@ -448,18 +448,18 @@ def _build_generic_eval_setup(
 
 def _asr_post_load_hook(dataset: Any, dataset_cfg: Dict[str, Any], split: str) -> Any:
     """Filter ASR dataset by duration if specified."""
-    max_duration_seconds = dataset_cfg.get("max_duration_seconds")
-    min_duration_seconds = dataset_cfg.get("min_duration_seconds")
+    max_duration = dataset_cfg.get("max_duration")
+    min_duration = dataset_cfg.get("min_duration")
 
-    if max_duration_seconds is None and min_duration_seconds is None:
+    if max_duration is None and min_duration is None:
         return dataset
 
     def _keep_duration(example: Dict[str, Any]) -> bool:
         duration = example.get("duration") or 0.0
         duration_float = float(duration)
-        if max_duration_seconds is not None and duration_float > max_duration_seconds:
+        if max_duration is not None and duration_float > max_duration:
             return False
-        if min_duration_seconds is not None and duration_float < min_duration_seconds:
+        if min_duration is not None and duration_float < min_duration:
             return False
         return True
 
@@ -468,10 +468,10 @@ def _asr_post_load_hook(dataset: Any, dataset_cfg: Dict[str, Any], split: str) -
     if len(dataset) != before:
         filtered_count = before - len(dataset)
         duration_info = []
-        if max_duration_seconds is not None:
-            duration_info.append(f">{max_duration_seconds:.1f}s")
-        if min_duration_seconds is not None:
-            duration_info.append(f"<{min_duration_seconds:.1f}s")
+        if max_duration is not None:
+            duration_info.append(f">{max_duration:.1f}s")
+        if min_duration is not None:
+            duration_info.append(f"<{min_duration:.1f}s")
         duration_str = " or ".join(duration_info)
         print(f"⏱️ Filtered {filtered_count} samples ({duration_str}) from split '{split}'.")
     return dataset
@@ -547,7 +547,7 @@ def _get_asr_task_config() -> TaskConfig:
 def _get_emotion_task_config() -> TaskConfig:
     """Create emotion classification task configuration."""
     from tasks.emotion import (
-        EmotionDataCollator,
+        EmotionRecognitionCollator,
         compute_emotion_metrics,
         load_superb_emotion_dataset,
     )
@@ -556,7 +556,7 @@ def _get_emotion_task_config() -> TaskConfig:
         dataset_loader=load_superb_emotion_dataset,
         loader_config_keys=CLASSIFICATION_EVAL_KEYS,
         has_label_names=True,
-        collator_class=EmotionDataCollator,
+        collator_class=EmotionRecognitionCollator,
         collator_params={},
         compute_metrics_fn=compute_emotion_metrics,
         metrics_params={},

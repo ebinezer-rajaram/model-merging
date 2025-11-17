@@ -30,15 +30,19 @@ class CustomTrainer(Trainer):
         self.custom_sampler = custom_sampler
         super().__init__(*args, **kwargs)
 
-    def log(self, logs: Dict[str, float]) -> None:
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         """Override log to filter out non-scalar metrics before logging to TensorBoard.
 
-        Filters out keys starting with '_' which are used to pass non-scalar data
-        (like predictions/labels arrays) between compute_metrics and evaluation code.
+        Filters out keys starting with '_' or containing '/_' which are used to pass
+        non-scalar data (like predictions/labels arrays) between compute_metrics and
+        evaluation code.
         """
-        # Filter out keys starting with '_' (non-scalar metrics)
-        filtered_logs = {k: v for k, v in logs.items() if not k.startswith('_')}
-        super().log(filtered_logs)
+        # Filter out keys starting with '_' or containing '/_' (non-scalar metrics)
+        filtered_logs = {k: v for k, v in logs.items() if not k.startswith('_') and '/_' not in k}
+        if start_time is not None:
+            super().log(filtered_logs, start_time)
+        else:
+            super().log(filtered_logs)
 
     def prediction_step(
         self,
