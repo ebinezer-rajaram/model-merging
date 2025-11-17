@@ -156,18 +156,25 @@ class WeightedClassSampler(Sampler[int]):
         num_classes = len(class_counts)
 
         # Compute weights based on method
+        # Handle zero counts by replacing with a very small positive number
+        # (these classes won't be sampled anyway since they have no samples)
+        class_counts_safe = class_counts.float().clamp(min=1e-8)
+
         if method == "inverse":
             # Inverse of class frequency (full rebalancing)
-            class_weights = 1.0 / class_counts.float()
+            class_weights = 1.0 / class_counts_safe
         elif method == "sqrt_inverse":
             # Square root of inverse (gentler rebalancing)
-            class_weights = 1.0 / torch.sqrt(class_counts.float())
+            class_weights = 1.0 / torch.sqrt(class_counts_safe)
         elif method == "balanced":
             # Balanced: scale to make expected samples equal
             total_samples = class_counts.sum().float()
-            class_weights = total_samples / (num_classes * class_counts.float())
+            class_weights = total_samples / (num_classes * class_counts_safe)
         else:
             raise ValueError(f"Unknown weighting method: {method}. Use 'inverse', 'sqrt_inverse', or 'balanced'")
+
+        # Set weight to 0 for classes with no samples (can't be sampled anyway)
+        class_weights[class_counts == 0] = 0.0
 
         # Assign weight to each sample based on its class
         self.weights = torch.tensor([class_weights[label] for label in labels])
