@@ -1,9 +1,21 @@
 """Shared metric helper functions."""
 
 from typing import Iterable, List, Literal, Sequence
+import re
 
 import numpy as np
-from jiwer import wer, wer_default, wer_standardize
+from jiwer import (
+    Compose,
+    ReduceToListOfListOfWords,
+    RemoveMultipleSpaces,
+    RemovePunctuation,
+    Strip,
+    SubstituteRegexes,
+    ToLowerCase,
+    wer,
+    wer_default,
+    wer_standardize,
+)
 
 
 def sanitize_token_array(array: Sequence[int], pad_id: int) -> List[int]:
@@ -41,7 +53,7 @@ def decode_tokens(batch: Sequence[int], tokenizer) -> str:
 def compute_wer_from_texts(
     reference_texts: Iterable[str],
     predicted_texts: Iterable[str],
-    normalization: Literal["default", "standardize"] = "default",
+    normalization: Literal["default", "standardize", "aggressive"] = "default",
 ) -> float:
     """Compute WER score given reference and predicted texts.
 
@@ -52,9 +64,23 @@ def compute_wer_from_texts(
             - 'default': Minimal normalization (remove extra spaces, strip whitespace)
             - 'standardize': Aggressive normalization (lowercase, remove punctuation,
                            expand contractions, remove Kaldi non-words)
+            - 'aggressive': Very aggressive normalization (removes ALL punctuation properly,
+                          lowercase, removes multiple spaces)
 
     Returns:
         Word error rate as a float
     """
-    transformation = wer_standardize if normalization == "standardize" else wer_default
+    if normalization == "aggressive":
+        transformation = Compose([
+            RemovePunctuation(),
+            ToLowerCase(),
+            RemoveMultipleSpaces(),
+            Strip(),
+            ReduceToListOfListOfWords(),
+        ])
+    elif normalization == "standardize":
+        transformation = wer_standardize
+    else:
+        transformation = wer_default
+
     return wer(list(reference_texts), list(predicted_texts), reference_transform=transformation, hypothesis_transform=transformation)
