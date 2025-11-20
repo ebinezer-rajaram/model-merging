@@ -37,11 +37,7 @@ CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "validation_split",
     "test_split",
     "stratify_by_column",
-    "revision",
     "data_dir",
-    "normalize_audio",
-    "normalize_per_speaker",
-    "target_rms_db",
 )
 
 SPEAKER_EXTRA_EVAL_KEYS: Tuple[str, ...] = (
@@ -62,6 +58,22 @@ SPEECH_QA_EVAL_KEYS: Tuple[str, ...] = (
     "id_column",
     "answer_column",
     "split_percentages",
+    "train_split",
+    "validation_split",
+    "test_split",
+)
+
+ST_EVAL_KEYS: Tuple[str, ...] = (
+    "dataset_name",
+    "dataset_config",
+    "max_train_samples",
+    "max_validation_samples",
+    "max_test_samples",
+    "max_duration",
+    "min_duration",
+    "audio_column",
+    "source_column",
+    "translation_column",
     "train_split",
     "validation_split",
     "test_split",
@@ -327,11 +339,11 @@ def _build_generic_eval_setup(
     # Add task-specific config keys
     for key in task_config.loader_config_keys:
         if key in dataset_cfg and dataset_cfg[key] is not None:
-            # Handle parameter name mapping
-            if key == "normalize_audio":
-                loader_kwargs["normalize_audio_flag"] = dataset_cfg[key]
-            else:
-                loader_kwargs[key] = dataset_cfg[key]
+            loader_kwargs[key] = dataset_cfg[key]
+
+    # Special handling for ST task: map top-level 'language' to 'dataset_config'
+    if "dataset_config" in task_config.loader_config_keys and "language" in cfg:
+        loader_kwargs["dataset_config"] = cfg["language"]
 
     # Load dataset
     dataset_bundle = task_config.dataset_loader(**loader_kwargs)
@@ -394,6 +406,9 @@ def _build_generic_eval_setup(
     for key in ("include_transcript", "include_context", "prepend_scenario"):
         if key in dataset_cfg:
             collator_kwargs[key] = dataset_cfg[key]
+    # Inject language from top-level config for ST task
+    if "language" in cfg:
+        collator_kwargs["language_pair"] = cfg["language"]
 
     collator = task_config.collator_class(**collator_kwargs)
 
@@ -632,6 +647,28 @@ def _get_speech_qa_task_config() -> TaskConfig:
     )
 
 
+def _get_st_task_config() -> TaskConfig:
+    """Create speech translation task configuration."""
+    from tasks.st import (
+        STCollator,
+        compute_st_metrics,
+        load_covost2_dataset,
+    )
+
+    return TaskConfig(
+        dataset_loader=load_covost2_dataset,
+        loader_config_keys=ST_EVAL_KEYS,
+        has_label_names=False,
+        collator_class=STCollator,
+        collator_params={},
+        compute_metrics_fn=compute_st_metrics,
+        metrics_params={},
+        required_columns=("audio", "text", "translation"),
+        optional_columns=("duration",),
+        post_load_hook=_asr_post_load_hook,  # Reuse ASR duration filtering
+    )
+
+
 def _register_default_tasks() -> None:
     """Register built-in task builders.
 
@@ -683,6 +720,16 @@ def _register_default_tasks() -> None:
         register_eval_task(
             "speech_qa",
             lambda **kwargs: _build_generic_eval_setup(_get_speech_qa_task_config(), **kwargs),
+            overwrite=True,
+        )
+    except Exception:
+        pass
+
+    # Register Speech Translation
+    try:
+        register_eval_task(
+            "st",
+            lambda **kwargs: _build_generic_eval_setup(_get_st_task_config(), **kwargs),
             overwrite=True,
         )
     except Exception:

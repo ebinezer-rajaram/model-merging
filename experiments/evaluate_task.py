@@ -43,6 +43,11 @@ from tasks.speech_qa import (
     get_artifact_directories as get_speech_qa_artifact_directories,
     get_config_path as get_speech_qa_config_path,
 )
+from tasks.st import (
+    TASK_NAME as ST_TASK_NAME,
+    get_artifact_directories as get_st_artifact_directories,
+    get_config_path as get_st_config_path,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -118,27 +123,48 @@ def _resolve_adapter_path(
         # This is likely a task name for cross-task evaluation
         from core.training.run_manager import RunManager
 
-        # Map task name to artifact directory
+        # Map task name to artifact directory and config path
         task_artifact_map = {
             ASR_TASK_NAME: get_asr_artifact_directories,
             EMOTION_TASK_NAME: get_emotion_artifact_directories,
             SPEAKER_TASK_NAME: get_speaker_artifact_directories,
             INTENT_TASK_NAME: get_intent_artifact_directories,
             SPEECH_QA_TASK_NAME: get_speech_qa_artifact_directories,
+            ST_TASK_NAME: get_st_artifact_directories,
+        }
+
+        task_config_map = {
+            ASR_TASK_NAME: get_asr_config_path,
+            EMOTION_TASK_NAME: get_emotion_config_path,
+            SPEAKER_TASK_NAME: get_speaker_config_path,
+            INTENT_TASK_NAME: get_intent_config_path,
+            SPEECH_QA_TASK_NAME: get_speech_qa_config_path,
+            ST_TASK_NAME: get_st_config_path,
         }
 
         if raw_path in task_artifact_map:
             artifact_dirs = task_artifact_map[raw_path](PACKAGE_ROOT)
-            # Find the adapter directory (should be only one in adapters/)
             adapters_dir = artifact_dirs["adapters"]
 
-            # Look for adapter subdirectories
-            adapter_subdirs = [d for d in adapters_dir.iterdir() if d.is_dir()]
-            if not adapter_subdirs:
-                raise ValueError(f"No adapter found for task '{raw_path}'")
+            # Load the task's config to get the adapter_subdir
+            task_config_path = task_config_map[raw_path](PACKAGE_ROOT)
+            task_config = load_config(task_config_path)
+            artifacts_cfg = task_config.get("artifacts", {})
+            adapter_subdir = artifacts_cfg.get("adapter_subdir")
 
-            # Use the first adapter directory found (or could make this configurable)
-            adapter_base = adapter_subdirs[0]
+            if not adapter_subdir:
+                raise ValueError(
+                    f"No 'adapter_subdir' specified in config for task '{raw_path}'. "
+                    f"Please add 'artifacts.adapter_subdir' to the config file."
+                )
+
+            # Use the adapter subdirectory from config
+            adapter_base = adapters_dir / adapter_subdir
+            if not adapter_base.exists():
+                raise ValueError(
+                    f"Adapter directory '{adapter_subdir}' not found for task '{raw_path}' at {adapters_dir}. "
+                    f"Expected path: {adapter_base}"
+                )
 
             # Now resolve run_id
             run_to_use = run_id or "best"
@@ -341,10 +367,18 @@ def evaluate(
     elif task == SPEECH_QA_TASK_NAME:
         config_path = get_speech_qa_config_path(PACKAGE_ROOT, config_name)
         artifact_dirs = get_speech_qa_artifact_directories(PACKAGE_ROOT)
+    elif task == ST_TASK_NAME:
+        config_path = get_st_config_path(PACKAGE_ROOT, config_name)
+        # Load config early for ST to get language parameter
+        config = load_config(config_path)
+        language = config.get("language", "en_de")
+        artifact_dirs = get_st_artifact_directories(PACKAGE_ROOT, language=language)
     else:
         raise NotImplementedError(f"Evaluation for task '{task}' is not implemented yet.")
 
-    config = load_config(config_path)
+    # Load config if not already loaded (for ST, it's already loaded above)
+    if task != ST_TASK_NAME:
+        config = load_config(config_path)
     config = _prepare_dataset_cache(config, artifact_dirs)
 
     model_path = _get_model_path(config, task)

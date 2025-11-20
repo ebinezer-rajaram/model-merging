@@ -78,6 +78,14 @@ from tasks.speech_qa import (
     load_speech_qa_dataset,
     TASK_NAME as SPEECH_QA_TASK_NAME,
 )
+from tasks.st import (
+    STCollator,
+    compute_st_metrics,
+    get_artifact_directories as get_st_artifact_directories,
+    get_config_path as get_st_config_path,
+    load_covost2_dataset,
+    TASK_NAME as SPEECH_TRANSLATION_TASK_NAME,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -864,6 +872,151 @@ def run_asr_task(config_path: Path) -> None:
     )
 
 
+def run_st_task(config_path: Path) -> None:
+    """Run the Speech Translation fine-tuning workflow."""
+    config = load_config(config_path)
+    seed = config.get("seed")
+    set_global_seed(seed)
+
+    training_cfg = config.get("training", {})
+    dataset_cfg = config.get("dataset", {})
+
+    # Get language pair for language-specific artifacts and prompts
+    language = config.get("language", "en_de")
+    artifact_dirs = get_st_artifact_directories(PACKAGE_ROOT, language=language)
+
+    # Setup common components
+    components = _setup_common_components(
+        config,
+        SPEECH_TRANSLATION_TASK_NAME,
+        artifact_dirs,
+        "qwen2_5_omni_lora_st",
+        "st_training_history.csv",
+        "st_loss_bleu_plot.png",
+    )
+    model = components["model"]
+    processor = components["processor"]
+    output_dir = components["output_dir"]
+    metrics_dir = components["metrics_dir"]
+    history_csv_path = components["history_csv_path"]
+    loss_plot_path = components["loss_plot_path"]
+    final_adapter_dir = components["final_adapter_dir"]
+
+    dataset_seed = dataset_cfg.get("seed", seed)
+    dataset_cache_path = _resolve_dataset_cache_path(dataset_cfg, artifact_dirs)
+
+    # Load CoVoST2 dataset
+    # Use 'language' parameter as dataset_config (single source of truth)
+    loader_kwargs = dict(
+        dataset_name=dataset_cfg.get("dataset_name", "fixie-ai/covost2"),
+        dataset_config=language,  # Use language parameter instead of separate dataset_config
+        max_train_samples=dataset_cfg.get("max_train_samples"),
+        max_validation_samples=dataset_cfg.get("max_validation_samples"),
+        max_test_samples=dataset_cfg.get("max_test_samples"),
+        max_duration=dataset_cfg.get("max_duration"),
+        min_duration=dataset_cfg.get("min_duration"),
+        seed=dataset_seed,
+        num_proc=dataset_cfg.get("num_proc"),
+        cache_dir=dataset_cache_path,
+        cache_splits=dataset_cfg.get("cache_splits", True),
+        force_rebuild=dataset_cfg.get("force_rebuild", False),
+        audio_column=dataset_cfg.get("audio_column"),
+        source_column=dataset_cfg.get("source_column"),
+        translation_column=dataset_cfg.get("translation_column"),
+        train_split=dataset_cfg.get("train_split", "train"),
+        validation_split=dataset_cfg.get("validation_split", "validation"),
+        test_split=dataset_cfg.get("test_split", "test"),
+    )
+    train_ds, val_ds, test_ds = load_covost2_dataset(**loader_kwargs)
+
+    if train_ds is None:
+        raise RuntimeError("ST dataset did not provide a training split.")
+    if val_ds is None:
+        raise RuntimeError("ST dataset did not provide a validation split.")
+
+    # Filter datasets to keep only necessary columns
+    keep_columns = ["audio", "text", "translation", "duration"]
+    train_ds = filter_dataset_columns(train_ds, keep_columns)
+    val_ds = filter_dataset_columns(val_ds, keep_columns)
+    full_val_ds = filter_dataset_columns(val_ds, keep_columns)
+    if test_ds is not None:
+        test_ds = filter_dataset_columns(test_ds, keep_columns)
+
+    # Get eval sampling configuration
+    shuffle_eval = training_cfg.get("shuffle_eval_subset", False)
+    eval_val_ds = _truncate_eval_dataset(
+        val_ds,
+        training_cfg.get("max_eval_samples"),
+        seed=seed,
+        shuffle=shuffle_eval
+    )
+
+    target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
+    collator = STCollator(processor=processor, sampling_rate=target_sr, language_pair=language)
+
+    # Parse training configuration with ST-specific defaults
+    task_defaults = {
+        "per_device_train_batch_size": 16,
+        "per_device_eval_batch_size": 16,
+        "learning_rate": 3e-5,
+        "num_train_epochs": 3,
+        "metric_for_best_model": "bleu",
+        "greater_is_better": True,
+        "early_stopping_patience": 5,
+        "length_column_name": "duration",
+        "generation_kwargs": {
+            "max_new_tokens": 128,
+            "do_sample": False,
+            "num_beams": 4,
+            "length_penalty": 1.0,
+        },
+    }
+    train_config = parse_training_config(
+        training_cfg,
+        num_train_examples=len(train_ds),
+        task_defaults=task_defaults,
+    )
+
+    # Build training arguments
+    training_args = build_training_arguments(train_config, output_dir=str(output_dir))
+    early_stopping_kwargs = build_early_stopping_kwargs(train_config)
+
+    trainer = CustomTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_ds,
+        eval_dataset=eval_val_ds,
+        data_collator=collator,
+        processing_class=processor,
+        compute_metrics=partial(compute_st_metrics, processor=processor),
+        callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
+        generation_kwargs=train_config.generation_kwargs,
+    )
+
+    # Resolve checkpoint path for resuming
+    from core.training.training_loop import resolve_checkpoint_path
+    checkpoint_path = resolve_checkpoint_path(
+        train_config.resume_from_checkpoint,
+        output_dir,
+    )
+
+    # Run training with evaluation
+    run_training_with_evaluation(
+        trainer,
+        processor=processor,
+        full_eval_dataset=full_val_ds,
+        initial_eval=train_config.initial_eval,
+        history_csv_path=history_csv_path,
+        loss_plot_path=loss_plot_path,
+        final_adapter_dir=final_adapter_dir,
+        config=config,
+        config_path=config_path,
+        metrics_dir=metrics_dir,
+        test_dataset=test_ds,
+        test_split_name=dataset_cfg.get("test_split", "test"),
+        resume_from_checkpoint=checkpoint_path,
+    )
+
 
 def run_emotion_task(config_path: Path) -> None:
     """Run the emotion recognition fine-tuning workflow."""
@@ -1060,6 +1213,9 @@ def main() -> None:
     elif args.task == SPEECH_QA_TASK_NAME:
         config_path = get_speech_qa_config_path(PACKAGE_ROOT, args.config)
         run_speech_qa_task(config_path)
+    elif args.task == SPEECH_TRANSLATION_TASK_NAME:
+        config_path = get_st_config_path(PACKAGE_ROOT, args.config)
+        run_st_task(config_path)
     else:
         raise NotImplementedError(f"Task '{args.task}' is not supported yet.")
 
