@@ -16,6 +16,7 @@ from core.tasks.dataset import (
     _samples_key,
     add_duration_to_dataset,
     cache_and_sample_splits,
+    filter_by_duration,
     load_and_prepare_dataset,
     print_dataset_summary,
 )
@@ -88,34 +89,25 @@ def load_slurp_intent_dataset(
         data_dir=data_dir,
     )
 
-    # Add duration information
+    # Build cache directory path
+    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
     effective_num_proc = resolve_num_proc(num_proc)
-    dataset = add_duration_to_dataset(dataset, audio_column=audio_column_name, num_proc=effective_num_proc)
 
-    # Filter by duration if specified
-    if max_duration is not None or min_duration is not None:
-        def _keep_duration(example: dict) -> bool:
-            duration = example.get("duration") or 0.0
-            duration_float = float(duration)
-            if max_duration is not None and duration_float > max_duration:
-                return False
-            if min_duration is not None and duration_float < min_duration:
-                return False
-            return True
+    # Add duration information (with caching)
+    dataset = add_duration_to_dataset(
+        dataset,
+        audio_column=audio_column_name,
+        num_proc=effective_num_proc,
+        cache_dir=cache_root if not force_rebuild else None,
+    )
 
-        for split_name in list(dataset.keys()):
-            before = len(dataset[split_name])
-            dataset[split_name] = dataset[split_name].filter(_keep_duration)
-            after = len(dataset[split_name])
-            if after != before:
-                filtered_count = before - after
-                duration_info = []
-                if max_duration is not None:
-                    duration_info.append(f">{max_duration:.1f}s")
-                if min_duration is not None:
-                    duration_info.append(f"<{min_duration:.1f}s")
-                duration_str = " or ".join(duration_info)
-                print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
+    # Filter by duration if specified (with caching)
+    dataset = filter_by_duration(
+        dataset,
+        max_duration=max_duration,
+        min_duration=min_duration,
+        cache_dir=cache_root if not force_rebuild else None,
+    )
 
     # Filter corrupted audio files
     def _validate_audio(example):

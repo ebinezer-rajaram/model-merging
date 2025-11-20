@@ -87,8 +87,8 @@ def add_duration(
         length = len(array)
         batch[target_field] = float(length) / float(sampling_rate) if sampling_rate else 0.0
         return batch
-    except (TypeError, RuntimeError, Exception):
-        # Handle corrupted files, decoding errors, or other issues
+    except (TypeError, RuntimeError, ValueError, Exception):
+        # Handle corrupted files, decoding errors, empty bytes, or other issues
         batch[target_field] = 0.0
         return batch
 

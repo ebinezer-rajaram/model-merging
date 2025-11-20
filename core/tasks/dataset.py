@@ -143,6 +143,10 @@ def apply_split_percentages(
 
     Returns:
         New DatasetDict with train/validation/test splits
+
+    Note:
+        If test_ratio is 0.0 and dataset already has a "test" split different from train_split,
+        the existing test split will be preserved.
     """
     if isinstance(split_percentages, Mapping):
         train_ratio = float(split_percentages.get("train", 0.0))
@@ -190,6 +194,9 @@ def apply_split_percentages(
     else:
         train_portion = base_train
         test_portion = None
+        # Preserve existing test split if present and different from train_split
+        if "test" in dataset and train_split != "test":
+            test_portion = dataset["test"]
 
     # Split off validation set if needed
     if val_ratio > 0.0:
@@ -389,14 +396,106 @@ def cache_and_sample_splits(
     return train_subset, validation_subset, test_subset, splits_metadata, payload_seed
 
 
+def _duration_filter_fn(
+    example: Dict[str, Any],
+    max_duration: Optional[float] = None,
+    min_duration: Optional[float] = None,
+) -> bool:
+    """Filter function for duration constraints.
+
+    Defined at module level to ensure consistent hashing for HuggingFace caching.
+    """
+    duration = example.get("duration") or 0.0
+    duration_float = float(duration)
+    if max_duration is not None and duration_float > max_duration:
+        return False
+    if min_duration is not None and duration_float < min_duration:
+        return False
+    return True
+
+
+def filter_by_duration(
+    dataset: DatasetDict,
+    max_duration: Optional[float] = None,
+    min_duration: Optional[float] = None,
+    cache_dir: Optional[Path | str] = None,
+) -> DatasetDict:
+    """Filter dataset splits by audio duration.
+
+    Args:
+        dataset: Dataset dict to filter
+        max_duration: Maximum duration in seconds (None = no limit)
+        min_duration: Minimum duration in seconds (None = no limit)
+        cache_dir: Cache directory for filter operations (enables caching)
+
+    Returns:
+        Filtered dataset dict
+    """
+    if max_duration is None and min_duration is None:
+        return dataset
+
+    filter_fn = partial(_duration_filter_fn, max_duration=max_duration, min_duration=min_duration)
+
+    for split_name in list(dataset.keys()):
+        before = len(dataset[split_name])
+
+        # Build cache file name if caching is enabled
+        filter_kwargs = {}
+        if cache_dir is not None:
+            cache_path = Path(cache_dir)
+            duration_suffix = []
+            if max_duration is not None:
+                duration_suffix.append(f"max{max_duration}")
+            if min_duration is not None:
+                duration_suffix.append(f"min{min_duration}")
+            suffix = "_".join(duration_suffix)
+            filter_kwargs["cache_file_name"] = str(cache_path / f"{split_name}_filtered_{suffix}.arrow")
+        filter_kwargs["desc"] = "Filtering by duration"
+
+        dataset[split_name] = dataset[split_name].filter(filter_fn, **filter_kwargs)
+
+        after = len(dataset[split_name])
+        if after != before:
+            filtered_count = before - after
+            duration_info = []
+            if max_duration is not None:
+                duration_info.append(f">{max_duration:.1f}s")
+            if min_duration is not None:
+                duration_info.append(f"<{min_duration:.1f}s")
+            duration_str = " or ".join(duration_info)
+            print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
+
+    return dataset
+
+
 def add_duration_to_dataset(
     dataset: DatasetDict,
     audio_column: str = DEFAULT_AUDIO_COLUMN,
     num_proc: Optional[int | str] = None,
+    cache_dir: Optional[Path | str] = None,
 ) -> DatasetDict:
-    """Add duration field to all splits in a dataset."""
+    """Add duration field to all splits in a dataset.
+
+    Args:
+        dataset: Dataset dict to add durations to
+        audio_column: Name of the audio column
+        num_proc: Number of processes for parallel processing
+        cache_dir: Cache directory for map operations (enables caching)
+
+    Returns:
+        Dataset dict with duration column added
+    """
     effective_num_proc = resolve_num_proc(num_proc)
     map_kwargs = num_proc_map_kwargs(effective_num_proc)
+
+    # Add cache_dir and description for HuggingFace's caching
+    if cache_dir is not None:
+        map_kwargs["cache_file_names"] = {
+            split: str(Path(cache_dir) / f"{split}_with_duration.arrow")
+            for split in dataset.keys()
+        }
+    map_kwargs["desc"] = "Adding duration"
+
     duration_fn = partial(add_duration, audio_column=audio_column)
     return dataset.map(duration_fn, **map_kwargs)
 
@@ -566,6 +665,7 @@ __all__ = [
     "prepare_classification_dataset",
     "cache_and_sample_splits",
     "add_duration_to_dataset",
+    "filter_by_duration",
     "load_and_prepare_dataset",
     "print_dataset_summary",
 ]

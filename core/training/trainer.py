@@ -35,10 +35,24 @@ class CustomTrainer(Trainer):
 
         Filters out keys starting with '_' or containing '/_' which are used to pass
         non-scalar data (like predictions/labels arrays) between compute_metrics and
-        evaluation code.
+        evaluation code. Also filters out any non-numeric values.
         """
         # Filter out keys starting with '_' or containing '/_' (non-scalar metrics)
-        filtered_logs = {k: v for k, v in logs.items() if not k.startswith('_') and '/_' not in k}
+        # Also filter out any values that aren't numeric (int, float, or convertible to float)
+        filtered_logs = {}
+        for k, v in logs.items():
+            # Skip keys with special prefixes
+            if k.startswith('_') or '/_' in k:
+                continue
+            # Skip non-scalar values (lists, dicts, etc.)
+            if not isinstance(v, (int, float, bool)):
+                # Try to convert to float, skip if it fails
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+            filtered_logs[k] = v
+
         if start_time is not None:
             super().log(filtered_logs, start_time)
         else:

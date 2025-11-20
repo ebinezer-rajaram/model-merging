@@ -326,6 +326,14 @@ def run_training_with_evaluation(
         if original_compute_metrics is not None:
             trainer.compute_metrics = original_compute_metrics
 
+        # Clean up any non-scalar metrics that might have been added to log_history
+        # This prevents TensorBoard from trying to log lists/arrays as "[...]"
+        if hasattr(trainer.state, 'log_history'):
+            for log_entry in trainer.state.log_history:
+                keys_to_remove = [k for k in log_entry.keys() if k.startswith('_') or '/_' in k]
+                for key in keys_to_remove:
+                    log_entry.pop(key, None)
+
         if isinstance(test_metrics, dict) and test_metrics:
             scalar_test_metrics = {
                 key: value for key, value in test_metrics.items() if isinstance(value, (int, float))
@@ -516,12 +524,22 @@ def _copy_run_metrics(
 
     # Copy loss plot (validation metrics only)
     if loss_plot_name:
-        # Try to find the plot in the run directory
-        for item in run_dir.iterdir():
-            if item.suffix == ".png" and "plot" in item.name.lower() and "confusion" not in item.name.lower():
-                dest_plot = dest_dir / loss_plot_name
-                shutil.copy(item, dest_plot)
-                break
+        # First try exact match with the expected plot name
+        src_plot = run_dir / loss_plot_name
+        if src_plot.exists():
+            dest_plot = dest_dir / loss_plot_name
+            shutil.copy(src_plot, dest_plot)
+        else:
+            # Fallback: try to find the plot in the run directory
+            # Look for PNG files that contain keywords like "loss", "accuracy", "f1", "wer", "bleu"
+            # but exclude confusion matrix plots
+            for item in run_dir.iterdir():
+                if (item.suffix == ".png" and
+                    "confusion" not in item.name.lower() and
+                    any(keyword in item.name.lower() for keyword in ["plot", "loss", "accuracy", "f1", "wer", "bleu"])):
+                    dest_plot = dest_dir / loss_plot_name
+                    shutil.copy(item, dest_plot)
+                    break
 
     # Copy confusion matrix plot if available
     if confusion_matrix_name:
