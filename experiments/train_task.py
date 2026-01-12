@@ -86,6 +86,22 @@ from tasks.st import (
     load_covost2_dataset,
     TASK_NAME as SPEECH_TRANSLATION_TASK_NAME,
 )
+from tasks.langid import (
+    LanguageIdentificationCollator,
+    compute_langid_metrics,
+    get_artifact_directories as get_langid_artifact_directories,
+    get_config_path as get_langid_config_path,
+    load_fleurs_langid_dataset,
+    TASK_NAME as LANGID_TASK_NAME,
+)
+from tasks.kws import (
+    KeywordSpottingCollator,
+    compute_kws_metrics,
+    get_artifact_directories as get_kws_artifact_directories,
+    get_config_path as get_kws_config_path,
+    load_speech_commands_kws_dataset,
+    TASK_NAME as KWS_TASK_NAME,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -407,6 +423,32 @@ def _build_intent_collator(
     )
 
 
+def _build_langid_collator(
+    processor,
+    dataset_cfg: Dict[str, Any],
+    label_names: Sequence[str],
+    sampling_rate: int,
+):
+    return LanguageIdentificationCollator(
+        processor=processor,
+        sampling_rate=sampling_rate,
+        label_names=list(label_names or []),
+    )
+
+
+def _build_kws_collator(
+    processor,
+    dataset_cfg: Dict[str, Any],
+    label_names: Sequence[str],
+    sampling_rate: int,
+):
+    return KeywordSpottingCollator(
+        processor=processor,
+        sampling_rate=sampling_rate,
+        label_names=list(label_names or []),
+    )
+
+
 def _build_emotion_metrics(processor, label_names: Sequence[str], store_predictions: bool = False):
     return partial(
         compute_emotion_metrics,
@@ -427,6 +469,22 @@ def _build_speaker_metrics(processor, label_names: Sequence[str]):
 def _build_intent_metrics(processor, label_names: Sequence[str]):
     return partial(
         compute_intent_metrics,
+        processor=processor,
+        label_names=list(label_names or []),
+    )
+
+
+def _build_langid_metrics(processor, label_names: Sequence[str]):
+    return partial(
+        compute_langid_metrics,
+        processor=processor,
+        label_names=list(label_names or []),
+    )
+
+
+def _build_kws_metrics(processor, label_names: Sequence[str]):
+    return partial(
+        compute_kws_metrics,
         processor=processor,
         label_names=list(label_names or []),
     )
@@ -529,6 +587,28 @@ CLASSIFICATION_TASK_SPECS: Dict[str, ClassificationTaskSpec] = {
         metrics_builder=_build_intent_metrics,
         keep_columns=("audio", "label", "duration", "text", "scenario", "action"),
         default_adapter_subdir="qwen2_5_omni_lora_intent",
+    ),
+    LANGID_TASK_NAME: ClassificationTaskSpec(
+        task_name=LANGID_TASK_NAME,
+        get_config_path=get_langid_config_path,
+        get_artifact_directories=get_langid_artifact_directories,
+        dataset_loader=load_fleurs_langid_dataset,
+        loader_extra_keys=("languages",),
+        collator_builder=_build_langid_collator,
+        metrics_builder=_build_langid_metrics,
+        keep_columns=("audio", "label", "duration"),
+        default_adapter_subdir="qwen2_5_omni_lora_langid",
+    ),
+    KWS_TASK_NAME: ClassificationTaskSpec(
+        task_name=KWS_TASK_NAME,
+        get_config_path=get_kws_config_path,
+        get_artifact_directories=get_kws_artifact_directories,
+        dataset_loader=load_speech_commands_kws_dataset,
+        loader_extra_keys=("revision",),
+        collator_builder=_build_kws_collator,
+        metrics_builder=_build_kws_metrics,
+        keep_columns=("audio", "label", "duration"),
+        default_adapter_subdir="qwen2_5_omni_lora_kws",
     ),
 }
 
@@ -651,8 +731,31 @@ def run_audio_classification_task(config_path: Path, spec: ClassificationTaskSpe
             # Get weighting method from training config
             weighting_method = training_cfg.get("sampling_method", "inverse")
 
+            # Create a temporary dataset with integer labels for the sampler
+            # WeightedClassSampler expects integer class indices, not strings
+            label_to_idx = {name: idx for idx, name in enumerate(label_names)}
+
+            # Create a wrapper dataset that maps string labels to integers
+            class LabelMappedDataset:
+                def __init__(self, dataset, label_to_idx):
+                    self.dataset = dataset
+                    self.label_to_idx = label_to_idx
+
+                def __len__(self):
+                    return len(self.dataset)
+
+                def __getitem__(self, idx):
+                    item = self.dataset[idx]
+                    # Convert string label to integer index
+                    label_str = item['label']
+                    item_copy = dict(item)
+                    item_copy['label'] = self.label_to_idx.get(label_str, 0)
+                    return item_copy
+
+            mapped_dataset = LabelMappedDataset(train_ds, label_to_idx)
+
             custom_sampler = WeightedClassSampler(
-                dataset=train_ds,
+                dataset=mapped_dataset,
                 num_samples=len(train_ds),
                 replacement=True,
                 method=weighting_method,
@@ -1033,6 +1136,16 @@ def run_intent_task(config_path: Path) -> None:
     run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[INTENT_TASK_NAME])
 
 
+def run_langid_task(config_path: Path) -> None:
+    """Run the language identification fine-tuning workflow."""
+    run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[LANGID_TASK_NAME])
+
+
+def run_kws_task(config_path: Path) -> None:
+    """Run the keyword spotting fine-tuning workflow."""
+    run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[KWS_TASK_NAME])
+
+
 def run_speech_qa_task(config_path: Path) -> None:
     """Run the speech question answering fine-tuning workflow."""
     config = load_config(config_path)
@@ -1210,6 +1323,12 @@ def main() -> None:
     elif args.task == INTENT_TASK_NAME:
         config_path = get_intent_config_path(PACKAGE_ROOT, args.config)
         run_intent_task(config_path)
+    elif args.task == LANGID_TASK_NAME:
+        config_path = get_langid_config_path(PACKAGE_ROOT, args.config)
+        run_langid_task(config_path)
+    elif args.task == KWS_TASK_NAME:
+        config_path = get_kws_config_path(PACKAGE_ROOT, args.config)
+        run_kws_task(config_path)
     elif args.task == SPEECH_QA_TASK_NAME:
         config_path = get_speech_qa_config_path(PACKAGE_ROOT, args.config)
         run_speech_qa_task(config_path)
