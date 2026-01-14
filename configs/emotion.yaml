@@ -22,9 +22,9 @@ model:
       - k_proj
       - v_proj
       - o_proj
-      # - gate_proj  # ADD: MLP gating
-      # - up_proj    # ADD: MLP expansion
-      # - down_proj  # ADD: MLP projection
+      - gate_proj  # ADD: MLP gating
+      - up_proj    # ADD: MLP expansion
+      - down_proj  # ADD: MLP projection
       - audio_tower.proj       # L731: Critical for acoustic embeddings
     task_type: CAUSAL_LM
 
@@ -119,14 +119,14 @@ training:
   max_grad_norm: 1.0
 
   # Training duration
-  num_train_epochs: 10
+  num_train_epochs: 5
 
   # Checkpointing
   save_strategy: steps
   save_steps: 50
   save_total_limit: 3
   # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
-  resume_from_checkpoint: null
+  resume_from_checkpoint: auto
 
   # Evaluation
   eval_strategy: steps
@@ -142,7 +142,7 @@ training:
     - wandb
 
   # Early stopping
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1
@@ -190,7 +190,7 @@ training:
 # Artifacts Configuration
 # ============================================================================
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_emotion_audio
+  adapter_subdir: qwen2_5_omni_lora_emotion_audio_v2
 
 # ============================================================================
 # Metrics Configuration

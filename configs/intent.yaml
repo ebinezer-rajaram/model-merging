@@ -13,8 +13,8 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    r: 64                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 128               # LoRA alpha scaling factor (typically 2x rank)
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
@@ -22,7 +22,7 @@ model:
       - k_proj
       - v_proj
       - o_proj
-      - audio_tower.proj  
+      - audio_tower.proj
       - gate_proj      # Add these for semantic understanding
       - up_proj
       - down_proj
@@ -128,9 +128,9 @@ training:
   # Evaluation
   eval_strategy: steps
   eval_steps: 50
-  max_eval_samples: 2000        # Use subset during training for speed (full eval at end)
+  max_eval_samples: null        # Use subset during training for speed (full eval at end)
   shuffle_eval_subset: true     # Randomly sample eval subset
-  initial_eval: false
+  initial_eval: true
 
   # Logging
   logging_steps: 10

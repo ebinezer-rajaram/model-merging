@@ -13,22 +13,19 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    r: 64                    # LoRA rank
+    alpha: 128               # LoRA alpha scaling factor
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
-    - q_proj               # Query - what to attend to
-    - k_proj               # Key - acoustic feature matching
-    - v_proj               # Value - phoneme representation
-    - o_proj               # Output projection
-  
-    # CRITICAL: Audio-to-text grounding
-    - audio_tower.proj            # L731: Acoustic embeddings → LLM space
-
-    - gate_proj      # ADD: for complex acoustic patterns
-    - up_proj        # ADD: for representation expansion
-    - down_proj      # ADD: for projection
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - audio_tower.proj     # Critical for acoustic embeddings
+      - gate_proj            # For complex reasoning
+      - up_proj              # For representation expansion
+      - down_proj            # For projection
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -36,7 +33,7 @@ model:
 # ============================================================================
 dataset:
   # Dataset source
-  dataset_name: kresnik/spoken_squad
+  dataset_name: AudioLLMs/spoken_squad_test
   dataset_config: null
 
   # Data processing
@@ -46,31 +43,41 @@ dataset:
   force_rebuild: false
 
   # Sample limits (null = use all)
+  # NOTE: Dataset only has 'test' split with 5,351 samples
+  # We'll split it into train/val/test using split_percentages
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
 
-  # Audio duration filtering in seconds (null = no limit)
-  max_duration: null
-  min_duration: null
+  # Audio filtering (duration in seconds, null = no limit)
+  max_duration: 20.0     # Filter out very long audio
+  min_duration: 1.0      # Filter out very short clips
 
   # Column mappings
-  audio_column: audio
-  question_column: question
-  transcript_column: text
-  context_column: context
-  id_column: id
-  answer_column: answers
+  # NOTE: These will be auto-mapped by fallback logic:
+  #   - 'context' (audio) → 'audio' (via FALLBACK_AUDIO_COLUMNS)
+  #   - 'instruction' (question) → 'question' (via FALLBACK_QUESTION_COLUMNS)
+  #   - 'answer' → 'answer' (already in FALLBACK_ANSWER_COLUMNS)
+  audio_column: null        # Will auto-detect 'context'
+  question_column: null     # Will auto-detect 'instruction'
+  answer_column: null       # Will auto-detect 'answer'
+  transcript_column: null   # No transcript in this dataset
+  context_column: null      # Not using text context
+  id_column: null           # No ID column
 
   # Split configuration
-  split_percentages: null
-  train_split: train
-  validation_split: validation
-  test_split: test
+  # Since dataset only has 'test' split, we need to create train/val/test
+  split_percentages:
+    train: 0.70             # 70% for training (~3,746 samples)
+    validation: 0.15        # 15% for validation (~803 samples)
+    test: 0.15              # 15% for test (~802 samples)
+  train_split: test         # Source split to divide
+  validation_split: null    # Will be created from split_percentages
+  test_split: null          # Will be created from split_percentages
 
   # Task-specific options
-  include_transcript: true
-  include_context: false
+  include_transcript: false # No transcript available, audio-only QA
+  include_context: false    # No text passage context
 
 # ============================================================================
 # Training Configuration
@@ -79,39 +86,38 @@ training:
   # Batch sizes and accumulation
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 4   # Higher accumulation for larger effective batch
+  gradient_accumulation_steps: 4
 
   # Optimization
-  learning_rate: 3e-05
+  learning_rate: 3e-5
   lr_scheduler_type: cosine
-  warmup_ratio: 0.05
+  warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Training duration
-  num_train_epochs: 6              # More epochs for complex QA task
+  num_train_epochs: 5
 
   # Checkpointing
   save_strategy: steps
-  save_steps: 200
+  save_steps: 100
   save_total_limit: 3
-  # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
   resume_from_checkpoint: null
 
   # Evaluation
   eval_strategy: steps
-  eval_steps: 200
+  eval_steps: 100
   max_eval_samples: null
+  shuffle_eval_subset: false
   initial_eval: true
 
   # Logging
-  logging_steps: 100
+  logging_steps: 20
   report_to:
     - tensorboard
-    - wandb
 
   # Early stopping
-  early_stopping_patience: 6       # Higher patience for complex task
+  early_stopping_patience: 4
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_f1
@@ -125,20 +131,21 @@ training:
     use_reentrant: false
 
   # Data loading
-  dataloader_num_workers: 8
+  dataloader_num_workers: 4
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: false
+  group_by_length: true
   length_column_name: duration
 
   # Other
-  eval_accumulation_steps: 1
+  eval_accumulation_steps: 4
   remove_unused_columns: false
 
   # Generation parameters (for evaluation)
   generation_kwargs:
-    max_new_tokens: 48           # Medium length for answers
-    do_sample: false
+    max_new_tokens: 48      # Answers are typically short
+    do_sample: false        # Greedy decoding for deterministic results
+    temperature: 0.0
     num_beams: 1
 
 # ============================================================================

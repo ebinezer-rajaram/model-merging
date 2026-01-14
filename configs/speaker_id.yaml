@@ -13,30 +13,27 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64                # LoRA alpha scaling factor (typically 2x rank)
+    r: 64                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 128                # LoRA alpha scaling factor (typically 2x rank)
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
-      - q_proj               # Query - what to attend to
-      - k_proj               # Key - acoustic feature matching
-      - v_proj               # Value - phoneme representation
-      - o_proj               # Output projection
-    
-      # CRITICAL: Audio-to-text grounding
-      - audio_tower.proj            # L731: Acoustic embeddings → LLM space
-
-      - gate_proj      # ADD: for complex acoustic patterns
-      - up_proj        # ADD: for representation expansion
-      - down_proj      # ADD: for projection
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj  # MLP gating
+      - up_proj    # MLP expansion
+      - down_proj  # MLP projection
+      - audio_tower.proj       # Critical for acoustic embeddings
     task_type: CAUSAL_LM
 
 # ============================================================================
 # Dataset Configuration
 # ============================================================================
 dataset:
-  # Dataset source
-  dataset_name: speechcolab/voxceleb1
+  # Dataset source - VoxCeleb2 dataset (124 speakers, 463k utterances)
+  dataset_name: acul3/voxceleb2
   dataset_config: null
 
   # Data processing
@@ -45,49 +42,47 @@ dataset:
   cache_splits: true
   force_rebuild: false
 
-  # Sample limits (null = use all)
+  # Speaker and sample limits
+  max_speakers: 100               # Select top 100 speakers by sample count
+  max_samples_per_speaker: 200    # Limit to 200 utterances per speaker
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
 
-  # Maximum audio duration in seconds (null = no limit)
-  # Samples exceeding this will be filtered out to prevent OOM
-  max_duration: 30.0
+  # Audio duration filtering
+  # Filter out very long or short utterances
+  max_duration: 20.0   # Filter out very long utterances
+  min_duration: 1.0    # Filter out very short utterances
 
-  # Minimum audio duration in seconds (null = no limit)
-  # Filter out very short clips that lack context
-  min_duration: 0.5
+  # Audio trimming in collator (applied during training)
+  # Trims audio to this length instead of filtering out long samples
+  max_audio_length: 10.0   # Trim audio to 10 seconds (saves VRAM, keeps more data)
 
-  # Audio normalization
-  normalize_audio: true
-  # Speaker-level normalization (normalize per speaker to handle different conditions)
-  normalize_per_speaker: false
-  # Target RMS level for normalization (typical range: -20 to -30 dB)
-  target_rms_db: -25.0
-
-  # Column mappings
-  label_column: speaker
-  text_column: null
+  # Column mappings (VoxCeleb2 specific)
+  label_column: speaker_id      # VoxCeleb2 uses "speaker_id"
+  text_column: transcription    # VoxCeleb2 uses "transcription"
   audio_column: audio
 
   # Split configuration
-  split_percentages: null
+  # VoxCeleb2 only has "train" split, so we create our own splits
+  split_percentages:
+    train: 0.8        # 80% for training (~19,840 samples)
+    validation: 0.1   # 10% for validation (~2,480 samples)
+    test: 0.1         # 10% for test (~2,480 samples)
   train_split: train
-  validation_split: validation
-  test_split: test
-  stratify_by_column: label
+  validation_split: validation  # Will be created from train
+  test_split: test              # Will be created from train
+  stratify_by_column: label     # Ensure balanced speaker distribution
 
   # Task-specific options
-  max_speakers: 150            # Limit number of speakers
-  max_samples_per_speaker: 20  # Limit samples per speaker
-  include_transcript: false    # Speaker ID doesn't need transcripts
+  include_transcript: false      # Audio-only speaker identification
 
 # ============================================================================
 # Loss Configuration
 # ============================================================================
 loss:
   # Loss function type: "default", "focal", "weighted"
-  type: default
+  type: default     # Standard cross-entropy
 
   # Focal loss parameters (only used if type: focal)
   focal:
@@ -96,11 +91,8 @@ loss:
 
   # Weighted cross-entropy parameters (only used if type: weighted)
   weighted:
-    # Option 1: Provide explicit weights for each class
-    weights: null           # e.g., [1.0, 1.5, 2.0, ...]
-
-    # Option 2: Auto-compute weights from training data distribution
-    auto_compute: false     # If true, computes weights automatically
+    weights: null           # Explicit weights for each speaker class (124 values)
+    auto_compute: false     # Auto-compute weights from training data distribution
     method: sqrt_inverse    # Method for auto-compute: "inverse", "sqrt_inverse", "balanced"
 
 # ============================================================================
@@ -108,26 +100,26 @@ loss:
 # ============================================================================
 training:
   # Batch sizes and accumulation
-  per_device_train_batch_size: 12
-  per_device_eval_batch_size: 12
-  gradient_accumulation_steps: 2
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 1
 
   # Optimization
-  learning_rate: 2e-05
+  learning_rate: 3e-05
   lr_scheduler_type: cosine
-  warmup_ratio: 0.05
+  warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
 
   # Training duration
-  num_train_epochs: 5
+  num_train_epochs: 10
 
   # Checkpointing
   save_strategy: steps
   save_steps: 100
   save_total_limit: 3
   # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
-  resume_from_checkpoint: null
+  resume_from_checkpoint: auto
 
   # Evaluation
   eval_strategy: steps
@@ -163,18 +155,13 @@ training:
 
   # Balanced sampling for imbalanced datasets
   # Options: null (default), "balanced_batch", "weighted"
-  # - "balanced_batch": Each batch has equal samples from each class
-  # - "weighted": Oversample minority classes throughout training
-  balanced_sampling: weighted
+  # null = default random sampling (good for balanced speaker distribution)
+  balanced_sampling: null
 
   # Weighting method for weighted sampling (only used if balanced_sampling: weighted)
-  # Options: "inverse", "sqrt_inverse", "balanced"
-  # - "inverse": Full rebalancing (minority classes sampled more)
-  # - "sqrt_inverse": Gentler rebalancing
-  # - "balanced": Scale to make expected samples equal per class
   sampling_method: sqrt_inverse
 
-  group_by_length: false  # Disabled when using balanced_sampling
+  group_by_length: true  # Group samples by duration for efficient batching
   length_column_name: duration
 
   # Other
@@ -183,15 +170,15 @@ training:
 
   # Generation parameters (for constrained decoding evaluation)
   generation_kwargs:
-    max_new_tokens: 6        
-    do_sample: false         # Greedy decoding for deterministic results
-    num_beams: 1            # No beam search needed with constraints
+    max_new_tokens: 5      # Speaker IDs are typically short
+    do_sample: false       # Greedy decoding for deterministic results
+    num_beams: 1           # No beam search needed
 
 # ============================================================================
 # Artifacts Configuration
 # ============================================================================
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_speaker_id
+  adapter_subdir: qwen2_5_omni_lora_speaker_id_voxceleb2
 
 # ============================================================================
 # Metrics Configuration

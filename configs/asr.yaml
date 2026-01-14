@@ -13,8 +13,8 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64               # LoRA alpha scaling factor (typically 2x rank)
+    r: 64                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 128               # LoRA alpha scaling factor (typically 2x rank)
     dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
@@ -57,16 +57,16 @@ dataset:
 # ============================================================================
 training:
   # Batch sizes and accumulation
-  per_device_train_batch_size: 20
+  per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 2
 
   # Optimization
   learning_rate: 2e-5
   lr_scheduler_type: cosine
-  warmup_ratio: 0.08            # Higher warmup for ASR
+  warmup_ratio: 0.05            
   weight_decay: 0.01
-  max_grad_norm: 1.0            # Lower gradient clipping for ASR
+  max_grad_norm: 2.0            # Lower gradient clipping for ASR
 
   # Training duration
   num_train_epochs: 3
@@ -93,7 +93,7 @@ training:
 
   # Early stopping
   early_stopping_patience: 5
-  early_stopping_threshold: 0.001   # 0 = any improvement
+  early_stopping_threshold: 0   # 0 = any improvement
   load_best_model_at_end: true
   metric_for_best_model: wer   # Options: 'wer' (if using single mode) or 'wer_default'/'wer_standardize' (if using both)
   greater_is_better: false      # WER: lower is better

@@ -17,9 +17,9 @@ model:
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 32                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 64               # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.01             # Dropout probability for LoRA layers
+    r: 64                    # LoRA rank (higher = more parameters, better fit)
+    alpha: 128               # LoRA alpha scaling factor (typically 2x rank)
+    dropout: 0.1             # Dropout probability for LoRA layers
     bias: none               # Bias type: none, all, or lora_only
     target_modules:          # Modules to apply LoRA to
       - q_proj               # Query - what to attend to
@@ -31,8 +31,8 @@ model:
       - audio_tower.proj     # Acoustic embeddings → LLM space - MUST TRAIN THIS!
 
       - gate_proj      # For complex acoustic patterns
-      # - up_proj        # For representation expansion
-      # - down_proj      # For projection
+      - up_proj        # For representation expansion
+      - down_proj      # For projection
     task_type: CAUSAL_LM
 
 # ============================================================================
@@ -44,7 +44,7 @@ dataset:
 
   # Sample limits (null = use all available)
   max_train_samples: 50000
-  max_validation_samples: 2000
+  max_validation_samples: 10000
   max_test_samples: 5000
 
   # Audio filtering (duration in seconds, null = no limit)
