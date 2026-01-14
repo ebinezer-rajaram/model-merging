@@ -405,6 +405,7 @@ def _build_speaker_collator(
         sampling_rate=sampling_rate,
         label_names=list(label_names or []),
         include_transcript=dataset_cfg.get("include_transcript", False),
+        max_audio_length=dataset_cfg.get("max_audio_length", None),  # Trim audio to this duration
     )
 
 
