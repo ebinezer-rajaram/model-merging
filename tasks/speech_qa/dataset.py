@@ -27,8 +27,8 @@ from core.tasks.dataset import (
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "speech_qa" / "datasets"
 
-DEFAULT_DATASET_NAME = "kresnik/spoken_squad"
-FALLBACK_QUESTION_COLUMNS: Tuple[str, ...] = ("question", "query")
+DEFAULT_DATASET_NAME = "AudioLLMs/spoken_squad_test"
+FALLBACK_QUESTION_COLUMNS: Tuple[str, ...] = ("question", "query", "instruction")
 FALLBACK_TRANSCRIPT_COLUMNS: Tuple[str, ...] = ("transcript", "text", "sentence", "context")
 FALLBACK_CONTEXT_COLUMNS: Tuple[str, ...] = ("context", "passage", "paragraph")
 FALLBACK_ID_COLUMNS: Tuple[str, ...] = ("id", "qid", "example_id")
@@ -118,6 +118,11 @@ def load_speech_qa_dataset(
     if not isinstance(dataset, DatasetDict):
         raise TypeError(f"Expected DatasetDict, received {type(dataset)!r}")
 
+    # Ensure audio column first (before other column normalizations)
+    # This prevents 'context' from being treated as text context instead of audio
+    from core.tasks.dataset import _ensure_audio_column
+    dataset, audio_column_name = _ensure_audio_column(dataset, preferred=audio_column)
+
     # Normalize column names (question, transcript, context, id, answers)
     if question_column and question_column != "question":
         dataset = _rename_column(dataset, question_column, "question")
@@ -153,18 +158,32 @@ def load_speech_qa_dataset(
     if not target_answer_column:
         raise ValueError("Dataset must include an answers column. Provide 'answer_column'.")
 
-    # Apply split percentages or assemble standard splits
-    # (Speech QA typically doesn't need stratification, so we skip that complexity)
-    dataset = assemble_splits(
-        dataset,
-        train_split=train_split,
-        validation_split=validation_split,
-        test_split=test_split,
-    )
-
-    # Ensure audio column
-    from core.tasks.dataset import _ensure_audio_column
-    dataset, audio_column_name = _ensure_audio_column(dataset, preferred=audio_column)
+    # Apply split percentages if specified
+    if split_percentages:
+        from core.tasks.dataset import apply_split_percentages
+        dataset = apply_split_percentages(
+            dataset,
+            split_percentages=split_percentages,
+            train_split=train_split,
+            seed=seed,
+            stratify_by_column=None,  # No stratification for QA
+        )
+        # After apply_split_percentages, splits are already named correctly
+        # Just ensure they exist
+        dataset = assemble_splits(
+            dataset,
+            train_split="train",
+            validation_split="validation",
+            test_split="test",
+        )
+    else:
+        # Assemble standard splits
+        dataset = assemble_splits(
+            dataset,
+            train_split=train_split,
+            validation_split=validation_split,
+            test_split=test_split,
+        )
 
     # Normalize answers
     normalize_fn = partial(_normalize_answers, answer_column=target_answer_column)
