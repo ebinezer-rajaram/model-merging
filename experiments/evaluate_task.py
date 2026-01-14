@@ -48,6 +48,21 @@ from tasks.st import (
     get_artifact_directories as get_st_artifact_directories,
     get_config_path as get_st_config_path,
 )
+from tasks.kws import (
+    TASK_NAME as KWS_TASK_NAME,
+    get_artifact_directories as get_kws_artifact_directories,
+    get_config_path as get_kws_config_path,
+)
+from tasks.langid import (
+    TASK_NAME as LANGID_TASK_NAME,
+    get_artifact_directories as get_langid_artifact_directories,
+    get_config_path as get_langid_config_path,
+)
+from tasks.speaker_ver import (
+    TASK_NAME as SPEAKER_VER_TASK_NAME,
+    get_artifact_directories as get_speaker_ver_artifact_directories,
+    get_config_path as get_speaker_ver_config_path,
+)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -131,6 +146,9 @@ def _resolve_adapter_path(
             INTENT_TASK_NAME: get_intent_artifact_directories,
             SPEECH_QA_TASK_NAME: get_speech_qa_artifact_directories,
             ST_TASK_NAME: get_st_artifact_directories,
+            KWS_TASK_NAME: get_kws_artifact_directories,
+            LANGID_TASK_NAME: get_langid_artifact_directories,
+            SPEAKER_VER_TASK_NAME: get_speaker_ver_artifact_directories,
         }
 
         task_config_map = {
@@ -140,6 +158,9 @@ def _resolve_adapter_path(
             INTENT_TASK_NAME: get_intent_config_path,
             SPEECH_QA_TASK_NAME: get_speech_qa_config_path,
             ST_TASK_NAME: get_st_config_path,
+            KWS_TASK_NAME: get_kws_config_path,
+            LANGID_TASK_NAME: get_langid_config_path,
+            SPEAKER_VER_TASK_NAME: get_speaker_ver_config_path,
         }
 
         if raw_path in task_artifact_map:
@@ -373,6 +394,15 @@ def evaluate(
         config = load_config(config_path)
         language = config.get("language", "en_de")
         artifact_dirs = get_st_artifact_directories(PACKAGE_ROOT, language=language)
+    elif task == KWS_TASK_NAME:
+        config_path = get_kws_config_path(PACKAGE_ROOT, config_name)
+        artifact_dirs = get_kws_artifact_directories(PACKAGE_ROOT)
+    elif task == LANGID_TASK_NAME:
+        config_path = get_langid_config_path(PACKAGE_ROOT, config_name)
+        artifact_dirs = get_langid_artifact_directories(PACKAGE_ROOT)
+    elif task == SPEAKER_VER_TASK_NAME:
+        config_path = get_speaker_ver_config_path(PACKAGE_ROOT, config_name)
+        artifact_dirs = get_speaker_ver_artifact_directories(PACKAGE_ROOT)
     else:
         raise NotImplementedError(f"Evaluation for task '{task}' is not implemented yet.")
 

@@ -60,6 +60,24 @@ TASK_REGISTRY = {
         artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
         default_adapter_subdir="qwen2_5_omni_lora_kws",
     ),
+    "langid": TaskInfo(
+        name="langid",
+        default_config_file="langid.yaml",
+        artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
+        default_adapter_subdir="qwen2_5_omni_lora_langid",
+    ),
+    "st": TaskInfo(
+        name="st",
+        default_config_file="st.yaml",
+        artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
+        default_adapter_subdir="qwen2_5_omni_lora_st",
+    ),
+    "speaker_ver": TaskInfo(
+        name="speaker_ver",
+        default_config_file="speaker_ver.yaml",
+        artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
+        default_adapter_subdir="qwen2_5_omni_lora_speaker_ver",
+    ),
 }
 
 

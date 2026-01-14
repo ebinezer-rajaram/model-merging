@@ -102,6 +102,14 @@ from tasks.kws import (
     load_speech_commands_kws_dataset,
     TASK_NAME as KWS_TASK_NAME,
 )
+from tasks.speaker_ver import (
+    SpeakerVerCollator,
+    compute_speaker_ver_metrics,
+    get_artifact_directories as get_speaker_ver_artifact_directories,
+    get_config_path as get_speaker_ver_config_path,
+    load_speaker_ver_dataset,
+    TASK_NAME as SPEAKER_VER_TASK_NAME,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,12 +121,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_wandb_for_task(task_name: str, training_cfg: Dict[str, Any]) -> None:
-    """Configure wandb with task-specific project name.
+    """Configure wandb with task-specific project name and logging directories.
 
     Args:
         task_name: Name of the task (e.g., 'asr', 'emotion', 'intent')
         training_cfg: Training configuration dictionary
     """
+    # Configure wandb directory to be under logs/
+    os.environ["WANDB_DIR"] = str(PACKAGE_ROOT / "logs" / "wandb")
+
+    # Configure tensorboard directory to be under logs/runs
+    # HuggingFace Trainer will use output_dir for tensorboard logs,
+    # but this ensures any other tensorboard usage goes to logs/
+    os.environ["TENSORBOARD_LOG_DIR"] = str(PACKAGE_ROOT / "logs" / "runs")
+
     report_to = training_cfg.get("report_to", [])
     if "wandb" in report_to:
         try:
@@ -450,6 +466,21 @@ def _build_kws_collator(
     )
 
 
+def _build_speaker_ver_collator(
+    processor,
+    dataset_cfg: Dict[str, Any],
+    label_names: Sequence[str],
+    sampling_rate: int,
+):
+    return SpeakerVerCollator(
+        processor=processor,
+        sampling_rate=sampling_rate,
+        label_names=list(label_names or []),
+        max_audio_length=dataset_cfg.get("max_audio_length", None),
+        audio_gap_seconds=dataset_cfg.get("audio_gap_seconds", 0.5),
+    )
+
+
 def _build_emotion_metrics(processor, label_names: Sequence[str], store_predictions: bool = False):
     return partial(
         compute_emotion_metrics,
@@ -486,6 +517,14 @@ def _build_langid_metrics(processor, label_names: Sequence[str]):
 def _build_kws_metrics(processor, label_names: Sequence[str]):
     return partial(
         compute_kws_metrics,
+        processor=processor,
+        label_names=list(label_names or []),
+    )
+
+
+def _build_speaker_ver_metrics(processor, label_names: Sequence[str]):
+    return partial(
+        compute_speaker_ver_metrics,
         processor=processor,
         label_names=list(label_names or []),
     )
@@ -610,6 +649,17 @@ CLASSIFICATION_TASK_SPECS: Dict[str, ClassificationTaskSpec] = {
         metrics_builder=_build_kws_metrics,
         keep_columns=("audio", "label", "duration"),
         default_adapter_subdir="qwen2_5_omni_lora_kws",
+    ),
+    SPEAKER_VER_TASK_NAME: ClassificationTaskSpec(
+        task_name=SPEAKER_VER_TASK_NAME,
+        get_config_path=get_speaker_ver_config_path,
+        get_artifact_directories=get_speaker_ver_artifact_directories,
+        dataset_loader=load_speaker_ver_dataset,
+        loader_extra_keys=("max_speakers", "pairs_per_speaker", "audio_gap_seconds", "split_by_speakers"),
+        collator_builder=_build_speaker_ver_collator,
+        metrics_builder=_build_speaker_ver_metrics,
+        keep_columns=("audio_a", "audio_b", "label", "duration_a", "duration_b"),
+        default_adapter_subdir="qwen2_5_omni_lora_speaker_ver",
     ),
 }
 
@@ -1147,6 +1197,11 @@ def run_kws_task(config_path: Path) -> None:
     run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[KWS_TASK_NAME])
 
 
+def run_speaker_ver_task(config_path: Path) -> None:
+    """Run the speaker verification fine-tuning workflow."""
+    run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[SPEAKER_VER_TASK_NAME])
+
+
 def run_speech_qa_task(config_path: Path) -> None:
     """Run the speech question answering fine-tuning workflow."""
     config = load_config(config_path)
@@ -1330,6 +1385,9 @@ def main() -> None:
     elif args.task == KWS_TASK_NAME:
         config_path = get_kws_config_path(PACKAGE_ROOT, args.config)
         run_kws_task(config_path)
+    elif args.task == SPEAKER_VER_TASK_NAME:
+        config_path = get_speaker_ver_config_path(PACKAGE_ROOT, args.config)
+        run_speaker_ver_task(config_path)
     elif args.task == SPEECH_QA_TASK_NAME:
         config_path = get_speech_qa_config_path(PACKAGE_ROOT, args.config)
         run_speech_qa_task(config_path)

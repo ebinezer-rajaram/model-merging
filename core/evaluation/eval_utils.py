@@ -38,6 +38,7 @@ CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "test_split",
     "stratify_by_column",
     "data_dir",
+    "languages",
 )
 
 SPEAKER_EXTRA_EVAL_KEYS: Tuple[str, ...] = (
@@ -74,6 +75,26 @@ ST_EVAL_KEYS: Tuple[str, ...] = (
     "audio_column",
     "source_column",
     "translation_column",
+    "train_split",
+    "validation_split",
+    "test_split",
+)
+
+SPEAKER_VER_EVAL_KEYS: Tuple[str, ...] = (
+    "dataset_name",
+    "dataset_config",
+    "max_train_samples",
+    "max_validation_samples",
+    "max_test_samples",
+    "max_duration",
+    "min_duration",
+    "max_speakers",
+    "pairs_per_speaker",
+    "split_by_speakers",
+    "label_column",
+    "text_column",
+    "audio_column",
+    "split_percentages",
     "train_split",
     "validation_split",
     "test_split",
@@ -669,6 +690,72 @@ def _get_st_task_config() -> TaskConfig:
     )
 
 
+def _get_kws_task_config() -> TaskConfig:
+    """Create keyword spotting task configuration."""
+    from tasks.kws import (
+        KeywordSpottingCollator,
+        compute_kws_metrics,
+        load_speech_commands_kws_dataset,
+    )
+
+    return TaskConfig(
+        dataset_loader=load_speech_commands_kws_dataset,
+        loader_config_keys=CLASSIFICATION_EVAL_KEYS,
+        has_label_names=True,
+        collator_class=KeywordSpottingCollator,
+        collator_params={},
+        compute_metrics_fn=compute_kws_metrics,
+        metrics_params={},
+        required_columns=("audio", "text", "label"),
+        optional_columns=("duration",),
+        post_load_hook=_classification_post_load_hook,
+    )
+
+
+def _get_langid_task_config() -> TaskConfig:
+    """Create language identification task configuration."""
+    from tasks.langid import (
+        LanguageIdentificationCollator,
+        compute_langid_metrics,
+        load_fleurs_langid_dataset,
+    )
+
+    return TaskConfig(
+        dataset_loader=load_fleurs_langid_dataset,
+        loader_config_keys=CLASSIFICATION_EVAL_KEYS,
+        has_label_names=True,
+        collator_class=LanguageIdentificationCollator,
+        collator_params={},
+        compute_metrics_fn=compute_langid_metrics,
+        metrics_params={},
+        required_columns=("audio", "text", "label"),
+        optional_columns=("duration",),
+        post_load_hook=_classification_post_load_hook,
+    )
+
+
+def _get_speaker_ver_task_config() -> TaskConfig:
+    """Create speaker verification task configuration."""
+    from tasks.speaker_ver import (
+        SpeakerVerCollator,
+        compute_speaker_ver_metrics,
+        load_speaker_ver_dataset,
+    )
+
+    return TaskConfig(
+        dataset_loader=load_speaker_ver_dataset,
+        loader_config_keys=SPEAKER_VER_EVAL_KEYS,
+        has_label_names=True,
+        collator_class=SpeakerVerCollator,
+        collator_params={},
+        compute_metrics_fn=compute_speaker_ver_metrics,
+        metrics_params={},
+        required_columns=("audio_a", "audio_b", "label"),
+        optional_columns=(),
+        post_load_hook=None,  # Speaker verification has its own filtering logic
+    )
+
+
 def _register_default_tasks() -> None:
     """Register built-in task builders.
 
@@ -730,6 +817,36 @@ def _register_default_tasks() -> None:
         register_eval_task(
             "st",
             lambda **kwargs: _build_generic_eval_setup(_get_st_task_config(), **kwargs),
+            overwrite=True,
+        )
+    except Exception:
+        pass
+
+    # Register Keyword Spotting
+    try:
+        register_eval_task(
+            "kws",
+            lambda **kwargs: _build_generic_eval_setup(_get_kws_task_config(), **kwargs),
+            overwrite=True,
+        )
+    except Exception:
+        pass
+
+    # Register Language Identification
+    try:
+        register_eval_task(
+            "langid",
+            lambda **kwargs: _build_generic_eval_setup(_get_langid_task_config(), **kwargs),
+            overwrite=True,
+        )
+    except Exception:
+        pass
+
+    # Register Speaker Verification
+    try:
+        register_eval_task(
+            "speaker_ver",
+            lambda **kwargs: _build_generic_eval_setup(_get_speaker_ver_task_config(), **kwargs),
             overwrite=True,
         )
     except Exception:

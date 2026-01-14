@@ -22,7 +22,7 @@ from core import (
 
 # Common constants
 DEFAULT_AUDIO_COLUMN = "audio"
-FALLBACK_AUDIO_COLUMNS: Tuple[str, ...] = ("speech", "audio_path")
+FALLBACK_AUDIO_COLUMNS: Tuple[str, ...] = ("speech", "audio_path", "context")
 
 
 def _samples_key(value: Optional[int]) -> str:
