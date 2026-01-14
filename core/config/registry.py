@@ -54,6 +54,12 @@ TASK_REGISTRY = {
         artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
         default_adapter_subdir="qwen2_5_omni_lora_speech_qa",
     ),
+    "kws": TaskInfo(
+        name="kws",
+        default_config_file="kws.yaml",
+        artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
+        default_adapter_subdir="qwen2_5_omni_lora_kws",
+    ),
 }
 
 
