@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "speaker_id" / "datasets"
 
 DEFAULT_DATASET_NAME = "speechcolab/voxceleb1"
 FALLBACK_LABEL_COLUMNS: Tuple[str, ...] = ("speaker", "speaker_id", "spk_id")
+FALLBACK_TEXT_COLUMNS: Tuple[str, ...] = ("text", "transcription", "transcript")
 
 MANIFEST_FIELDS: Tuple[str, ...] = (
     "label",
@@ -46,7 +48,7 @@ def _select_speakers(
     seed: int,
     train_split: Optional[str],
 ) -> Tuple[DatasetDict, Optional[List[str]]]:
-    """Select a random subset of speakers from the dataset."""
+    """Select speakers with the most samples from the dataset."""
     if max_speakers is None:
         return dataset, None
 
@@ -69,17 +71,24 @@ def _select_speakers(
     if len(speaker_pool) <= max_speakers:
         selected = speaker_pool
     else:
-        rng = random.Random(seed)
-        selected = rng.sample(speaker_pool, max_speakers)
+        # Count samples per speaker and select top N by sample count
+        from collections import Counter
+        speaker_counts = Counter(base_split["label"])
+        # Sort speakers by count (descending) and take top max_speakers
+        top_speakers = [spk for spk, _ in speaker_counts.most_common(max_speakers)]
+        selected = top_speakers
 
     normalized = {str(item) for item in selected}
 
-    def _keep(example: Dict[str, Any], *, allowed: set[str] = normalized) -> bool:
-        return str(example.get("label")) in allowed
-
+    # Use fast Arrow-based filtering instead of Python function
+    # This is MUCH faster than .filter() for large datasets
     filtered: Dict[str, Dataset] = {}
     for split_name, split_ds in dataset.items():
-        filtered_split = split_ds.filter(_keep)
+        # Get indices where label is in the allowed set
+        labels = split_ds["label"]
+        indices = [i for i, label in enumerate(labels) if str(label) in normalized]
+        # Select by indices (very fast with Arrow)
+        filtered_split = split_ds.select(indices)
         filtered[split_name] = filtered_split
     return DatasetDict(filtered), [str(item) for item in selected]
 
@@ -154,15 +163,16 @@ def load_voxceleb_speaker_dataset(
     max_speakers = _normalize_target_count("max_speakers", max_speakers)
     max_samples_per_speaker = _normalize_target_count("max_samples_per_speaker", max_samples_per_speaker)
 
-    # Load and prepare dataset (handles column normalization, splitting, etc.)
+    # Load and prepare dataset WITHOUT splitting first (speaker filtering needs to happen before splits)
     dataset, audio_column_name = load_and_prepare_dataset(
         dataset_name=dataset_name,
         dataset_config=dataset_config,
         label_column=label_column,
         fallback_label_columns=FALLBACK_LABEL_COLUMNS,
         text_column=text_column,
+        fallback_text_columns=FALLBACK_TEXT_COLUMNS,
         audio_column=audio_column,
-        split_percentages=split_percentages,
+        split_percentages=None,  # Don't split yet - do it after speaker filtering
         train_split=train_split,
         validation_split=validation_split,
         test_split=test_split,
@@ -171,7 +181,7 @@ def load_voxceleb_speaker_dataset(
         data_dir=data_dir,
     )
 
-    # Apply speaker-specific filtering
+    # Apply speaker-specific filtering BEFORE creating splits
     dataset, selected_speakers = _select_speakers(
         dataset,
         max_speakers=max_speakers,
@@ -183,6 +193,17 @@ def load_voxceleb_speaker_dataset(
         max_samples=max_samples_per_speaker,
         seed=seed + 17,
     )
+
+    # Now apply split percentages after filtering
+    if split_percentages:
+        from core.tasks.dataset import apply_split_percentages
+        dataset = apply_split_percentages(
+            dataset,
+            split_percentages=split_percentages,
+            train_split=train_split,
+            seed=seed,
+            stratify_by_column=stratify_by_column or "label",
+        )
 
     # Build cache directory path
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
@@ -219,9 +240,13 @@ def load_voxceleb_speaker_dataset(
     )
     cache_path = cache_root / cache_name
 
-    # Extract label names
+    # Extract label names - use selected_speakers if available (actual speaker IDs from data)
+    # Otherwise fall back to ClassLabel feature names
     label_probe = dataset.get("train") or next(iter(dataset.values()))
-    label_names = _extract_label_names(label_probe)
+    if selected_speakers:
+        label_names = selected_speakers  # Use actual speaker IDs like ['2613', '1638', ...]
+    else:
+        label_names = _extract_label_names(label_probe)  # Fall back to ClassLabel feature
 
     # Cache and sample splits
     train_subset, validation_subset, test_subset, splits_metadata, payload_seed = cache_and_sample_splits(
@@ -274,6 +299,7 @@ class SpeakerIdentificationCollator:
     sampling_rate: int
     label_names: Sequence[str]
     include_transcript: bool = False
+    max_audio_length: Optional[float] = None  # Maximum audio duration in seconds (trim if longer)
 
     def _label_to_text(self, value: Any) -> str:
         if value is None:
@@ -289,9 +315,9 @@ class SpeakerIdentificationCollator:
     def _build_instruction(self, transcript: str) -> str:
         """Build the instruction text for the user message."""
         transcript = (transcript or "").strip()
-        # Format class options for the prompt
-        class_options = ", ".join(self.label_names)
-        instruction = f"Who is the speaker in the provided audio segment? Choose from: {class_options}. Output only the label."
+        # Simplified prompt without listing all speakers (prevents OOM with large speaker counts)
+        # Guide model to output numeric ID format
+        instruction = "Who is the speaker in the provided audio segment? Output only the numeric speaker ID (e.g., 1234)."
 
         if transcript and self.include_transcript:
             instruction += f"\nTranscript: {transcript}"
@@ -300,6 +326,12 @@ class SpeakerIdentificationCollator:
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_arrays = [feature["audio"]["array"] for feature in features]
+
+        # Trim audio if max_audio_length is specified
+        if self.max_audio_length is not None:
+            max_samples = int(self.max_audio_length * self.sampling_rate)
+            audio_arrays = [arr[:max_samples] if len(arr) > max_samples else arr for arr in audio_arrays]
+
         transcripts = [feature.get("text", "") for feature in features]
         label_strings = [self._label_to_text(feature.get("label")) for feature in features]
 
