@@ -219,7 +219,7 @@ def _resolve_adapter_path(
 def _get_model_path(config: Dict, task: str) -> Path:
     """Resolve the model checkpoint path from configuration."""
     model_cfg = config.get("model", {})
-    model_rel = model_cfg.get("path", "models/Qwen2.5-Omni-3B")
+    model_rel = model_cfg.get("path", "data/models/Qwen2.5-Omni-3B")
     return (PACKAGE_ROOT / model_rel).resolve()
 
 

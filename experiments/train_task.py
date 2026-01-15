@@ -177,7 +177,7 @@ def _setup_common_components(
 
     setup_wandb_for_task(task_name, training_cfg)
 
-    model_path = PACKAGE_ROOT / model_cfg.get("path", "models/Qwen2.5-Omni-3B")
+    model_path = PACKAGE_ROOT / model_cfg.get("path", "data/models/Qwen2.5-Omni-3B")
     output_dir = ensure_dir(
         artifact_dirs["adapters"] / artifacts_cfg.get("adapter_subdir", default_adapter_subdir)
     )

@@ -9,7 +9,7 @@ seed: 0
 # Model Configuration
 # ============================================================================
 model:
-  path: models/Qwen2.5-Omni-3B
+  path: data/models/Qwen2.5-Omni-3B
 
   # LoRA (Low-Rank Adaptation) Configuration
   lora:

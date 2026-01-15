@@ -32,7 +32,7 @@ class ModelConfig(BaseModel):
     """Model configuration."""
 
     path: str = Field(
-        default="models/Qwen2.5-Omni-3B",
+        default="data/models/Qwen2.5-Omni-3B",
         description="Path to the base model"
     )
     lora: Optional[LoraConfig] = Field(
