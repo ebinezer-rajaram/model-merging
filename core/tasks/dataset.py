@@ -6,6 +6,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 from datasets import Dataset, DatasetDict, load_dataset
 
 from core import (
@@ -396,31 +397,13 @@ def cache_and_sample_splits(
     return train_subset, validation_subset, test_subset, splits_metadata, payload_seed
 
 
-def _duration_filter_fn(
-    example: Dict[str, Any],
-    max_duration: Optional[float] = None,
-    min_duration: Optional[float] = None,
-) -> bool:
-    """Filter function for duration constraints.
-
-    Defined at module level to ensure consistent hashing for HuggingFace caching.
-    """
-    duration = example.get("duration") or 0.0
-    duration_float = float(duration)
-    if max_duration is not None and duration_float > max_duration:
-        return False
-    if min_duration is not None and duration_float < min_duration:
-        return False
-    return True
-
-
 def filter_by_duration(
     dataset: DatasetDict,
     max_duration: Optional[float] = None,
     min_duration: Optional[float] = None,
     cache_dir: Optional[Path | str] = None,
 ) -> DatasetDict:
-    """Filter dataset splits by audio duration.
+    """Filter dataset splits by audio duration using fast vectorized NumPy operations.
 
     Args:
         dataset: Dataset dict to filter
@@ -434,13 +417,12 @@ def filter_by_duration(
     if max_duration is None and min_duration is None:
         return dataset
 
-    filter_fn = partial(_duration_filter_fn, max_duration=max_duration, min_duration=min_duration)
-
     for split_name in list(dataset.keys()):
-        before = len(dataset[split_name])
+        split_ds = dataset[split_name]
+        before = len(split_ds)
 
-        # Build cache file name if caching is enabled
-        filter_kwargs = {}
+        # Check if cached filtered version exists
+        cache_file_name = None
         if cache_dir is not None:
             cache_path = Path(cache_dir)
             duration_suffix = []
@@ -449,10 +431,48 @@ def filter_by_duration(
             if min_duration is not None:
                 duration_suffix.append(f"min{min_duration}")
             suffix = "_".join(duration_suffix)
-            filter_kwargs["cache_file_name"] = str(cache_path / f"{split_name}_filtered_{suffix}.arrow")
-        filter_kwargs["desc"] = "Filtering by duration"
+            cache_file_name = str(cache_path / f"{split_name}_filtered_{suffix}.arrow")
 
-        dataset[split_name] = dataset[split_name].filter(filter_fn, **filter_kwargs)
+            # Try to load from cache
+            if Path(cache_file_name).exists():
+                try:
+                    dataset[split_name] = Dataset.load_from_disk(cache_file_name)
+                    after = len(dataset[split_name])
+                    if after != before:
+                        filtered_count = before - after
+                        duration_info = []
+                        if max_duration is not None:
+                            duration_info.append(f">{max_duration:.1f}s")
+                        if min_duration is not None:
+                            duration_info.append(f"<{min_duration:.1f}s")
+                        duration_str = " or ".join(duration_info)
+                        print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}) [from cache].")
+                    continue
+                except Exception:
+                    pass  # Cache load failed, proceed with filtering
+
+        # Use fast vectorized NumPy-based filtering
+        durations = np.array(split_ds["duration"])
+        mask = np.ones(len(durations), dtype=bool)
+
+        if min_duration is not None:
+            mask &= (durations >= min_duration)
+        if max_duration is not None:
+            mask &= (durations <= max_duration)
+
+        # Get indices where mask is True
+        indices = np.where(mask)[0].tolist()
+
+        # Select by indices (very fast with Arrow backend)
+        dataset[split_name] = split_ds.select(indices)
+
+        # Save to cache if enabled
+        if cache_file_name is not None:
+            try:
+                cache_path.mkdir(parents=True, exist_ok=True)
+                dataset[split_name].save_to_disk(cache_file_name)
+            except Exception:
+                pass  # Cache save failed, continue anyway
 
         after = len(dataset[split_name])
         if after != before:

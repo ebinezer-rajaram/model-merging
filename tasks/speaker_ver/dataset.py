@@ -40,6 +40,29 @@ MANIFEST_FIELDS: Tuple[str, ...] = (
 )
 
 
+def _extract_audio_array(audio_data: Any) -> np.ndarray:
+    """Extract audio array from various audio data formats.
+
+    Args:
+        audio_data: Audio data in various formats (dict, AudioDecoder, array, etc.)
+
+    Returns:
+        Numpy array with audio samples
+    """
+    if isinstance(audio_data, dict):
+        # Extract the array from the dict
+        array = audio_data.get("array")
+        if array is None:
+            return np.array([], dtype=np.float32)
+        # Force conversion to numpy array (this evaluates lazy AudioDecoder)
+        return np.array(array, copy=False, dtype=np.float32)
+    elif isinstance(audio_data, np.ndarray):
+        return audio_data.astype(np.float32)
+    else:
+        # Try to convert directly
+        return np.array(audio_data, dtype=np.float32)
+
+
 def _generate_ver_pairs(
     dataset: Dataset,
     pairs_per_speaker: int,
@@ -57,36 +80,39 @@ def _generate_ver_pairs(
     """
     rng = random.Random(seed)
 
-    # Group samples by speaker
-    speaker_to_samples = defaultdict(list)
+    # Group samples by speaker and extract audio arrays immediately
+    speaker_to_audios = defaultdict(list)
     for idx in range(len(dataset)):
         speaker_id = dataset[idx]["label"]
-        speaker_to_samples[speaker_id].append(idx)
+        # Extract audio array immediately to avoid lazy loading issues
+        audio_array = _extract_audio_array(dataset[idx]["audio"])
+        speaker_to_audios[speaker_id].append((idx, audio_array))
 
     positive_pairs = []
     negative_pairs = []
-    speakers = list(speaker_to_samples.keys())
+    speakers = list(speaker_to_audios.keys())
 
     num_pos = pairs_per_speaker // 2
     num_neg = pairs_per_speaker // 2
 
     # Generate positive pairs (same speaker, different utterances)
-    for speaker, sample_indices in speaker_to_samples.items():
-        if len(sample_indices) < 2:
+    for speaker, audio_list in speaker_to_audios.items():
+        if len(audio_list) < 2:
             continue  # Need at least 2 samples for positive pair
 
         for _ in range(num_pos):
-            idx_a, idx_b = rng.sample(sample_indices, 2)
+            (idx_a, audio_a), (idx_b, audio_b) = rng.sample(audio_list, 2)
+
             positive_pairs.append({
-                "audio_a": dataset[idx_a]["audio"],
-                "audio_b": dataset[idx_b]["audio"],
+                "audio_a": audio_a,  # Just the numpy array
+                "audio_b": audio_b,  # Just the numpy array
                 "label": 1,  # Same speaker
                 "speaker_id": str(speaker),
             })
 
     # Generate negative pairs (different speakers)
     for speaker in speakers:
-        speaker_samples = speaker_to_samples[speaker]
+        audio_list = speaker_to_audios[speaker]
 
         for _ in range(num_neg):
             # Sample a different speaker
@@ -95,12 +121,12 @@ def _generate_ver_pairs(
                 continue
 
             other_speaker = rng.choice(other_speakers)
-            idx_a = rng.choice(speaker_samples)
-            idx_b = rng.choice(speaker_to_samples[other_speaker])
+            idx_a, audio_a = rng.choice(audio_list)
+            idx_b, audio_b = rng.choice(speaker_to_audios[other_speaker])
 
             negative_pairs.append({
-                "audio_a": dataset[idx_a]["audio"],
-                "audio_b": dataset[idx_b]["audio"],
+                "audio_a": audio_a,  # Just the numpy array
+                "audio_b": audio_b,  # Just the numpy array
                 "label": 0,  # Different speakers
                 "speaker_id": f"{speaker}_{other_speaker}",
             })
@@ -112,6 +138,7 @@ def _generate_ver_pairs(
     print(f"Generated {len(positive_pairs)} positive pairs and {len(negative_pairs)} negative pairs")
     print(f"Total: {len(all_pairs)} verification pairs")
 
+    # Create dataset from lists - audio_a and audio_b are now plain numpy arrays
     return Dataset.from_list(all_pairs)
 
 
@@ -119,31 +146,28 @@ def _add_duration_to_pairs(
     dataset: Dataset,
     audio_column_a: str = "audio_a",
     audio_column_b: str = "audio_b",
+    sampling_rate: int = 16000,
     num_proc: Optional[int] = None,
 ) -> Dataset:
     """Add duration columns for both audio_a and audio_b.
 
     Args:
-        dataset: Dataset with audio_a and audio_b columns
+        dataset: Dataset with audio_a and audio_b columns (numpy arrays)
         audio_column_a: Name of first audio column
         audio_column_b: Name of second audio column
+        sampling_rate: Audio sampling rate
         num_proc: Number of processes for parallel processing
 
     Returns:
         Dataset with duration_a and duration_b columns added
     """
     def add_durations(example):
-        audio_a = example[audio_column_a]
-        audio_b = example[audio_column_b]
+        # Audio columns are now plain numpy arrays
+        array_a = example[audio_column_a]
+        array_b = example[audio_column_b]
 
-        # Get sampling rate and array
-        sr_a = audio_a.get("sampling_rate", 16000)
-        array_a = audio_a.get("array", [])
-        duration_a = len(array_a) / sr_a if len(array_a) > 0 else 0.0
-
-        sr_b = audio_b.get("sampling_rate", 16000)
-        array_b = audio_b.get("array", [])
-        duration_b = len(array_b) / sr_b if len(array_b) > 0 else 0.0
+        duration_a = len(array_a) / sampling_rate if len(array_a) > 0 else 0.0
+        duration_b = len(array_b) / sampling_rate if len(array_b) > 0 else 0.0
 
         return {
             **example,
@@ -253,6 +277,13 @@ def load_speaker_ver_dataset(
         data_dir=data_dir,
     )
 
+    # Check dataset before speaker selection
+    print(f"\nDataset splits before speaker selection: {list(dataset.keys())}")
+    for split_name, split_ds in dataset.items():
+        num_samples = len(split_ds)
+        num_speakers = len(set(split_ds["label"])) if "label" in split_ds.column_names else 0
+        print(f"  {split_name}: {num_samples} samples, {num_speakers} speakers")
+
     # Apply speaker selection
     dataset, selected_speakers = _select_speakers(
         dataset,
@@ -260,6 +291,10 @@ def load_speaker_ver_dataset(
         seed=seed,
         train_split="train" if "train" in dataset else None,
     )
+
+    # Check after speaker selection
+    if selected_speakers:
+        print(f"\nAfter speaker selection: {len(selected_speakers)} speakers selected")
 
     # Use only the train split for generating pairs
     # VoxCeleb2 typically only has a train split
@@ -330,10 +365,17 @@ def load_speaker_ver_dataset(
         val_speakers = set(shuffled_speakers[num_train_speakers:num_train_speakers + num_val_speakers])
         test_speakers = set(shuffled_speakers[num_train_speakers + num_val_speakers:])
 
-        # Split base dataset by speakers
-        train_base = base_dataset.filter(lambda x: x["label"] in train_speakers, desc="Filtering train speakers")
-        val_base = base_dataset.filter(lambda x: x["label"] in val_speakers, desc="Filtering val speakers")
-        test_base = base_dataset.filter(lambda x: x["label"] in test_speakers, desc="Filtering test speakers")
+        # Split base dataset by speakers using fast Arrow-based filtering
+        # This is MUCH faster than .filter() with lambda for large datasets
+        labels = base_dataset["label"]
+
+        train_indices = [i for i, label in enumerate(labels) if label in train_speakers]
+        val_indices = [i for i, label in enumerate(labels) if label in val_speakers]
+        test_indices = [i for i, label in enumerate(labels) if label in test_speakers]
+
+        train_base = base_dataset.select(train_indices)
+        val_base = base_dataset.select(val_indices)
+        test_base = base_dataset.select(test_indices)
 
         print(f"Base dataset splits: {len(train_base)} train, {len(val_base)} val, {len(test_base)} test samples")
 
@@ -499,9 +541,16 @@ class SpeakerVerCollator:
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Process batch with audio concatenation."""
-        # Extract audio pairs
-        audio_a_arrays = [feature["audio_a"]["array"] for feature in features]
-        audio_b_arrays = [feature["audio_b"]["array"] for feature in features]
+        # Extract audio pairs (now stored as plain numpy arrays)
+        audio_a_arrays = []
+        audio_b_arrays = []
+        for feature in features:
+            audio_a = feature["audio_a"]
+            audio_b = feature["audio_b"]
+
+            # Convert to numpy arrays if needed
+            audio_a_arrays.append(np.asarray(audio_a, dtype=np.float32))
+            audio_b_arrays.append(np.asarray(audio_b, dtype=np.float32))
 
         # Trim both audios to max_audio_length
         if self.max_audio_length is not None:
