@@ -16,6 +16,49 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--task", default="asr", help="Task name to run.")
     train_parser.add_argument("--config", default=None, help="Config filename override.")
 
+    merge_parser = subparsers.add_parser("merge", help="Merge trained adapters.")
+    merge_parser.add_argument(
+        "--adapters",
+        nargs="+",
+        required=True,
+        help="Task names or paths to merge (e.g., 'asr emotion')",
+    )
+    merge_parser.add_argument(
+        "--method",
+        default="uniform",
+        choices=["uniform", "weighted", "task_vector"],
+        help="Merging method: uniform (equal avg), weighted (lambda), task_vector (full space)",
+    )
+    merge_parser.add_argument(
+        "--lambda",
+        type=float,
+        dest="lambda_weight",
+        default=0.5,
+        help="Lambda weight for weighted merging (0.0 to 1.0)",
+    )
+    merge_parser.add_argument(
+        "--merge-mode",
+        default="common",
+        choices=["common", "strict"],
+        help="Parameter handling: common (merge common params) or strict (require identical)",
+    )
+    merge_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output directory override (auto-generated if not specified)",
+    )
+    merge_parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Evaluate merged adapter on source tasks after merging",
+    )
+    merge_parser.add_argument(
+        "--eval-split",
+        default="test",
+        choices=["train", "validation", "test"],
+        help="Dataset split for evaluation",
+    )
+
     eval_parser = subparsers.add_parser("evaluate", help="Run evaluation for a task.")
     eval_parser.add_argument("--task", default="asr", help="Task name to evaluate.")
     eval_parser.add_argument("--config", default=None, help="Config filename override.")
@@ -64,6 +107,21 @@ def dispatch_train(args: argparse.Namespace) -> None:
         argv.extend(["--config", args.config])
     sys.argv = argv
     train_task_main()
+
+
+def dispatch_merge(args: argparse.Namespace) -> None:
+    """Invoke the merge workflow."""
+    from experiments.merge_vectors import merge_adapters_cli
+
+    merge_adapters_cli(
+        adapter_specs=args.adapters,
+        method=args.method,
+        lambda_weight=args.lambda_weight,
+        merge_mode=args.merge_mode,
+        output=args.output,
+        evaluate=args.evaluate,
+        eval_split=args.eval_split,
+    )
 
 
 def dispatch_evaluate(args: argparse.Namespace) -> None:
@@ -133,6 +191,8 @@ def main() -> None:
     args = parse_args()
     if args.command == "train":
         dispatch_train(args)
+    elif args.command == "merge":
+        dispatch_merge(args)
     elif args.command == "evaluate":
         dispatch_evaluate(args)
     else:

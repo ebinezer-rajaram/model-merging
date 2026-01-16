@@ -1,195 +1,92 @@
-"""Merge LoRA adapter vectors using various strategies."""
+"""Merge LoRA adapter vectors using various strategies.
+
+This is the main entry point for adapter merging. It provides a CLI interface
+and delegates to specific merging methods in the /merging package.
+
+Usage:
+    # Uniform merging (equal weighting)
+    python experiments/merge_vectors.py \\
+        --adapters asr emotion \\
+        --method uniform \\
+        --evaluate
+
+    # Weighted merging (with lambda)
+    python experiments/merge_vectors.py \\
+        --adapters asr emotion \\
+        --method weighted \\
+        --lambda 0.7 \\
+        --evaluate
+
+    # Task vector merging (supports different LoRA ranks)
+    python experiments/merge_vectors.py \\
+        --adapters asr emotion intent \\
+        --method task_vector \\
+        --evaluate
+"""
 
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
+import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import List, Optional
 
-import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
+# Add package root to path
+CURRENT_DIR = Path(__file__).resolve().parent
+PACKAGE_ROOT = CURRENT_DIR.parent
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
 
+from merging import (
+    merge_uniform,
+    merge_weighted,
+    resolve_best_adapter,
+    create_merge_output_path,
+    evaluate_merged_adapter,
+)
 from experiments.extract_vector import extract_task_vector_from_lora
 
 
-def load_adapter_weights(adapter_path: Path) -> Dict[str, torch.Tensor]:
-    """Load LoRA adapter weights from SafeTensors file.
-
-    Args:
-        adapter_path: Path to adapter directory containing adapter_model.safetensors
-
-    Returns:
-        Dictionary mapping parameter names to tensors
-    """
-    safetensors_path = adapter_path / "adapter_model.safetensors"
-    if not safetensors_path.exists():
-        raise FileNotFoundError(f"Adapter weights not found at {safetensors_path}")
-
-    weights = {}
-    with safe_open(safetensors_path, framework="pt", device="cpu") as f:
-        for key in f.keys():
-            weights[key] = f.get_tensor(key).clone()
-
-    return weights
-
-
-def merge_adapters_uniform(
-    adapter_weights: List[Dict[str, torch.Tensor]],
-    merge_mode: str = "common",
-) -> Dict[str, torch.Tensor]:
-    """Merge multiple adapters using uniform averaging.
-
-    Computes simple average: W_merged = (W_1 + W_2 + ... + W_n) / n
-
-    Args:
-        adapter_weights: List of adapter weight dictionaries
-        merge_mode: How to handle different parameters across adapters:
-            - "common": Only merge parameters present in ALL adapters (default)
-            - "strict": Require all adapters to have identical parameters
-
-    Returns:
-        Merged adapter weights
-    """
-    if not adapter_weights:
-        raise ValueError("No adapters provided for merging")
-
-    if len(adapter_weights) == 1:
-        return adapter_weights[0]
-
-    # Find common and unique parameters
-    all_keys = [set(adapter.keys()) for adapter in adapter_weights]
-    common_keys = set.intersection(*all_keys)
-    all_unique_keys = set.union(*all_keys)
-
-    if merge_mode == "strict":
-        # Verify all adapters have the same keys
-        reference_keys = all_keys[0]
-        for i, adapter_keys in enumerate(all_keys[1:], start=1):
-            if adapter_keys != reference_keys:
-                missing = reference_keys - adapter_keys
-                extra = adapter_keys - reference_keys
-                raise ValueError(
-                    f"Adapter {i} has different parameters than adapter 0.\n"
-                    f"Missing: {missing}\nExtra: {extra}"
-                )
-        keys_to_merge = reference_keys
-    else:  # common mode
-        keys_to_merge = common_keys
-        unique_keys = all_unique_keys - common_keys
-
-        if unique_keys:
-            print(f"⚠️  Warning: {len(unique_keys)} parameters are not common across all adapters")
-            print(f"   Only merging {len(common_keys)} common parameters")
-            print(f"   Unique parameters will be excluded from the merge")
-
-    # Average all common parameters
-    merged_weights = {}
-    num_adapters = len(adapter_weights)
-
-    for key in keys_to_merge:
-        # Sum all adapter weights for this parameter
-        summed = torch.zeros_like(adapter_weights[0][key])
-        for adapter in adapter_weights:
-            summed += adapter[key]
-
-        # Compute average
-        merged_weights[key] = summed / num_adapters
-
-    return merged_weights
-
-
-def create_merged_adapter_config(
-    reference_adapter_path: Path,
-    merged_weights: Dict[str, torch.Tensor],
-) -> Dict:
-    """Create adapter config for merged adapter.
-
-    Args:
-        reference_adapter_path: Path to reference adapter
-        merged_weights: Merged adapter weights
-
-    Returns:
-        Updated adapter config
-    """
-    config_path = reference_adapter_path / "adapter_config.json"
-    with open(config_path, "r") as f:
-        config = json.load(f)
-
-    # Extract unique module names from merged weights
-    # e.g., "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight" -> "q_proj"
-    merged_modules = set()
-    for key in merged_weights.keys():
-        parts = key.split(".")
-        # Find the module name before lora_A or lora_B
-        for i, part in enumerate(parts):
-            if part in ["lora_A", "lora_B"]:
-                # Module name could be one or more parts before lora_A/lora_B
-                # For audio_tower.proj, we need to include both parts
-                if i >= 2 and parts[i-2] == "audio_tower":
-                    merged_modules.add(f"{parts[i-2]}.{parts[i-1]}")
-                else:
-                    merged_modules.add(parts[i-1])
-                break
-
-    # Update target_modules to only include merged modules
-    config["target_modules"] = sorted(list(merged_modules))
-
-    return config
-
-
-def save_merged_adapter(
-    weights: Dict[str, torch.Tensor],
+def merge_uniform_via_task_vectors(
+    adapter_paths: List[Path],
     output_path: Path,
-    reference_adapter_path: Path,
-) -> None:
-    """Save merged adapter in PEFT format.
-
-    Args:
-        weights: Merged adapter weights
-        output_path: Directory to save merged adapter
-        reference_adapter_path: Path to reference adapter for copying config files
-    """
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Save weights as SafeTensors
-    safetensors_path = output_path / "adapter_model.safetensors"
-    save_file(weights, str(safetensors_path))
-
-    # Create adapter config based on merged weights
-    config = create_merged_adapter_config(reference_adapter_path, weights)
-    config_dst = output_path / "adapter_config.json"
-    with open(config_dst, "w") as f:
-        json.dump(config, f, indent=2)
-
-    print(f"✅ Saved merged adapter to {output_path}")
-    print(f"   - Weights: {safetensors_path}")
-    print(f"   - Config: {config_dst}")
-    print(f"   - Target modules: {', '.join(config['target_modules'])}")
-
-
-def merge_task_vectors_uniform(
-    task_vectors: List[Dict[str, torch.Tensor]],
     merge_mode: str = "common",
-) -> Dict[str, torch.Tensor]:
-    """Merge multiple task vectors using uniform averaging.
+    show_progress: bool = True,
+) -> None:
+    """Merge adapters by extracting and merging task vectors.
+
+    This approach works even when adapters have different LoRA ranks,
+    as we merge in the full parameter space rather than the low-rank space.
 
     Args:
-        task_vectors: List of task vector dictionaries
+        adapter_paths: List of paths to adapter directories
+        output_path: Directory to save merged task vector
         merge_mode: How to handle different parameters ("common" or "strict")
+        show_progress: Whether to print progress messages
 
-    Returns:
-        Merged task vector
+    Note:
+        This is a legacy function maintained for backwards compatibility.
+        For most use cases, prefer merge_uniform() which works on LoRA weights directly.
     """
-    if not task_vectors:
-        raise ValueError("No task vectors provided for merging")
+    from merging.utils import save_merged_adapter
+    import torch
+    from datetime import datetime
 
-    if len(task_vectors) == 1:
-        return task_vectors[0]
+    if show_progress:
+        print(f"🔀 Merging {len(adapter_paths)} adapters via task vectors")
+        print(f"   Mode: {merge_mode}")
+        for i, path in enumerate(adapter_paths, 1):
+            print(f"   {i}. {path}")
 
-    # Find common and unique parameters
+    # Extract task vectors from each adapter
+    task_vectors = []
+    for i, adapter_path in enumerate(adapter_paths, 1):
+        if show_progress:
+            print(f"\n📥 Extracting task vector {i}/{len(adapter_paths)}: {adapter_path.name}")
+        tv = extract_task_vector_from_lora(adapter_path)
+        task_vectors.append(tv)
+
+    # Find common keys
     all_keys = [set(tv.keys()) for tv in task_vectors]
     common_keys = set.intersection(*all_keys)
     all_unique_keys = set.union(*all_keys)
@@ -211,11 +108,14 @@ def merge_task_vectors_uniform(
 
         if unique_keys:
             print(f"⚠️  Warning: {len(unique_keys)} parameters are not common across all task vectors")
-            print(f"   Only merging {len(common_keys)} common parameters")
+            print(f"   Only merging {len(keys_to_merge)} common parameters")
 
     # Average all common parameters
     merged_tv = {}
     num_vectors = len(task_vectors)
+
+    if show_progress:
+        print(f"\n🧮 Computing uniform average of task vectors...")
 
     for key in keys_to_merge:
         # Check shapes match
@@ -231,209 +131,278 @@ def merge_task_vectors_uniform(
 
         merged_tv[key] = summed / num_vectors
 
-    return merged_tv
-
-
-def save_task_vector(
-    task_vector: Dict[str, torch.Tensor],
-    output_path: Path,
-    metadata: Dict = None,
-) -> None:
-    """Save task vector to disk.
-
-    Args:
-        task_vector: Dictionary of task vectors
-        output_path: Path to save task vector
-        metadata: Optional metadata to save
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Save as SafeTensors
-    save_file(task_vector, str(output_path))
-
-    # Save metadata
-    if metadata:
-        metadata_path = output_path.with_suffix(".json")
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-
-    print(f"💾 Saved merged task vector to {output_path}")
-    print(f"   Parameters: {len(task_vector)}")
-
-
-def merge_uniform_via_task_vectors(
-    adapter_paths: List[Path],
-    output_path: Path,
-    merge_mode: str = "common",
-    show_progress: bool = True,
-) -> None:
-    """Merge adapters by extracting and merging task vectors.
-
-    This approach works even when adapters have different LoRA ranks,
-    as we merge in the full parameter space rather than the low-rank space.
-
-    Args:
-        adapter_paths: List of paths to adapter directories
-        output_path: Directory to save merged task vector
-        merge_mode: How to handle different parameters ("common" or "strict")
-        show_progress: Whether to print progress messages
-    """
-    if show_progress:
-        print(f"🔀 Merging {len(adapter_paths)} adapters via task vectors")
-        print(f"   Mode: {merge_mode}")
-        for i, path in enumerate(adapter_paths, 1):
-            print(f"   {i}. {path}")
-
-    # Extract task vectors from each adapter
-    task_vectors = []
-    for i, adapter_path in enumerate(adapter_paths, 1):
-        if show_progress:
-            print(f"\n📥 Extracting task vector {i}/{len(adapter_paths)}: {adapter_path.name}")
-        tv = extract_task_vector_from_lora(adapter_path)
-        task_vectors.append(tv)
-
-    # Merge task vectors
-    if show_progress:
-        print(f"\n🧮 Computing uniform average of task vectors...")
-    merged_tv = merge_task_vectors_uniform(task_vectors, merge_mode=merge_mode)
-
-    # Save merged task vector
+    # Build metadata
     metadata = {
-        "source_adapters": [str(p) for p in adapter_paths],
-        "merge_method": "uniform_average",
+        "merge_method": "task_vector",
         "merge_mode": merge_mode,
         "num_adapters": len(adapter_paths),
+        "timestamp": datetime.now().isoformat(),
+        "source_adapters": [{"path": str(p)} for p in adapter_paths],
+        "num_parameters": len(merged_tv),
     }
 
-    save_task_vector(merged_tv, output_path, metadata)
+    # Save merged task vector as an adapter
+    if show_progress:
+        print(f"\n💾 Saving merged task vector to {output_path}")
+
+    save_merged_adapter(
+        weights=merged_tv,
+        output_path=output_path,
+        reference_adapter_path=adapter_paths[0],
+        metadata=metadata,
+        register_run=True,
+    )
 
     if show_progress:
-        print(f"\n✅ Merge complete!")
+        print(f"\n✅ Task vector merge complete!")
 
 
-def merge_uniform(
-    adapter_paths: List[Path],
-    output_path: Path,
-    merge_mode: str = "common",
-    show_progress: bool = True,
-) -> None:
-    """Perform uniform averaging merge of multiple adapters.
+def resolve_adapter_specs(
+    adapter_specs: List[str],
+) -> List[tuple[Path, Optional[dict]]]:
+    """Resolve adapter specifications to paths and metadata.
 
     Args:
-        adapter_paths: List of paths to adapter directories
-        output_path: Directory to save merged adapter
-        merge_mode: How to handle different parameters ("common" or "strict")
-        show_progress: Whether to print progress messages
-    """
-    if show_progress:
-        print(f"🔀 Merging {len(adapter_paths)} adapters using uniform averaging")
-        print(f"   Mode: {merge_mode}")
-        for i, path in enumerate(adapter_paths, 1):
-            print(f"   {i}. {path}")
-
-    # Load all adapter weights
-    all_weights = []
-    for i, adapter_path in enumerate(adapter_paths, 1):
-        if show_progress:
-            print(f"📥 Loading adapter {i}/{len(adapter_paths)}: {adapter_path.name}")
-        weights = load_adapter_weights(adapter_path)
-        all_weights.append(weights)
-
-    # Merge using uniform averaging
-    if show_progress:
-        print(f"🧮 Computing uniform average...")
-    merged_weights = merge_adapters_uniform(all_weights, merge_mode=merge_mode)
-
-    # Save merged adapter
-    save_merged_adapter(merged_weights, output_path, adapter_paths[0])
-
-    if show_progress:
-        print(f"✅ Merge complete!")
-
-
-def resolve_adapter_path(task_name: str, run_id: str = "best") -> Path:
-    """Resolve adapter path from task name and run ID.
-
-    Args:
-        task_name: Task name (e.g., 'asr', 'emotion', 'intent')
-        run_id: Run ID or 'best'/'latest'
+        adapter_specs: List of task names or paths
 
     Returns:
-        Path to adapter directory
+        List of (adapter_path, metadata) tuples
+
+    Raises:
+        ValueError: If adapter spec cannot be resolved
     """
-    package_root = Path(__file__).resolve().parent.parent
+    resolved = []
 
-    # Map task names to adapter directories
-    task_adapter_map = {
-        "asr": "artifacts/asr/adapters/qwen2_5_omni_lora_asr_100h",
-        "emotion": "artifacts/emotion/adapters/qwen2_5_omni_lora_emotion_audio_v2",
-        "intent": "artifacts/intent/adapters/qwen2_5_omni_lora_intent",
-        "speaker_id": "artifacts/speaker_id/adapters/qwen2_5_omni_lora_speaker",
-        "st": "artifacts/st/en_de/adapters/qwen2_5_omni_lora_st",
-    }
+    for spec in adapter_specs:
+        path = Path(spec)
 
-    if task_name not in task_adapter_map:
-        raise ValueError(
-            f"Unknown task: {task_name}. "
-            f"Available tasks: {', '.join(task_adapter_map.keys())}"
+        # Check if it's a direct path
+        if path.exists() and path.is_dir():
+            # Direct path provided
+            adapter_path = path.resolve()
+            metadata = {"path": str(adapter_path)}
+            resolved.append((adapter_path, metadata))
+            print(f"✅ Using adapter at: {adapter_path}")
+
+        else:
+            # Treat as task name
+            try:
+                adapter_path, metadata = resolve_best_adapter(spec)
+                print(f"✅ Resolved '{spec}' to: {adapter_path}")
+                print(f"   Metrics: {metadata.get('metrics', {})}")
+                resolved.append((adapter_path, metadata))
+
+            except Exception as e:
+                raise ValueError(
+                    f"Could not resolve adapter spec '{spec}': {e}\n"
+                    f"Provide either a task name (e.g., 'asr') or a valid adapter path."
+                )
+
+    return resolved
+
+
+def merge_adapters_cli(
+    adapter_specs: List[str],
+    method: str = "uniform",
+    lambda_weight: float = 0.5,
+    merge_mode: str = "common",
+    output: Optional[str] = None,
+    evaluate: bool = False,
+    eval_split: str = "test",
+) -> None:
+    """CLI entry point for adapter merging.
+
+    Args:
+        adapter_specs: List of adapter specifications (task names or paths)
+        method: Merging method ("uniform", "weighted", "task_vector")
+        lambda_weight: Lambda weight for weighted merging (0.0 to 1.0)
+        merge_mode: How to handle parameter mismatches ("common" or "strict")
+        output: Optional output path override
+        evaluate: Whether to evaluate merged adapter
+        eval_split: Dataset split for evaluation
+    """
+    print("\n" + "="*60)
+    print("🔀 Adapter Merging")
+    print("="*60)
+
+    # Resolve adapter specifications
+    print(f"\n📂 Resolving {len(adapter_specs)} adapter(s)...")
+    resolved = resolve_adapter_specs(adapter_specs)
+
+    adapter_paths = [path for path, _ in resolved]
+    source_metadata = [meta for _, meta in resolved]
+
+    # Extract task names for output path
+    task_names = [meta.get("task", f"adapter{i}") for i, meta in enumerate(source_metadata)]
+
+    # Determine output path
+    if output:
+        output_path = Path(output)
+        if not output_path.is_absolute():
+            output_path = PACKAGE_ROOT / output_path
+        # Create run directory
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = output_path / "runs" / f"run_{timestamp}"
+        output_path.mkdir(parents=True, exist_ok=True)
+    else:
+        # Auto-generate output path
+        extra_params = {}
+        if method == "weighted":
+            extra_params["lambda"] = lambda_weight
+
+        output_path = create_merge_output_path(
+            method=method if method != "task_vector" else "uniform",  # Task vector uses uniform dir
+            task_names=task_names,
+            extra_params=extra_params,
         )
 
-    adapter_base = package_root / task_adapter_map[task_name]
+    print(f"\n💾 Output directory: {output_path}")
 
-    # Resolve run_id
-    if run_id in ["best", "latest"]:
-        adapter_path = adapter_base / run_id
-        if not adapter_path.exists():
+    # Perform merge based on method
+    if method == "uniform":
+        if len(adapter_paths) < 2:
+            raise ValueError("Uniform merging requires at least 2 adapters")
+
+        merged_path = merge_uniform(
+            adapter_paths=adapter_paths,
+            output_path=output_path,
+            source_metadata=source_metadata,
+            merge_mode=merge_mode,
+        )
+
+    elif method == "weighted":
+        if len(adapter_paths) != 2:
             raise ValueError(
-                f"No '{run_id}' run found for {task_name} adapter at {adapter_base}"
+                f"Weighted merging requires exactly 2 adapters, got {len(adapter_paths)}"
             )
+
+        merged_path = merge_weighted(
+            adapter1_path=adapter_paths[0],
+            adapter2_path=adapter_paths[1],
+            lambda_weight=lambda_weight,
+            output_path=output_path,
+            source_metadata=source_metadata,
+            merge_mode=merge_mode,
+        )
+
+    elif method == "task_vector":
+        if len(adapter_paths) < 2:
+            raise ValueError("Task vector merging requires at least 2 adapters")
+
+        merge_uniform_via_task_vectors(
+            adapter_paths=adapter_paths,
+            output_path=output_path,
+            merge_mode=merge_mode,
+        )
+        merged_path = output_path
+
     else:
-        adapter_path = adapter_base / "runs" / run_id
-        if not adapter_path.exists():
-            raise ValueError(
-                f"Run '{run_id}' not found for {task_name} adapter at {adapter_base}"
-            )
+        raise ValueError(f"Unknown merge method: {method}")
 
-    return adapter_path
+    # Evaluate if requested
+    if evaluate:
+        print("\n" + "="*60)
+        print("📊 Evaluating Merged Adapter")
+        print("="*60)
+
+        results = evaluate_merged_adapter(
+            adapter_path=merged_path,
+            source_tasks=task_names,
+            split=eval_split,
+            save_results=True,
+        )
+
+        # Print summary
+        print("\n" + "="*60)
+        print("📈 Evaluation Summary")
+        print("="*60)
+        for task, metrics in results.items():
+            print(f"\n{task.upper()}:")
+            if "error" in metrics:
+                print(f"  ❌ Error: {metrics['error']}")
+            else:
+                for key, value in sorted(metrics.items())[:5]:
+                    if isinstance(value, (int, float)):
+                        print(f"  {key}: {value:.4f}")
+
+    print("\n" + "="*60)
+    print("✅ Merging Complete")
+    print("="*60)
+    print(f"\nMerged adapter saved to:")
+    print(f"  {merged_path}")
+    print(f"\nTo evaluate on a specific task:")
+    print(f"  python main.py evaluate --task <task> --adapter {merged_path}")
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Merge LoRA adapters using various strategies"
+        description="Merge LoRA adapters using various strategies",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Uniform merging (equal weighting)
+  python experiments/merge_vectors.py --adapters asr emotion --method uniform --evaluate
+
+  # Weighted merging with lambda=0.7 (70% asr, 30% emotion)
+  python experiments/merge_vectors.py --adapters asr emotion --method weighted --lambda 0.7
+
+  # Task vector merging (works with different LoRA ranks)
+  python experiments/merge_vectors.py --adapters asr emotion intent --method task_vector
+
+  # Custom output path
+  python experiments/merge_vectors.py --adapters asr emotion --output artifacts/my_merge
+        """,
     )
 
     parser.add_argument(
         "--adapters",
         nargs="+",
         required=True,
-        help="Adapter paths or task names (e.g., 'asr emotion intent' or paths)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        required=True,
-        help="Output directory for merged adapter",
+        help="Adapter specifications: task names (e.g., 'asr emotion') or paths",
     )
     parser.add_argument(
         "--method",
         type=str,
-        default="task_vector",
-        choices=["uniform", "task_vector"],
-        help="Merging method: 'uniform' (direct LoRA merge) or 'task_vector' (merge via task vectors, works with different ranks)",
+        default="uniform",
+        choices=["uniform", "weighted", "task_vector"],
+        help="Merging method: 'uniform' (equal averaging), 'weighted' (lambda-based), "
+             "'task_vector' (merge via task vectors, works with different ranks)",
+    )
+    parser.add_argument(
+        "--lambda",
+        type=float,
+        default=0.5,
+        dest="lambda_weight",
+        help="Lambda weight for weighted merging (0.0 to 1.0). "
+             "E.g., 0.7 means 70%% first adapter, 30%% second adapter",
     )
     parser.add_argument(
         "--merge-mode",
         type=str,
         default="common",
         choices=["common", "strict"],
-        help="How to handle different parameters: 'common' (only merge common params) or 'strict' (require identical params)",
+        help="How to handle different parameters: "
+             "'common' (merge only common params) or 'strict' (require identical params)",
     )
     parser.add_argument(
-        "--run-id",
+        "--output",
         type=str,
-        default="best",
-        help="Run ID to use for task names (default: 'best')",
+        default=None,
+        help="Output directory for merged adapter (auto-generated if not specified)",
+    )
+    parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Evaluate merged adapter on all source tasks after merging",
+    )
+    parser.add_argument(
+        "--eval-split",
+        type=str,
+        default="test",
+        choices=["train", "validation", "test"],
+        help="Dataset split to use for evaluation (default: test)",
     )
 
     return parser.parse_args()
@@ -443,35 +412,19 @@ def main() -> None:
     """Entry point."""
     args = parse_args()
 
-    # Resolve adapter paths
-    adapter_paths = []
-    for adapter_spec in args.adapters:
-        path = Path(adapter_spec)
-        if path.exists():
-            # Treat as direct path
-            adapter_paths.append(path.resolve())
-        else:
-            # Treat as task name
-            try:
-                adapter_path = resolve_adapter_path(adapter_spec, args.run_id)
-                adapter_paths.append(adapter_path)
-            except ValueError as e:
-                print(f"❌ Error resolving adapter '{adapter_spec}': {e}")
-                return
-
-    # Resolve output path
-    output_path = Path(args.output)
-    if not output_path.is_absolute():
-        package_root = Path(__file__).resolve().parent.parent
-        output_path = package_root / output_path
-
-    # Perform merge
-    if args.method == "uniform":
-        merge_uniform(adapter_paths, output_path, merge_mode=args.merge_mode)
-    elif args.method == "task_vector":
-        merge_uniform_via_task_vectors(adapter_paths, output_path, merge_mode=args.merge_mode)
-    else:
-        print(f"❌ Unsupported merge method: {args.method}")
+    try:
+        merge_adapters_cli(
+            adapter_specs=args.adapters,
+            method=args.method,
+            lambda_weight=args.lambda_weight,
+            merge_mode=args.merge_mode,
+            output=args.output,
+            evaluate=args.evaluate,
+            eval_split=args.eval_split,
+        )
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
