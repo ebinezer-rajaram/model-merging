@@ -1,202 +1,134 @@
-# ============================================================================
 # Emotion Recognition Task Configuration
-# ============================================================================
 
 task: emotion
 seed: 0
 
-# ============================================================================
 # Model Configuration
-# ============================================================================
 model:
   path: data/models/Qwen2.5-Omni-3B
-
-  # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 64                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 128                # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.1             # Dropout probability for LoRA layers
-    bias: none               # Bias type: none, all, or lora_only
-    target_modules:          # Modules to apply LoRA to
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - gate_proj  # ADD: MLP gating
-      - up_proj    # ADD: MLP expansion
-      - down_proj  # ADD: MLP projection
-      - audio_tower.proj       # L731: Critical for acoustic embeddings
+    r: 64                             # LoRA rank (higher = more parameters, better fit)
+    alpha: 128                        # LoRA alpha scaling factor (typically 2x rank)
+    dropout: 0.1                      # Dropout probability for LoRA layers
+    bias: none                        # Bias type: none, all, or lora_only
+    target_modules:                   # Modules to apply LoRA to
+      - q_proj                        # Query projection for attention
+      - k_proj                        # Key projection for acoustic features
+      - v_proj                        # Value projection for representations
+      - o_proj                        # Output projection
+      - gate_proj                     # MLP gating
+      - up_proj                       # MLP expansion
+      - down_proj                     # MLP projection
+      - audio_tower.proj              # Critical for acoustic embeddings
     task_type: CAUSAL_LM
 
-# ============================================================================
 # Dataset Configuration
-# ============================================================================
 dataset:
-  # Dataset source - using local MELD dataset
-  dataset_name: local_meld
+  # Source
+  dataset_name: local_meld            # Using local MELD dataset
   dataset_config: default
-  # Path to local MELD data directory
-  data_dir: datasets/meld
-
-  # Data processing
+  data_dir: data/datasets/meld        # Path to local MELD data directory
+  # Processing
   seed: 0
   num_proc: auto
   cache_splits: true
   force_rebuild: false
-
-  # Sample limits (null = use all)
-  max_train_samples: null
+  # Sample limits
+  max_train_samples: null             # null = use all
   max_validation_samples: null
   max_test_samples: null
-
-  # Maximum audio duration in seconds (null = no limit)
-  # Samples exceeding this will be filtered out to prevent OOM
-  # MELD average is ~3s, max normal sample is ~30s
-  max_duration: 30.0
-
-  # Minimum audio duration in seconds (null = no limit)
-  # Filter out very short clips that lack context
-  min_duration: 0.5
-
-  # Audio normalization
+  # Audio filtering
+  max_duration: 30.0                  # Filter samples exceeding this (MELD avg ~3s, max normal ~30s)
+  min_duration: 0.5                   # Filter out very short clips that lack context
   normalize_audio: false
-  # Speaker-level normalization (normalize per speaker to handle different conditions)
-  normalize_per_speaker: true
-  # Target RMS level for normalization (typical range: -20 to -30 dB)
-  target_rms_db: -25.0
-
+  normalize_per_speaker: true         # Normalize per speaker to handle different recording conditions
+  target_rms_db: -25.0                # Target RMS level for normalization
   # Column mappings
-  # MELD has: neutral, joy, sadness, anger, surprise, fear, disgust
-  label_column: Emotion
+  label_column: Emotion               # MELD emotions: neutral, joy, sadness, anger, surprise, fear, disgust
   text_column: Utterance
   audio_column: audio
-
-  # Split configuration
-  # MELD has predefined train/validation/test splits
-  train_split: train
+  # Splits
+  train_split: train                  # MELD has predefined splits
   validation_split: validation
   test_split: test
-
-  # Task-specific options
+  # Task-specific
   include_transcript: false
 
-# ============================================================================
 # Loss Configuration
-# ============================================================================
 loss:
-  # Loss function type: "default", "focal", "weighted"
-  type: default
+  type: default                       # Options: "default", "focal", "weighted"
+  focal:                              # Used only if type: focal
+    gamma: 2.0                        # Focusing parameter (higher = more focus on hard examples)
+    alpha: null                       # Class weighting (null, single value, or list per class)
+  weighted:                           # Used only if type: weighted
+    weights: null                     # Explicit weights for each emotion class (e.g., [1.0, 1.5, 1.5, 1.5, 2.0, 2.5, 2.0])
+    auto_compute: true                # If true, computes weights automatically from training data
+    method: sqrt_inverse              # Auto-compute method: "inverse", "sqrt_inverse", "balanced"
 
-  # Focal loss parameters (only used if type: focal)
-  focal:
-    gamma: 2.0              # Focusing parameter (higher = more focus on hard examples)
-    alpha: null             # Class weighting (null, single value, or list per class)
-
-  # Weighted cross-entropy parameters (only used if type: weighted)
-  weighted:
-    # Option 1: Provide explicit weights for each emotion class
-    # MELD emotions: neutral, joy, sadness, anger, surprise, fear, disgust
-    weights: null           # e.g., [1.0, 1.5, 1.5, 1.5, 2.0, 2.5, 2.0]
-
-    # Option 2: Auto-compute weights from training data distribution
-    auto_compute: true      # If true, computes weights automatically
-    method: sqrt_inverse    # Method for auto-compute: "inverse", "sqrt_inverse", "balanced"
-
-# ============================================================================
 # Training Configuration
-# ============================================================================
 training:
-  # Batch sizes and accumulation
+  # Compute & batching
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 24
   gradient_accumulation_steps: 2
-
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
   # Optimization
   learning_rate: 2e-05
   lr_scheduler_type: cosine_with_restarts
   warmup_ratio: 0.1
   weight_decay: 0.05
   max_grad_norm: 1.0
-
-  # Training duration
+  # Schedule
   num_train_epochs: 5
-
-  # Checkpointing
-  save_strategy: steps
-  save_steps: 50
-  save_total_limit: 3
-  # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
-  resume_from_checkpoint: auto
-
-  # Evaluation
   eval_strategy: steps
   eval_steps: 50
-  max_eval_samples: null        # Use subset during training for speed (full eval at end)
-  shuffle_eval_subset: true     # Randomly sample eval subset
+  save_strategy: steps
+  save_steps: 50
   initial_eval: true
-
-  # Logging
-  logging_steps: 10
-  report_to:
-    - tensorboard
-    - wandb
-
+  # Checkpointing
+  save_total_limit: 3
+  resume_from_checkpoint: auto        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
   early_stopping_patience: 3
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1
   greater_is_better: true
-
-  # Performance optimizations
-  bf16: true
-  fp16: false
-  gradient_checkpointing: true
-  gradient_checkpointing_kwargs:
-    use_reentrant: false
-
   # Data loading
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-
-  # Balanced sampling for imbalanced datasets
-  # Options: null (default), "balanced_batch", "weighted"
-  # - "balanced_batch": Each batch has equal samples from each class
-  # - "weighted": Oversample minority classes throughout training
-  balanced_sampling: weighted
-
-  # Weighting method for weighted sampling (only used if balanced_sampling: weighted)
-  # Options: "inverse", "sqrt_inverse", "balanced"
-  # - "inverse": Full rebalancing (minority classes sampled ~17x more)
-  # - "sqrt_inverse": Gentler rebalancing (minority classes sampled ~4x more)
-  # - "balanced": Scale to make expected samples equal per class
-  sampling_method: sqrt_inverse
-
-  group_by_length: false  # Disabled when using balanced_sampling
+  group_by_length: false              # Disabled when using balanced_sampling
   length_column_name: duration
-
-  # Other
+  balanced_sampling: weighted         # Options: null (default), "balanced_batch" (equal per batch), "weighted" (oversample minority)
+  sampling_method: sqrt_inverse       # For weighted sampling: "inverse" (full), "sqrt_inverse" (gentle), "balanced" (equal expected)
+  # Evaluation
+  max_eval_samples: null              # Use subset during training for speed (null = full eval)
+  shuffle_eval_subset: true           # Randomly sample eval subset
   eval_accumulation_steps: 4
   remove_unused_columns: false
-
-  # Generation parameters (for constrained decoding evaluation)
+  # Logging
+  logging_steps: 10
+  report_to:
+    - tensorboard
+    - wandb
+  # Generation
   generation_kwargs:
-    max_new_tokens: 3        
-    do_sample: false         # Greedy decoding for deterministic results
-    num_beams: 1            # No beam search needed with constraints
+    max_new_tokens: 3                 # Short for emotion labels
+    do_sample: false                  # Greedy decoding for deterministic results
+    num_beams: 1                      # No beam search needed with constraints
 
-# ============================================================================
 # Artifacts Configuration
-# ============================================================================
 artifacts:
   adapter_subdir: qwen2_5_omni_lora_emotion_audio_v2
 
-# ============================================================================
 # Metrics Configuration
-# ============================================================================
 metrics:
   history_csv: emotion_training_history.csv
   loss_plot: loss_accuracy_plot.png
   confusion_matrix: emotion_confusion_matrix.png
-  normalize_confusion_matrix: true  # If true, shows percentages; if false, shows counts
+  normalize_confusion_matrix: true    # If true, shows percentages; if false, shows counts

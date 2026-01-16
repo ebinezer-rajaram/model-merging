@@ -1,6 +1,6 @@
-# Speaker Identification Task Configuration
+# Speaker Verification Task Configuration
 
-task: speaker_id
+task: speaker_ver
 seed: 0
 
 # Model Configuration
@@ -31,50 +31,49 @@ dataset:
   seed: 0
   num_proc: auto
   cache_splits: true
-  force_rebuild: false
+  force_rebuild: true                 # Force rebuild to ensure we get fresh data
   # Sample limits
   max_speakers: 100                   # Select top 100 speakers by sample count
-  max_samples_per_speaker: 200        # Limit to 200 utterances per speaker
+  pairs_per_speaker: 200              # Generate 200 pairs per speaker (100 pos + 100 neg)
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
   # Audio filtering
-  max_duration: 20.0                  # Filter out very long utterances
-  min_duration: 1.0                   # Filter out very short utterances
-  max_audio_length: 10.0              # Trim audio to 10 seconds (saves VRAM, keeps more data)
+  max_duration: 20.0                  # Filter out very long utterances (applied before pairing)
+  min_duration: 1.0                   # Filter out very short utterances (applied before pairing)
+  max_audio_length: 10.0              # Trim each audio to 10 seconds (before concatenation)
+  audio_gap_seconds: 0.5              # Silence gap between audio_a and audio_b
   # Column mappings
   label_column: speaker_id            # VoxCeleb2 uses "speaker_id"
   text_column: transcription          # VoxCeleb2 uses "transcription"
   audio_column: audio
   # Splits
-  split_percentages:                  # VoxCeleb2 only has "train" split, create our own splits
-    train: 0.8                        # 80% for training (~19,840 samples)
-    validation: 0.1                   # 10% for validation (~2,480 samples)
-    test: 0.1                         # 10% for test (~2,480 samples)
+  split_by_speakers: true             # True = val/test speakers completely unseen (zero-shot); False = same speakers in all splits
+  split_percentages:
+    train: 0.8                        # 80% for training (80 speakers, ~16,000 pairs)
+    validation: 0.1                   # 10% for validation (10 speakers, ~2,000 pairs)
+    test: 0.1                         # 10% for test (10 speakers, ~2,000 pairs)
   train_split: train
-  validation_split: validation        # Will be created from train
-  test_split: test                    # Will be created from train
-  stratify_by_column: label           # Ensure balanced speaker distribution
-  # Task-specific
-  include_transcript: false           # Audio-only speaker identification
+  validation_split: validation
+  test_split: test
 
 # Loss Configuration
 loss:
-  type: default                       # Standard cross-entropy. Options: "default", "focal", "weighted"
+  type: default                       # Standard cross-entropy for binary classification. Options: "default", "focal", "weighted"
   focal:                              # Used only if type: focal
     gamma: 2.0                        # Focusing parameter (higher = more focus on hard examples)
-    alpha: null                       # Class weighting (null, single value, or list per class)
+    alpha: null                       # Class weighting (null or list per class)
   weighted:                           # Used only if type: weighted
-    weights: null                     # Explicit weights for each speaker class (124 values)
+    weights: null                     # Explicit weights for each class [weight_no, weight_yes]
     auto_compute: false               # Auto-compute weights from training data distribution
     method: sqrt_inverse              # Method for auto-compute: "inverse", "sqrt_inverse", "balanced"
 
 # Training Configuration
 training:
   # Compute & batching
-  per_device_train_batch_size: 32
+  per_device_train_batch_size: 16     # Smaller batch size due to dual audio inputs (longer sequences)
   per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   bf16: true
   fp16: false
   gradient_checkpointing: true
@@ -100,16 +99,14 @@ training:
   early_stopping_patience: 5
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
-  metric_for_best_model: eval_macro_f1
+  metric_for_best_model: eval_accuracy  # Binary classification: use accuracy
   greater_is_better: true
   # Data loading
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: true               # Group samples by duration for efficient batching
-  length_column_name: duration
-  balanced_sampling: null             # Options: null (default), "balanced_batch", "weighted". null = good for balanced speaker distribution
-  sampling_method: sqrt_inverse       # For weighted sampling: "inverse", "sqrt_inverse", "balanced"
+  group_by_length: false              # Don't group by length (pairs have variable combined length)
+  balanced_sampling: null             # Pairs should already be balanced (50/50), so null is appropriate
   # Evaluation
   max_eval_samples: null              # Use subset during training for speed (null = full eval)
   shuffle_eval_subset: true           # Randomly sample eval subset
@@ -122,17 +119,17 @@ training:
     - wandb
   # Generation
   generation_kwargs:
-    max_new_tokens: 5                 # Speaker IDs are typically short
+    max_new_tokens: 3                 # "yes" or "no" are very short
     do_sample: false                  # Greedy decoding for deterministic results
     num_beams: 1                      # No beam search needed
 
 # Artifacts Configuration
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_speaker_id_voxceleb2
+  adapter_subdir: qwen2_5_omni_lora_speaker_ver
 
 # Metrics Configuration
 metrics:
-  history_csv: speaker_id_training_history.csv
-  loss_plot: speaker_id_loss_accuracy.png
-  confusion_matrix: speaker_id_confusion_matrix.png
+  history_csv: speaker_ver_training_history.csv
+  loss_plot: speaker_ver_loss_accuracy.png
+  confusion_matrix: speaker_ver_confusion_matrix.png
   normalize_confusion_matrix: true    # If true, shows percentages; if false, shows counts

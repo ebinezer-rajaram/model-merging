@@ -1,6 +1,6 @@
-# Intent Classification Task Configuration
+# Keyword Spotting Task Configuration
 
-task: intent
+task: kws
 seed: 0
 
 # Model Configuration
@@ -16,45 +16,37 @@ model:
       - k_proj                        # Key projection
       - v_proj                        # Value projection
       - o_proj                        # Output projection
-      - audio_tower.proj              # Acoustic embeddings
       - gate_proj                     # MLP gating for semantic understanding
       - up_proj                       # MLP expansion
       - down_proj                     # MLP projection
+      - audio_tower.proj              # Critical for acoustic embeddings
     task_type: CAUSAL_LM
 
 # Dataset Configuration
 dataset:
   # Source
-  dataset_name: marcel-gohsen/slurp   # Dataset source
-  dataset_config: null
+  dataset_name: google/speech_commands  # Dataset source
+  dataset_config: v0.02               # Use v0.02 with 35 commands
+  revision: refs/convert/parquet
   # Processing
   seed: 0
   num_proc: auto
   cache_splits: true
   force_rebuild: false
   # Sample limits
-  max_train_samples: null             # null = use all
-  max_validation_samples: null
-  max_test_samples: null
+  max_train_samples: null             # ~75k samples after filtering (null = use all)
+  max_validation_samples: null        # ~9k samples after filtering
+  max_test_samples: null              # ~4k samples after filtering
   # Audio filtering
-  max_duration: 20.0                  # Filter out samples exceeding this to prevent OOM
+  max_duration: 2.0                   # Speech Commands are ~1 second, 2s max as safety buffer
   min_duration: 0.5                   # Filter out very short clips that lack context
-  normalize_audio: false
-  normalize_per_speaker: false        # Normalize per speaker to handle different recording conditions
-  target_rms_db: -25.0                # Target RMS level for normalization
   # Column mappings
-  label_column: intent
-  text_column: transcript
+  label_column: label
   audio_column: audio
   # Splits
-  split_percentages: null
   train_split: train
-  validation_split: devel
+  validation_split: validation
   test_split: test
-  stratify_by_column: label
-  # Task-specific
-  include_transcript: false
-  prepend_scenario: false
 
 # Loss Configuration
 loss:
@@ -63,39 +55,39 @@ loss:
     gamma: 2.0                        # Focusing parameter (higher = more focus on hard examples)
     alpha: null                       # Class weighting (null, single value, or list per class)
   weighted:                           # Used only if type: weighted
-    weights: null                     # Explicit weights for each class (e.g., [1.0, 1.5, 2.0, ...])
-    auto_compute: false               # If true, computes weights automatically from training data
-    method: sqrt_inverse              # Auto-compute method: "inverse", "sqrt_inverse", "balanced"
+    weights: null                     # Explicit weights for each class
+    auto_compute: false               # Speech Commands is balanced, no need for weighting
+    method: sqrt_inverse
 
 # Training Configuration
 training:
   # Compute & batching
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 2
+  per_device_train_batch_size: 48     # KWS samples are short (~1s), can use larger batches
+  per_device_eval_batch_size: 48
+  gradient_accumulation_steps: 1
   bf16: true
   fp16: false
   gradient_checkpointing: true
   gradient_checkpointing_kwargs:
     use_reentrant: false
   # Optimization
-  learning_rate: 3e-05
+  learning_rate: 5e-5
   lr_scheduler_type: cosine
   warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
   # Schedule
-  num_train_epochs: 3
+  num_train_epochs: 5                 # KWS typically converges quickly
   eval_strategy: steps
-  eval_steps: 50
+  eval_steps: 200
   save_strategy: steps
-  save_steps: 50
+  save_steps: 200
   initial_eval: true
   # Checkpointing
   save_total_limit: 3
   resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
-  early_stopping_patience: 5
+  early_stopping_patience: 2
   early_stopping_threshold: 0.0001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1
@@ -104,33 +96,33 @@ training:
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: true               # Disabled when using balanced_sampling
+  group_by_length: true               # Group by length for efficiency (short, uniform samples)
   length_column_name: duration
-  balanced_sampling: weighted         # Options: null (default), "balanced_batch" (equal per batch), "weighted" (oversample minority)
-  sampling_method: sqrt_inverse       # For weighted sampling: "inverse" (full), "sqrt_inverse" (gentle), "balanced" (equal expected)
+  balanced_sampling: null             # Not needed for Speech Commands (already balanced)
+  sampling_method: sqrt_inverse       # Options: "inverse", "sqrt_inverse", "balanced"
   # Evaluation
-  max_eval_samples: null              # Use subset during training for speed (null = full eval)
-  shuffle_eval_subset: true           # Randomly sample eval subset
+  max_eval_samples: null              # Use full eval set
+  shuffle_eval_subset: false
   eval_accumulation_steps: 4
   remove_unused_columns: false
   # Logging
-  logging_steps: 10
+  logging_steps: 50
   report_to:
     - tensorboard
     - wandb
   # Generation
   generation_kwargs:
-    max_new_tokens: 5                 # Intent labels may be 2-3 tokens, 5 provides buffer
+    max_new_tokens: 3                 # Keywords are single words, 3 tokens is safe buffer
     do_sample: false                  # Greedy decoding for deterministic results
-    num_beams: 1                      # No beam search needed with constraints
+    num_beams: 1                      # No beam search needed
 
 # Artifacts Configuration
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_intent
+  adapter_subdir: qwen2_5_omni_lora_kws
 
 # Metrics Configuration
 metrics:
-  history_csv: intent_training_history.csv
-  loss_plot: intent_loss_accuracy.png
-  confusion_matrix: intent_confusion_matrix.png
+  history_csv: kws_training_history.csv
+  loss_plot: kws_loss_accuracy.png
+  confusion_matrix: kws_confusion_matrix.png
   normalize_confusion_matrix: true    # If true, shows percentages; if false, shows counts

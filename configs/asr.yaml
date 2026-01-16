@@ -1,137 +1,105 @@
-# ============================================================================
 # Automatic Speech Recognition (ASR) Task Configuration
-# ============================================================================
 
 task: asr
 seed: 0
 
-# ============================================================================
 # Model Configuration
-# ============================================================================
 model:
   path: data/models/Qwen2.5-Omni-3B
-
-  # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 64                    # LoRA rank (higher = more parameters, better fit)
-    alpha: 128               # LoRA alpha scaling factor (typically 2x rank)
-    dropout: 0.1             # Dropout probability for LoRA layers
-    bias: none               # Bias type: none, all, or lora_only
-    target_modules:          # Modules to apply LoRA to
-      - q_proj               # Query - what to attend to
-      - k_proj               # Key - acoustic feature matching
-      - v_proj               # Value - phoneme representation
-      - o_proj               # Output projection
-    
-      # CRITICAL: Audio-to-text grounding
-      - audio_tower.proj            # L731: Acoustic embeddings → LLM space
-
-      - gate_proj      # ADD: for complex acoustic patterns
-      - up_proj        # ADD: for representation expansion
-      - down_proj      # ADD: for projection
+    r: 64                             # LoRA rank (higher = more parameters, better fit)
+    alpha: 128                        # LoRA alpha scaling factor (typically 2x rank)
+    dropout: 0.1                      # Dropout probability for LoRA layers
+    bias: none                        # Bias type: none, all, or lora_only
+    target_modules:                   # Modules to apply LoRA to
+      - q_proj                        # Query projection for attention
+      - k_proj                        # Key projection for acoustic feature matching
+      - v_proj                        # Value projection for phoneme representation
+      - o_proj                        # Output projection
+      - audio_tower.proj              # Acoustic embeddings to LLM space
+      - gate_proj                     # MLP gating for complex acoustic patterns
+      - up_proj                       # MLP expansion for representation
+      - down_proj                     # MLP projection
     task_type: CAUSAL_LM
 
-# ============================================================================
 # Dataset Configuration
-# ============================================================================
 dataset:
-  # LibriSpeech subset configuration (hours-based)
-  train_hours: null              # Hours of training data to use
-  val_hours: null              # Validation hours (null = use default)
-  test_hours: null              # Test hours (null = use all)
-  test_split: test               # Test split name
-
-  # Data processing
+  # Source (LibriSpeech)
+  train_hours: null                   # Hours of training data to use (null = use all available)
+  val_hours: null                     # Validation hours (null = use default)
+  test_hours: null                    # Test hours (null = use all)
+  test_split: test                    # Test split name
+  # Processing
   seed: 0
   num_proc: auto
   cache_splits: true
   force_rebuild: false
   return_full_validation: false
+  # Audio filtering
+  max_duration: 20.0                  # Filter out audio longer than this (seconds)
+  min_duration: 1.0                   # Filter out audio shorter than this (seconds)
 
-  # Audio filtering (duration in seconds, null = no limit)
-  max_duration: 20.0     # Filter out audio longer than this
-  min_duration: 1.0      # Filter out audio shorter than this
-
-# ============================================================================
 # Training Configuration
-# ============================================================================
 training:
-  # Batch sizes and accumulation
+  # Compute & batching
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 2
-
-  # Optimization
-  learning_rate: 2e-5
-  lr_scheduler_type: cosine
-  warmup_ratio: 0.05            
-  weight_decay: 0.01
-  max_grad_norm: 2.0            # Lower gradient clipping for ASR
-
-  # Training duration
-  num_train_epochs: 3
-
-  # Checkpointing
-  save_strategy: steps
-  save_steps: 50
-  save_total_limit: 4
-  # Resume from checkpoint: null (start fresh), "auto" (detect latest), or explicit path
-  resume_from_checkpoint: null
-
-  # Evaluation
-  eval_strategy: steps
-  eval_steps: 50
-  max_eval_samples: null         # Use 500 samples during training for speed (full eval at end)
-  shuffle_eval_subset: false     # Randomly sample eval subset (prevents same samples every time)
-  initial_eval: true
-
-  # Logging
-  logging_steps: 10
-  report_to:
-    - tensorboard
-    - wandb
-
-  # Early stopping
-  early_stopping_patience: 5
-  early_stopping_threshold: 0   # 0 = any improvement
-  load_best_model_at_end: true
-  metric_for_best_model: wer   # Options: 'wer' (if using single mode) or 'wer_default'/'wer_standardize' (if using both)
-  greater_is_better: false      # WER: lower is better
-
-  # Performance optimizations
   bf16: true
   fp16: false
   gradient_checkpointing: true
   gradient_checkpointing_kwargs:
     use_reentrant: false
-
+  # Optimization
+  learning_rate: 2e-5
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 2.0                  # Lower gradient clipping for ASR
+  # Schedule
+  num_train_epochs: 3
+  eval_strategy: steps
+  eval_steps: 50
+  save_strategy: steps
+  save_steps: 50
+  initial_eval: true
+  # Checkpointing
+  save_total_limit: 4
+  resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
+  # Early stopping
+  early_stopping_patience: 5
+  early_stopping_threshold: 0         # 0 = any improvement
+  load_best_model_at_end: true
+  metric_for_best_model: wer          # Options: "wer" (single mode) or "wer_default"/"wer_standardize" (both modes)
+  greater_is_better: false            # WER: lower is better
   # Data loading
   dataloader_num_workers: 8
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
-  group_by_length: true         # Important for ASR (variable length audio)
+  group_by_length: true               # Important for ASR (variable length audio)
   length_column_name: duration
-
-  # Other
+  # Evaluation
+  max_eval_samples: null              # Use subset during training for speed (null = use all)
+  shuffle_eval_subset: false          # Randomly sample eval subset
   eval_accumulation_steps: 2
   remove_unused_columns: false
-
-  # Generation parameters (for evaluation)
+  # Logging
+  logging_steps: 10
+  report_to:
+    - tensorboard
+    - wandb
+  # Generation
   generation_kwargs:
-    max_new_tokens: 128         # Longer for ASR transcripts
+    max_new_tokens: 128               # Longer for ASR transcripts
     do_sample: false
     num_beams: 4
 
-# ============================================================================
 # Artifacts Configuration
-# ============================================================================
 artifacts:
   adapter_subdir: qwen2_5_omni_lora_asr_100h
 
-# ============================================================================
 # Metrics Configuration
-# ============================================================================
 metrics:
   history_csv: training_history.csv
   loss_plot: loss_wer_plot.png
-  wer_normalization: aggressive  # Options: 'default', 'standardize', 'aggressive', 'both', or 'all' (compute multiple metrics)
+  wer_normalization: aggressive       # Options: "default", "standardize", "aggressive", "both", or "all" (compute multiple)

@@ -1,162 +1,123 @@
-# ============================================================================
 # Speech Question Answering Task Configuration
-# ============================================================================
 
 task: speech_qa
 seed: 0
 
-# ============================================================================
 # Model Configuration
-# ============================================================================
 model:
   path: data/models/Qwen2.5-Omni-3B
-
-  # LoRA (Low-Rank Adaptation) Configuration
   lora:
-    r: 64                    # LoRA rank
-    alpha: 128               # LoRA alpha scaling factor
-    dropout: 0.1             # Dropout probability for LoRA layers
-    bias: none               # Bias type: none, all, or lora_only
-    target_modules:          # Modules to apply LoRA to
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - audio_tower.proj     # Critical for acoustic embeddings
-      - gate_proj            # For complex reasoning
-      - up_proj              # For representation expansion
-      - down_proj            # For projection
+    r: 64                             # LoRA rank
+    alpha: 128                        # LoRA alpha scaling factor
+    dropout: 0.1                      # Dropout probability for LoRA layers
+    bias: none                        # Bias type: none, all, or lora_only
+    target_modules:                   # Modules to apply LoRA to
+      - q_proj                        # Query projection for attention
+      - k_proj                        # Key projection
+      - v_proj                        # Value projection
+      - o_proj                        # Output projection
+      - audio_tower.proj              # Critical for acoustic embeddings
+      - gate_proj                     # MLP gating for complex reasoning
+      - up_proj                       # MLP expansion for representation
+      - down_proj                     # MLP projection
     task_type: CAUSAL_LM
 
-# ============================================================================
 # Dataset Configuration
-# ============================================================================
 dataset:
-  # Dataset source
-  dataset_name: AudioLLMs/spoken_squad_test
+  # Source
+  dataset_name: AudioLLMs/spoken_squad_test  # Dataset only has 'test' split with 5,351 samples (will be split)
   dataset_config: null
-
-  # Data processing
+  # Processing
   seed: 0
   num_proc: auto
   cache_splits: true
   force_rebuild: false
-
-  # Sample limits (null = use all)
-  # NOTE: Dataset only has 'test' split with 5,351 samples
-  # We'll split it into train/val/test using split_percentages
-  max_train_samples: null
+  # Sample limits
+  max_train_samples: null             # null = use all from split
   max_validation_samples: null
   max_test_samples: null
-
-  # Audio filtering (duration in seconds, null = no limit)
-  max_duration: 20.0     # Filter out very long audio
-  min_duration: 1.0      # Filter out very short clips
-
+  # Audio filtering
+  max_duration: 20.0                  # Filter out very long audio
+  min_duration: 1.0                   # Filter out very short clips
   # Column mappings
-  # NOTE: These will be auto-mapped by fallback logic:
-  #   - 'context' (audio) → 'audio' (via FALLBACK_AUDIO_COLUMNS)
-  #   - 'instruction' (question) → 'question' (via FALLBACK_QUESTION_COLUMNS)
-  #   - 'answer' → 'answer' (already in FALLBACK_ANSWER_COLUMNS)
-  audio_column: null        # Will auto-detect 'context'
-  question_column: null     # Will auto-detect 'instruction'
-  answer_column: null       # Will auto-detect 'answer'
-  transcript_column: null   # No transcript in this dataset
-  context_column: null      # Not using text context
-  id_column: null           # No ID column
+  audio_column: null                  # Will auto-detect 'context' via fallback logic
+  question_column: null               # Will auto-detect 'instruction' via fallback logic
+  answer_column: null                 # Will auto-detect 'answer' via fallback logic
+  transcript_column: null             # No transcript in this dataset
+  context_column: null                # Not using text context
+  id_column: null                     # No ID column
+  # Splits
+  split_percentages:                  # Create train/val/test splits from 'test' split
+    train: 0.70                       # 70% for training (~3,746 samples)
+    validation: 0.15                  # 15% for validation (~803 samples)
+    test: 0.15                        # 15% for test (~802 samples)
+  train_split: test                   # Source split to divide
+  validation_split: null              # Will be created from split_percentages
+  test_split: null                    # Will be created from split_percentages
+  # Task-specific
+  include_transcript: false           # No transcript available, audio-only QA
+  include_context: false              # No text passage context
 
-  # Split configuration
-  # Since dataset only has 'test' split, we need to create train/val/test
-  split_percentages:
-    train: 0.70             # 70% for training (~3,746 samples)
-    validation: 0.15        # 15% for validation (~803 samples)
-    test: 0.15              # 15% for test (~802 samples)
-  train_split: test         # Source split to divide
-  validation_split: null    # Will be created from split_percentages
-  test_split: null          # Will be created from split_percentages
-
-  # Task-specific options
-  include_transcript: false # No transcript available, audio-only QA
-  include_context: false    # No text passage context
-
-# ============================================================================
 # Training Configuration
-# ============================================================================
 training:
-  # Batch sizes and accumulation
+  # Compute & batching
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 8
   gradient_accumulation_steps: 4
-
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
   # Optimization
   learning_rate: 3e-5
   lr_scheduler_type: cosine
   warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
-
-  # Training duration
+  # Schedule
   num_train_epochs: 5
-
-  # Checkpointing
-  save_strategy: steps
-  save_steps: 100
-  save_total_limit: 3
-  resume_from_checkpoint: null
-
-  # Evaluation
   eval_strategy: steps
   eval_steps: 100
-  max_eval_samples: null
-  shuffle_eval_subset: false
+  save_strategy: steps
+  save_steps: 100
   initial_eval: true
-
-  # Logging
-  logging_steps: 20
-  report_to:
-    - tensorboard
-
+  # Checkpointing
+  save_total_limit: 3
+  resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
   early_stopping_patience: 4
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_f1
   greater_is_better: true
-
-  # Performance optimizations
-  bf16: true
-  fp16: false
-  gradient_checkpointing: true
-  gradient_checkpointing_kwargs:
-    use_reentrant: false
-
   # Data loading
   dataloader_num_workers: 4
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 2
   group_by_length: true
   length_column_name: duration
-
-  # Other
+  # Evaluation
+  max_eval_samples: null              # Use subset during training for speed (null = full eval)
+  shuffle_eval_subset: false
   eval_accumulation_steps: 4
   remove_unused_columns: false
-
-  # Generation parameters (for evaluation)
+  # Logging
+  logging_steps: 20
+  report_to:
+    - tensorboard
+  # Generation
   generation_kwargs:
-    max_new_tokens: 48      # Answers are typically short
-    do_sample: false        # Greedy decoding for deterministic results
+    max_new_tokens: 48                # Answers are typically short
+    do_sample: false                  # Greedy decoding for deterministic results
     temperature: 0.0
     num_beams: 1
 
-# ============================================================================
 # Artifacts Configuration
-# ============================================================================
 artifacts:
   adapter_subdir: qwen2_5_omni_lora_speech_qa
 
-# ============================================================================
 # Metrics Configuration
-# ============================================================================
 metrics:
   history_csv: speech_qa_training_history.csv
   loss_plot: speech_qa_loss_metrics.png
