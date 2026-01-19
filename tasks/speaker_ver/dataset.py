@@ -44,23 +44,54 @@ def _extract_audio_array(audio_data: Any) -> np.ndarray:
     """Extract audio array from various audio data formats.
 
     Args:
-        audio_data: Audio data in various formats (dict, AudioDecoder, array, etc.)
+        audio_data: Audio data in various formats (dict with array, numpy array, etc.)
 
     Returns:
         Numpy array with audio samples
     """
+    # Handle dict format (standard HuggingFace datasets format)
     if isinstance(audio_data, dict):
-        # Extract the array from the dict
         array = audio_data.get("array")
         if array is None:
             return np.array([], dtype=np.float32)
-        # Force conversion to numpy array (this evaluates lazy AudioDecoder)
-        return np.array(array, copy=False, dtype=np.float32)
+        # Already a numpy array - just convert dtype
+        if isinstance(array, np.ndarray):
+            return array.astype(np.float32)
+        # Otherwise try to convert (handles lists, etc.)
+        return np.asarray(array, dtype=np.float32)
+
+    # Handle raw numpy arrays
     elif isinstance(audio_data, np.ndarray):
         return audio_data.astype(np.float32)
+
+    # Handle torchcodec AudioDecoder objects
+    elif hasattr(audio_data, "get_frames_at"):
+        # AudioDecoder: decode all audio frames
+        try:
+            # Get all frames from start to end
+            # get_frames_at(start_index, end_index) returns (audio_tensor, info_dict)
+            frames = audio_data.get_frames_at(0, -1)
+            if frames is not None:
+                # frames is a tuple: (audio_tensor, info)
+                audio_tensor = frames[0] if isinstance(frames, tuple) else frames
+                # Convert torch tensor to numpy
+                audio_array = audio_tensor.numpy() if hasattr(audio_tensor, "numpy") else np.array(audio_tensor)
+                # Ensure 1D array (may be 2D with channels)
+                if audio_array.ndim > 1:
+                    # Average channels if stereo
+                    audio_array = audio_array.mean(axis=0)
+                return audio_array.astype(np.float32)
+        except Exception as e:
+            print(f"Warning: Could not decode AudioDecoder: {e}")
+            return np.array([], dtype=np.float32)
+
+    # For any other object, try direct conversion
     else:
-        # Try to convert directly
-        return np.array(audio_data, dtype=np.float32)
+        try:
+            return np.asarray(audio_data, dtype=np.float32)
+        except (TypeError, ValueError) as e:
+            print(f"Warning: Could not extract audio array from {type(audio_data)}: {e}")
+            return np.array([], dtype=np.float32)
 
 
 def _generate_ver_pairs(
@@ -80,39 +111,31 @@ def _generate_ver_pairs(
     """
     rng = random.Random(seed)
 
-    # Group samples by speaker and extract audio arrays immediately
-    speaker_to_audios = defaultdict(list)
-    for idx in range(len(dataset)):
-        speaker_id = dataset[idx]["label"]
-        # Extract audio array immediately to avoid lazy loading issues
-        audio_array = _extract_audio_array(dataset[idx]["audio"])
-        speaker_to_audios[speaker_id].append((idx, audio_array))
+    # Group sample indices by speaker using fast array access
+    labels = dataset["label"]
+    speaker_to_indices = defaultdict(list)
+    for idx, speaker_id in enumerate(labels):
+        speaker_to_indices[speaker_id].append(idx)
 
-    positive_pairs = []
-    negative_pairs = []
-    speakers = list(speaker_to_audios.keys())
-
+    speakers = list(speaker_to_indices.keys())
     num_pos = pairs_per_speaker // 2
     num_neg = pairs_per_speaker // 2
 
+    # Generate pair indices first (don't access audio data yet)
+    pair_indices = []
+
     # Generate positive pairs (same speaker, different utterances)
-    for speaker, audio_list in speaker_to_audios.items():
-        if len(audio_list) < 2:
+    for speaker, indices in speaker_to_indices.items():
+        if len(indices) < 2:
             continue  # Need at least 2 samples for positive pair
 
         for _ in range(num_pos):
-            (idx_a, audio_a), (idx_b, audio_b) = rng.sample(audio_list, 2)
-
-            positive_pairs.append({
-                "audio_a": audio_a,  # Just the numpy array
-                "audio_b": audio_b,  # Just the numpy array
-                "label": 1,  # Same speaker
-                "speaker_id": str(speaker),
-            })
+            idx_a, idx_b = rng.sample(indices, 2)
+            pair_indices.append((idx_a, idx_b, 1, str(speaker)))
 
     # Generate negative pairs (different speakers)
     for speaker in speakers:
-        audio_list = speaker_to_audios[speaker]
+        indices_a = speaker_to_indices[speaker]
 
         for _ in range(num_neg):
             # Sample a different speaker
@@ -121,24 +144,30 @@ def _generate_ver_pairs(
                 continue
 
             other_speaker = rng.choice(other_speakers)
-            idx_a, audio_a = rng.choice(audio_list)
-            idx_b, audio_b = rng.choice(speaker_to_audios[other_speaker])
+            idx_a = rng.choice(indices_a)
+            idx_b = rng.choice(speaker_to_indices[other_speaker])
+            pair_indices.append((idx_a, idx_b, 0, f"{speaker}_{other_speaker}"))
 
-            negative_pairs.append({
-                "audio_a": audio_a,  # Just the numpy array
-                "audio_b": audio_b,  # Just the numpy array
-                "label": 0,  # Different speakers
-                "speaker_id": f"{speaker}_{other_speaker}",
-            })
+    # Shuffle the pair indices
+    rng.shuffle(pair_indices)
 
-    # Combine and shuffle
-    all_pairs = positive_pairs + negative_pairs
-    rng.shuffle(all_pairs)
+    # Now create pairs with audio references in one pass
+    all_pairs = []
+    for idx_a, idx_b, label, speaker_id in pair_indices:
+        all_pairs.append({
+            "audio_a": dataset[idx_a]["audio"],
+            "audio_b": dataset[idx_b]["audio"],
+            "label": label,
+            "speaker_id": speaker_id,
+        })
 
-    print(f"Generated {len(positive_pairs)} positive pairs and {len(negative_pairs)} negative pairs")
+    num_positive = sum(1 for _, _, label, _ in pair_indices if label == 1)
+    num_negative = len(pair_indices) - num_positive
+
+    print(f"Generated {num_positive} positive pairs and {num_negative} negative pairs")
     print(f"Total: {len(all_pairs)} verification pairs")
 
-    # Create dataset from lists - audio_a and audio_b are now plain numpy arrays
+    # Create dataset from lists - audio_a and audio_b still contain dict/AudioDecoder references
     return Dataset.from_list(all_pairs)
 
 
@@ -541,16 +570,27 @@ class SpeakerVerCollator:
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Process batch with audio concatenation."""
-        # Extract audio pairs (now stored as plain numpy arrays)
+        # Extract audio pairs - handle both dict and direct AudioDecoder format
         audio_a_arrays = []
         audio_b_arrays = []
         for feature in features:
             audio_a = feature["audio_a"]
             audio_b = feature["audio_b"]
 
-            # Convert to numpy arrays if needed
-            audio_a_arrays.append(np.asarray(audio_a, dtype=np.float32))
-            audio_b_arrays.append(np.asarray(audio_b, dtype=np.float32))
+            # Extract array - handle both dict format and AudioDecoder objects
+            if isinstance(audio_a, dict):
+                audio_a = audio_a.get("array", audio_a)
+            if isinstance(audio_b, dict):
+                audio_b = audio_b.get("array", audio_b)
+
+            # If still not a numpy array, use the extraction function
+            if not isinstance(audio_a, np.ndarray):
+                audio_a = _extract_audio_array(audio_a)
+            if not isinstance(audio_b, np.ndarray):
+                audio_b = _extract_audio_array(audio_b)
+
+            audio_a_arrays.append(audio_a)
+            audio_b_arrays.append(audio_b)
 
         # Trim both audios to max_audio_length
         if self.max_audio_length is not None:
