@@ -1,32 +1,27 @@
-# --------------------
-# OS and editor files
-# --------------------
+# OS/editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 *.swp
 
-# --------------------
-# Python cache & bytecode
-# --------------------
+# Python cache
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 
-# --------------------
-# Virtual environments
-# --------------------
+# Virtual envs
 venv/
 env/
 ENV/
 .venv/
-.ipynb_checkpoints/
 
-# --------------------
-# Package build artifacts
-# --------------------
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Build artifacts
 build/
 dist/
 *.egg-info/
@@ -34,24 +29,14 @@ dist/
 *.manifest
 *.spec
 
-# --------------------
-# Logs and outputs
-# --------------------
+# Logs
 logs/
 *.log
 *.out
 *.err
 nohup.out
 
-# --------------------
-# Jupyter notebook checkpoints
-# --------------------
-.ipynb_checkpoints
-*.ipynb_checkpoints
-
-# --------------------
-# Datasets & ML artifacts
-# --------------------
+# Data files
 data/
 datasets/
 *.csv
@@ -70,22 +55,30 @@ datasets/
 *.npy
 *.npz
 
-# --------------------
-# Model weights and checkpoints
-# --------------------
+# Model artifacts
+adapters/
+artifacts/
 checkpoints/
+checkpoints*/
 models/
 *.ckpt
-*.pth
 *.pt
+*.pth
+*.safetensors
+*.bin
 *.onnx
 *.pb
 *.tflite
 *.weights
 
-# --------------------
-# Experiment & output directories
-# --------------------
+# Trainer/optimizer state
+trainer_state.json
+training_args.bin
+optimizer.pt
+scheduler.pt
+rng_state.pth
+
+# Experiment outputs
 runs/
 results/
 outputs/
@@ -93,18 +86,20 @@ wandb/
 mlruns/
 tensorboard/
 lightning_logs/
+analysis/
+plots/
+artifacts_old/
+docs/
 
-# --------------------
-# Environment & config files
-# --------------------
+# Env/config
 .env
 .env.*
-
 *.yml
+*.yaml
+!configs/*.yml
+!configs/*.yaml
 
-# --------------------
-# Temporary or cache files
-# --------------------
+# Temp/cache
 .cache/
 tmp/
 temp/
@@ -112,39 +107,9 @@ temp/
 *.bak
 *.old
 
-# --------------------
-# System-specific
-# --------------------
+# System
 *.pid
 *.sock
 
-# --------------------
-# Model adapters and checkpoints
-# --------------------
-adapters/
-artifacts/
-checkpoints/
-checkpoints*/
-*.ckpt
-*.pt
-*.safetensors
-*.bin
-*.pth
-*.onnx
-*.pb
-*.tflite
-
-# Ignore trainer and optimizer states
-trainer_state.json
-training_args.bin
-optimizer.pt
-scheduler.pt
-rng_state.pth
-
-# Ignore any Hugging Face or LoRA output directories
-runs/
-outputs/
-results/
-lightning_logs/
-wandb/
-mlruns/
+# Other
+*.png
