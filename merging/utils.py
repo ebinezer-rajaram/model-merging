@@ -13,7 +13,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Iterable
 
 import torch
 from safetensors import safe_open
@@ -42,6 +42,164 @@ TASK_REGISTRY = {
     "langid": "tasks.langid",
     "kws": "tasks.kws",
 }
+
+
+def _format_lambda(value: float) -> str:
+    """Format lambda values consistently for path tags."""
+    return f"{value:g}"
+
+
+def _is_run_dir(path: Path) -> bool:
+    """Check if a path looks like a merged adapter run directory."""
+    return (path / "adapter_model.safetensors").exists() or (path / "adapter_config.json").exists()
+
+
+def _select_run_dir(path: Path, run_id: Optional[str] = None) -> Path:
+    """Resolve a merged adapter run directory from a base path."""
+    path = path.resolve()
+    if _is_run_dir(path):
+        return path
+
+    if run_id:
+        if run_id in ("best", "latest"):
+            candidate = path / run_id
+        else:
+            candidate = path / "runs" / run_id
+        if candidate.exists():
+            return candidate.resolve()
+        raise ValueError(f"Run '{run_id}' not found under {path}")
+
+    for label in ("best", "latest"):
+        candidate = path / label
+        if candidate.exists():
+            return candidate.resolve()
+
+    runs_dir = path / "runs"
+    if runs_dir.exists():
+        runs = [p for p in runs_dir.iterdir() if p.is_dir()]
+        if len(runs) == 1:
+            return runs[0].resolve()
+
+    raise ValueError(f"Could not resolve a merged adapter run under {path}. Specify --run-id.")
+
+
+def resolve_merged_adapter_path(
+    *,
+    adapter_path: Optional[str | Path] = None,
+    method: Optional[str] = None,
+    task_names: Optional[List[str]] = None,
+    lambda_weight: Optional[float] = None,
+    run_id: Optional[str] = None,
+    base_dir: Optional[Path] = None,
+) -> Path:
+    """Resolve a merged adapter run directory from either a path or merge spec."""
+    if base_dir is None:
+        base_dir = PACKAGE_ROOT / "artifacts" / "merged"
+
+    if adapter_path is not None:
+        path = Path(adapter_path).expanduser()
+        if not path.is_absolute():
+            path = PACKAGE_ROOT / path
+        return _select_run_dir(path, run_id=run_id)
+
+    if not method or not task_names:
+        raise ValueError("Provide either adapter_path or both method and task_names.")
+
+    task_combo_given = "_".join(task_names)
+    task_combo_sorted = "_".join(sorted(task_names))
+    lambda_tag = _format_lambda(lambda_weight) if lambda_weight is not None else None
+
+    combos = {task_combo_given, task_combo_sorted}
+    if len(task_names) == 2:
+        combos.add("_".join([task_names[1], task_names[0]]))
+
+    candidates: List[Path] = []
+    for combo in combos:
+        if not combo:
+            continue
+        if lambda_tag is not None:
+            candidates.append(base_dir / method / f"{combo}_lambda{lambda_tag}")
+            candidates.append(base_dir / method / combo / lambda_tag)
+        candidates.append(base_dir / method / combo)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists():
+            return _select_run_dir(candidate, run_id=run_id)
+
+    expected = "\n  - ".join(str(p) for p in candidates)
+    raise FileNotFoundError(
+        "Could not resolve merged adapter directory. Checked:\n  - "
+        f"{expected}"
+    )
+
+
+def load_merge_metadata(adapter_path: Path) -> Dict:
+    """Load merge metadata from a merged adapter run directory."""
+    metadata_path = adapter_path / "merge_metadata.json"
+    if not metadata_path.exists():
+        return {}
+    with metadata_path.open("r") as handle:
+        return json.load(handle)
+
+
+def _infer_task_from_path(path_str: str) -> Optional[str]:
+    """Infer a task name from an adapter path when possible."""
+    normalized = Path(path_str).resolve()
+    parts = normalized.parts
+    if "artifacts" in parts:
+        idx = parts.index("artifacts")
+        if idx + 1 < len(parts) and parts[idx + 1] in TASK_REGISTRY:
+            return parts[idx + 1]
+    return None
+
+
+def _unique_items(items: Iterable[str]) -> List[str]:
+    """Preserve order while de-duplicating items."""
+    seen = set()
+    ordered = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def infer_merged_source_tasks(metadata: Dict, fallback: Optional[List[str]] = None) -> List[str]:
+    """Infer merged source tasks from merge metadata or fallback list."""
+    tasks: List[str] = []
+    for entry in metadata.get("source_adapters", []):
+        task_name = entry.get("task")
+        if task_name:
+            tasks.append(task_name)
+            continue
+        path_str = entry.get("path")
+        if path_str:
+            inferred = _infer_task_from_path(path_str)
+            if inferred:
+                tasks.append(inferred)
+
+    if not tasks and fallback:
+        tasks = list(fallback)
+
+    return _unique_items(tasks)
+
+
+def build_merge_tag(metadata: Dict, task_names: Optional[List[str]] = None) -> str:
+    """Build a stable tag for merged adapters for metric file names."""
+    method = metadata.get("merge_method", "merged")
+    lambda_weight = metadata.get("lambda")
+    tasks = task_names or infer_merged_source_tasks(metadata)
+    tag_parts = ["merged", method]
+    if tasks:
+        tag_parts.extend(tasks)
+    if lambda_weight is not None:
+        tag_parts.append(f"lambda{_format_lambda(lambda_weight)}")
+    return "_".join(tag_parts)
 
 
 def get_task_module(task_name: str):
@@ -361,87 +519,16 @@ def create_merge_output_path(
     return output_path
 
 
-def evaluate_merged_adapter(
-    adapter_path: Path,
-    source_tasks: List[str],
-    split: str = "test",
-    save_results: bool = True,
-) -> Dict[str, Dict]:
-    """Evaluate merged adapter on all source tasks.
-
-    Runs evaluation on each source task and optionally saves results
-    to eval_results.json in the adapter directory.
-
-    Args:
-        adapter_path: Path to merged adapter directory
-        source_tasks: List of task names to evaluate on
-        split: Dataset split to evaluate (train, validation, test)
-        save_results: Whether to save results to eval_results.json
-
-    Returns:
-        Dictionary mapping task names to their evaluation metrics
-
-    Example:
-        >>> results = evaluate_merged_adapter(
-        ...     Path("artifacts/merged/uniform/asr_emotion/best"),
-        ...     ["asr", "emotion"],
-        ...     split="test"
-        ... )
-        >>> print(results)
-        {
-            "asr": {"wer": 0.025, "loss": 0.072},
-            "emotion": {"accuracy": 0.812, "loss": 0.543}
-        }
-    """
-    from experiments.evaluate_task import evaluate
-
-    results = {}
-    print(f"\n📊 Evaluating merged adapter on {len(source_tasks)} tasks ({split} split)")
-
-    for i, task in enumerate(source_tasks, 1):
-        print(f"\n[{i}/{len(source_tasks)}] Evaluating on {task}...")
-
-        try:
-            result = evaluate(
-                task=task,
-                adapter=str(adapter_path),
-                split=split,
-                enable_cache=False,
-                show_summary=True,
-            )
-            results[task] = result.metrics
-
-            # Print key metrics
-            print(f"✅ {task} evaluation complete:")
-            for key, value in sorted(result.metrics.items())[:5]:  # Show top 5 metrics
-                if isinstance(value, (int, float)):
-                    print(f"   {key}: {value:.4f}")
-
-        except Exception as e:
-            print(f"❌ Failed to evaluate on {task}: {e}")
-            results[task] = {"error": str(e)}
-
-    # Save results if requested
-    if save_results:
-        results_path = adapter_path / "eval_results.json"
-        with open(results_path, "w") as f:
-            json.dump({
-                "split": split,
-                "timestamp": datetime.now().isoformat(),
-                "results": results,
-            }, f, indent=2)
-        print(f"\n💾 Evaluation results saved to {results_path}")
-
-    return results
-
-
 __all__ = [
     "resolve_best_adapter",
     "load_adapter_weights",
     "create_merged_adapter_config",
     "save_merged_adapter",
     "create_merge_output_path",
-    "evaluate_merged_adapter",
     "get_task_module",
     "TASK_REGISTRY",
+    "resolve_merged_adapter_path",
+    "load_merge_metadata",
+    "infer_merged_source_tasks",
+    "build_merge_tag",
 ]

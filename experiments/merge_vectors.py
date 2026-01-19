@@ -308,7 +308,8 @@ def merge_adapters_cli(
 
         results = evaluate_merged_adapter(
             adapter_path=merged_path,
-            source_tasks=task_names,
+            task_names=task_names,
+            eval_tasks=task_names,
             split=eval_split,
             save_results=True,
         )

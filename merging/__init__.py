@@ -24,9 +24,9 @@ Usage:
 
 from merging.uniform import merge_uniform
 from merging.weighted import merge_weighted
+from merging.evaluate import evaluate_merged_adapter
 from merging.utils import (
     create_merge_output_path,
-    evaluate_merged_adapter,
     load_adapter_weights,
     resolve_best_adapter,
     save_merged_adapter,

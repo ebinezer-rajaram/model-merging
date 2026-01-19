@@ -95,6 +95,65 @@ def parse_args() -> argparse.Namespace:
     )
     eval_parser.set_defaults(confusion_matrix=True)
 
+    eval_merged_parser = subparsers.add_parser("evaluate-merged", help="Run evaluation for a merged adapter.")
+    eval_merged_parser.add_argument("--adapter-path", default=None, help="Path to merged adapter run/base directory.")
+    eval_merged_parser.add_argument(
+        "--method",
+        default=None,
+        choices=("uniform", "weighted", "task_vector"),
+        help="Merge method used (for resolving adapter path).",
+    )
+    eval_merged_parser.add_argument(
+        "--tasks",
+        nargs="+",
+        default=None,
+        help="Tasks merged into the adapter (e.g., asr intent).",
+    )
+    eval_merged_parser.add_argument(
+        "--lambda",
+        type=float,
+        dest="lambda_weight",
+        default=None,
+        help="Lambda weight for weighted merges (optional).",
+    )
+    eval_merged_parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Run identifier to resolve (best, latest, or run_YYYYMMDD_HHMMSS).",
+    )
+    eval_merged_parser.add_argument(
+        "--eval-tasks",
+        nargs="+",
+        default=None,
+        help="Tasks to evaluate on (defaults to merged source tasks).",
+    )
+    eval_merged_parser.add_argument(
+        "--split",
+        default="test",
+        choices=("train", "validation", "test"),
+        help="Dataset split to evaluate.",
+    )
+    eval_merged_parser.add_argument("--batch-size", type=int, default=None, help="Eval batch size override.")
+    eval_merged_parser.add_argument(
+        "--confusion-matrix",
+        action="store_true",
+        dest="confusion_matrix",
+        help="Generate confusion matrix for classification tasks.",
+    )
+    eval_merged_parser.add_argument(
+        "--no-confusion-matrix",
+        action="store_false",
+        dest="confusion_matrix",
+        help="Disable confusion matrix generation (default: True).",
+    )
+    eval_merged_parser.add_argument(
+        "--no-save-results",
+        action="store_false",
+        dest="save_results",
+        help="Disable saving merged evaluation summary.",
+    )
+    eval_merged_parser.set_defaults(confusion_matrix=True, save_results=True)
+
     return parser.parse_args()
 
 
@@ -186,6 +245,13 @@ def dispatch_evaluate(args: argparse.Namespace) -> None:
         )
 
 
+def dispatch_evaluate_merged(args: argparse.Namespace) -> None:
+    """Invoke the merged evaluation workflow."""
+    from experiments.evaluate_merged import evaluate_from_args
+
+    evaluate_from_args(args)
+
+
 def main() -> None:
     """Dispatch commands."""
     args = parse_args()
@@ -195,6 +261,8 @@ def main() -> None:
         dispatch_merge(args)
     elif args.command == "evaluate":
         dispatch_evaluate(args)
+    elif args.command == "evaluate-merged":
+        dispatch_evaluate_merged(args)
     else:
         raise NotImplementedError(f"Command '{args.command}' not supported.")
 
