@@ -5,12 +5,14 @@ from __future__ import annotations
 import random
 from collections import defaultdict
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-from datasets import Dataset, DatasetDict
+from datasets import Audio, Dataset, DatasetDict
 
 from core import resolve_num_proc
 from core.tasks.dataset import (
@@ -64,27 +66,6 @@ def _extract_audio_array(audio_data: Any) -> np.ndarray:
     elif isinstance(audio_data, np.ndarray):
         return audio_data.astype(np.float32)
 
-    # Handle torchcodec AudioDecoder objects
-    elif hasattr(audio_data, "get_frames_at"):
-        # AudioDecoder: decode all audio frames
-        try:
-            # Get all frames from start to end
-            # get_frames_at(start_index, end_index) returns (audio_tensor, info_dict)
-            frames = audio_data.get_frames_at(0, -1)
-            if frames is not None:
-                # frames is a tuple: (audio_tensor, info)
-                audio_tensor = frames[0] if isinstance(frames, tuple) else frames
-                # Convert torch tensor to numpy
-                audio_array = audio_tensor.numpy() if hasattr(audio_tensor, "numpy") else np.array(audio_tensor)
-                # Ensure 1D array (may be 2D with channels)
-                if audio_array.ndim > 1:
-                    # Average channels if stereo
-                    audio_array = audio_array.mean(axis=0)
-                return audio_array.astype(np.float32)
-        except Exception as e:
-            print(f"Warning: Could not decode AudioDecoder: {e}")
-            return np.array([], dtype=np.float32)
-
     # For any other object, try direct conversion
     else:
         try:
@@ -92,6 +73,7 @@ def _extract_audio_array(audio_data: Any) -> np.ndarray:
         except (TypeError, ValueError) as e:
             print(f"Warning: Could not extract audio array from {type(audio_data)}: {e}")
             return np.array([], dtype=np.float32)
+
 
 
 def _generate_ver_pairs(
@@ -151,12 +133,12 @@ def _generate_ver_pairs(
     # Shuffle the pair indices
     rng.shuffle(pair_indices)
 
-    # Now create pairs with audio references in one pass
+    # Now create pairs with decoded audio arrays in one pass (decode-on-access)
     all_pairs = []
     for idx_a, idx_b, label, speaker_id in pair_indices:
         all_pairs.append({
-            "audio_a": dataset[idx_a]["audio"],
-            "audio_b": dataset[idx_b]["audio"],
+            "audio_a": {"array": dataset[idx_a]["audio"]["array"]},
+            "audio_b": {"array": dataset[idx_b]["audio"]["array"]},
             "label": label,
             "speaker_id": speaker_id,
         })
@@ -169,6 +151,31 @@ def _generate_ver_pairs(
 
     # Create dataset from lists - audio_a and audio_b still contain dict/AudioDecoder references
     return Dataset.from_list(all_pairs)
+
+
+def _build_pairs_cache_dir(cache_root: Path, cache_meta: Dict[str, Any]) -> Path:
+    """Build a deterministic cache directory for speaker-verification pairs."""
+    payload = json.dumps(cache_meta, sort_keys=True, default=str).encode("utf-8")
+    cache_key = hashlib.md5(payload).hexdigest()[:16]
+    return cache_root / "pairs" / cache_key
+
+
+def _load_cached_pairs(cache_dir: Path, split_name: str) -> Optional[Dataset]:
+    """Load cached pairs split if available."""
+    split_dir = cache_dir / split_name
+    if not split_dir.exists():
+        return None
+    try:
+        return Dataset.load_from_disk(str(split_dir))
+    except Exception:
+        return None
+
+
+def _save_cached_pairs(cache_dir: Path, split_name: str, dataset: Dataset) -> None:
+    """Save pairs split to cache."""
+    split_dir = cache_dir / split_name
+    split_dir.mkdir(parents=True, exist_ok=True)
+    dataset.save_to_disk(str(split_dir))
 
 
 def _add_duration_to_pairs(
@@ -353,6 +360,12 @@ def load_speaker_ver_dataset(
 
     base_dataset = base_dataset_dict["train"]
 
+    # Ensure decode-on-access matches other tasks (audio["array"])
+    try:
+        base_dataset = base_dataset.cast_column(audio_column_name, Audio())
+    except Exception as e:
+        print(f"Warning: Could not cast audio column to Audio() for decode-on-access: {e}")
+
     # Determine split approach
     if split_by_speakers:
         # Zero-shot approach: Split speakers first, then generate pairs per group
@@ -408,23 +421,79 @@ def load_speaker_ver_dataset(
 
         print(f"Base dataset splits: {len(train_base)} train, {len(val_base)} val, {len(test_base)} test samples")
 
-        # Generate pairs separately for each split
+        # Generate pairs separately for each split (with optional caching)
         print(f"\nGenerating speaker verification pairs ({pairs_per_speaker} per speaker)...")
 
-        train_pairs = _generate_ver_pairs(train_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 42) if len(train_base) > 0 else None
-        val_pairs = _generate_ver_pairs(val_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 43) if len(val_base) > 0 else None
-        test_pairs = _generate_ver_pairs(test_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 44) if len(test_base) > 0 else None
+        cache_meta = {
+            "dataset": dataset_name,
+            "config": dataset_config,
+            "max_speakers": max_speakers,
+            "selected_speakers": selected_speakers,
+            "pairs_per_speaker": pairs_per_speaker,
+            "max_duration": max_duration,
+            "min_duration": min_duration,
+            "split_by_speakers": split_by_speakers,
+            "split_percentages": split_percentages,
+            "seed": seed,
+            "base_count": len(base_dataset),
+        }
+        pairs_cache_dir = _build_pairs_cache_dir(cache_root, cache_meta)
+
+        load_pairs_cache = cache_splits and not force_rebuild
+        save_pairs_cache = cache_splits
+        train_pairs = _load_cached_pairs(pairs_cache_dir, "train") if load_pairs_cache else None
+        val_pairs = _load_cached_pairs(pairs_cache_dir, "validation") if load_pairs_cache else None
+        test_pairs = _load_cached_pairs(pairs_cache_dir, "test") if load_pairs_cache else None
+
+        if train_pairs is None and len(train_base) > 0:
+            train_pairs = _generate_ver_pairs(train_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 42)
+            if save_pairs_cache:
+                _save_cached_pairs(pairs_cache_dir, "train", train_pairs)
+
+        if val_pairs is None and len(val_base) > 0:
+            val_pairs = _generate_ver_pairs(val_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 43)
+            if save_pairs_cache:
+                _save_cached_pairs(pairs_cache_dir, "validation", val_pairs)
+
+        if test_pairs is None and len(test_base) > 0:
+            test_pairs = _generate_ver_pairs(test_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 44)
+            if save_pairs_cache:
+                _save_cached_pairs(pairs_cache_dir, "test", test_pairs)
 
         print(f"✓ Zero-shot split: Val/test speakers are completely unseen during training")
 
     else:
         # Standard approach: Generate all pairs first, then split randomly
         print(f"\nGenerating speaker verification pairs ({pairs_per_speaker} per speaker)...")
-        pairs_dataset = _generate_ver_pairs(
-            base_dataset,
-            pairs_per_speaker=pairs_per_speaker,
-            seed=seed + 42,
-        )
+
+        cache_meta = {
+            "dataset": dataset_name,
+            "config": dataset_config,
+            "max_speakers": max_speakers,
+            "selected_speakers": selected_speakers,
+            "pairs_per_speaker": pairs_per_speaker,
+            "max_duration": max_duration,
+            "min_duration": min_duration,
+            "split_by_speakers": split_by_speakers,
+            "split_percentages": split_percentages,
+            "seed": seed,
+            "base_count": len(base_dataset),
+        }
+        pairs_cache_dir = _build_pairs_cache_dir(cache_root, cache_meta)
+        load_pairs_cache = cache_splits and not force_rebuild
+        save_pairs_cache = cache_splits
+
+        train_pairs = _load_cached_pairs(pairs_cache_dir, "train") if load_pairs_cache else None
+        val_pairs = _load_cached_pairs(pairs_cache_dir, "validation") if load_pairs_cache else None
+        test_pairs = _load_cached_pairs(pairs_cache_dir, "test") if load_pairs_cache else None
+
+        pairs_dataset = None
+        if train_pairs is None or val_pairs is None or test_pairs is None:
+            pairs_dataset = _generate_ver_pairs(
+                base_dataset,
+                pairs_per_speaker=pairs_per_speaker,
+                seed=seed + 42,
+            )
 
         # Split into train/val/test at the pair level
         # Note: We don't stratify because the pairs are already balanced (50/50)
@@ -438,17 +507,22 @@ def load_speaker_ver_dataset(
                 seed=seed,
                 stratify_by_column=None,  # Don't stratify (pairs already balanced)
             )
-            train_pairs = pairs_dict.get("train")
-            val_pairs = pairs_dict.get("validation")
-            test_pairs = pairs_dict.get("test")
+            train_pairs = train_pairs or pairs_dict.get("train")
+            val_pairs = val_pairs or pairs_dict.get("validation")
+            test_pairs = test_pairs or pairs_dict.get("test")
         else:
             # Default: 80/10/10 split (no stratification needed, pairs are balanced)
             splits = pairs_dataset.train_test_split(test_size=0.2, seed=seed)
             train_val_split = splits["train"].train_test_split(test_size=0.125, seed=seed)
 
-            train_pairs = train_val_split["train"]
-            val_pairs = train_val_split["test"]
-            test_pairs = splits["test"]
+            train_pairs = train_pairs or train_val_split["train"]
+            val_pairs = val_pairs or train_val_split["test"]
+            test_pairs = test_pairs or splits["test"]
+
+        if save_pairs_cache and train_pairs is not None and val_pairs is not None and test_pairs is not None:
+            _save_cached_pairs(pairs_cache_dir, "train", train_pairs)
+            _save_cached_pairs(pairs_cache_dir, "validation", val_pairs)
+            _save_cached_pairs(pairs_cache_dir, "test", test_pairs)
 
         print(f"⚠ Standard split: Val/test may contain seen speakers (different audio pairs)")
 
@@ -579,9 +653,9 @@ class SpeakerVerCollator:
 
             # Extract array - handle both dict format and AudioDecoder objects
             if isinstance(audio_a, dict):
-                audio_a = audio_a.get("array", audio_a)
+                audio_a = audio_a.get("array", np.array([], dtype=np.float32))
             if isinstance(audio_b, dict):
-                audio_b = audio_b.get("array", audio_b)
+                audio_b = audio_b.get("array", np.array([], dtype=np.float32))
 
             # If still not a numpy array, use the extraction function
             if not isinstance(audio_a, np.ndarray):
@@ -679,18 +753,14 @@ class SpeakerVerCollator:
 
         # Mask everything except the assistant's response
         for i, label in enumerate(label_strings):
-            # Tokenize the ground truth label to identify it in the full sequence
             label_tokens = tokenizer.encode(label, add_special_tokens=False)
-
-            # Find where the label appears in the input_ids
             input_ids = inputs["input_ids"][i]
             label_length = len(label_tokens)
 
-            # Search for the label tokens in the sequence
+            # Search for the label tokens in the sequence, preferring the last match
             found = False
-            for j in range(len(input_ids) - label_length + 1):
+            for j in range(len(input_ids) - label_length, -1, -1):
                 if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
-                    # Mask everything before the label
                     labels[i, :j] = -100
                     found = True
                     break
