@@ -27,6 +27,7 @@ from core.tasks.dataset import (
     add_duration_to_dataset,
     assemble_splits,
     cache_and_sample_splits,
+    filter_by_duration,
     load_dataset,
     print_dataset_summary,
 )
@@ -145,7 +146,7 @@ def load_covost2_dataset(
         before = len(dataset[split_name])
         ds = dataset[split_name]
 
-        # Manually build list of valid indices by checking raw bytes
+        # Manually build list of valid indices by checking raw bytes or paths
         valid_indices = []
         for idx in range(len(ds)):
             try:
@@ -156,7 +157,9 @@ def load_covost2_dataset(
                 # Check if bytes field exists and is non-empty
                 if isinstance(audio_data, dict):
                     audio_bytes = audio_data.get("bytes")
-                    if audio_bytes and len(audio_bytes) > 0:
+                    audio_path = audio_data.get("path")
+                    audio_array = audio_data.get("array")
+                    if (audio_bytes and len(audio_bytes) > 0) or audio_path or audio_array is not None:
                         valid_indices.append(idx)
                 elif audio_data is not None:
                     # If not a dict, assume it's valid
@@ -175,11 +178,11 @@ def load_covost2_dataset(
 
     # Filter out examples containing "REMOVE" (text-only filter)
     # Now safe to filter since empty audio bytes have been removed
-    def _filter_remove(example: Dict[str, Any]) -> bool:
+    def _filter_remove(source_text: Any, translation_text: Any) -> bool:
         """Filter out examples containing 'REMOVE' in source or translation."""
-        source_text = str(example.get("text", ""))
-        translation_text = str(example.get("translation", ""))
-        return "REMOVE" not in source_text and "REMOVE" not in translation_text
+        source_str = str(source_text or "")
+        translation_str = str(translation_text or "")
+        return "REMOVE" not in source_str and "REMOVE" not in translation_str
 
     filtered_counts = {}
     for split_name in list(dataset.keys()):
@@ -187,7 +190,8 @@ def load_covost2_dataset(
         # Filter on text columns only - doesn't access audio
         dataset[split_name] = dataset[split_name].filter(
             _filter_remove,
-            desc=f"Filtering {split_name} for REMOVE keyword"
+            input_columns=["text", "translation"],
+            desc=f"Filtering {split_name} for REMOVE keyword",
         )
         after = len(dataset[split_name])
         if after != before:
@@ -196,76 +200,91 @@ def load_covost2_dataset(
     if filtered_counts:
         print(f"🚫 Filtered examples containing 'REMOVE': {filtered_counts}")
 
-    # Add duration information
-    effective_num_proc = resolve_num_proc(num_proc)
-    dataset = add_duration_to_dataset(dataset, audio_column=audio_column_name, num_proc=effective_num_proc)
+    # Build cache root early so duration caching matches other tasks
+    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
 
-    # Filter out corrupted audio files by attempting to decode them
-    # This is more thorough than just checking bytes - some files have valid bytes but corrupt data
+    # Add duration information (with caching)
+    effective_num_proc = resolve_num_proc(num_proc)
+    dataset = add_duration_to_dataset(
+        dataset,
+        audio_column=audio_column_name,
+        num_proc=effective_num_proc,
+        cache_dir=cache_root if not force_rebuild else None,
+    )
+
+    # Filter out corrupted audio files without triggering dataset audio decoding
+    # Some rows have empty bytes; decoding them inside datasets.filter crashes before our handler runs.
     print("🔍 Checking for corrupted audio files...")
     corrupted_counts = {}
     for split_name in list(dataset.keys()):
         before = len(dataset[split_name])
+        ds = dataset[split_name]
+        valid_indices = []
 
-        def _has_valid_audio(example: Dict[str, Any], idx: int) -> bool:
-            """Check if audio can be decoded successfully."""
+        for idx in range(len(ds)):
             try:
-                # Try to access the audio array - this will decode and fail for corrupted files
-                audio_data = example[audio_column_name]
+                row = ds.data.slice(idx, 1).to_pydict()
+                audio_data = row[audio_column_name][0]
+
                 if isinstance(audio_data, dict):
-                    _ = audio_data["array"]
+                    audio_bytes = audio_data.get("bytes")
+                    audio_path = audio_data.get("path")
+                    audio_array = audio_data.get("array")
+
+                    if (
+                        audio_bytes is not None
+                        and len(audio_bytes) == 0
+                        and not audio_path
+                        and audio_array is None
+                    ):
+                        raise ValueError("empty audio bytes")
+
+                    if audio_path:
+                        path = Path(audio_path)
+                        # Only validate existence for absolute paths; some datasets store relative paths.
+                        if path.is_absolute():
+                            if not path.is_file() or path.stat().st_size == 0:
+                                raise ValueError("missing/empty audio file")
+
+                    if (
+                        (audio_bytes is not None and len(audio_bytes) > 0)
+                        or audio_path
+                        or audio_array is not None
+                    ):
+                        valid_indices.append(idx)
+                    else:
+                        raise ValueError("missing audio content")
+                elif audio_data is not None:
+                    valid_indices.append(idx)
                 else:
-                    # For AudioDecoder objects, try to get the array
-                    _ = audio_data.array if hasattr(audio_data, 'array') else None
-                return True
-            except (RuntimeError, ValueError, KeyError, Exception) as e:
-                # Log which file failed (if we have an id)
-                sample_id = example.get("id", f"index_{idx}")
-                print(f"⚠️  Found corrupted audio at {split_name}[{idx}] (id={sample_id}): {str(e)[:100]}")
-                return False
+                    raise ValueError("missing audio content")
+            except Exception as e:
+                sample_id = None
+                try:
+                    sample_id = row.get("id", [None])[0]
+                except Exception:
+                    sample_id = None
+                sample_label = sample_id if sample_id is not None else f"index_{idx}"
+                print(
+                    f"⚠️  Found corrupted audio at {split_name}[{idx}] (id={sample_label}): {str(e)[:100]}"
+                )
 
-        # Filter with index tracking for better error messages
-        dataset[split_name] = dataset[split_name].filter(
-            _has_valid_audio,
-            with_indices=True,
-            desc=f"Checking {split_name} audio integrity",
-            num_proc=1  # Use single process to avoid pickling issues with audio decoders
-        )
-
-        after = len(dataset[split_name])
-        if after != before:
-            corrupted_counts[split_name] = before - after
+        if len(valid_indices) < before:
+            dataset[split_name] = ds.select(valid_indices)
+            corrupted_counts[split_name] = before - len(valid_indices)
 
     if corrupted_counts:
         print(f"🚫 Filtered corrupted audio files: {corrupted_counts}")
 
-    # Filter by duration if specified
-    if max_duration is not None or min_duration is not None:
-        def _keep_duration(example: dict) -> bool:
-            duration = example.get("duration") or 0.0
-            duration_float = float(duration)
-            if max_duration is not None and duration_float > max_duration:
-                return False
-            if min_duration is not None and duration_float < min_duration:
-                return False
-            return True
-
-        for split_name in list(dataset.keys()):
-            before = len(dataset[split_name])
-            dataset[split_name] = dataset[split_name].filter(_keep_duration)
-            after = len(dataset[split_name])
-            if after != before:
-                filtered_count = before - after
-                duration_info = []
-                if max_duration is not None:
-                    duration_info.append(f">{max_duration:.1f}s")
-                if min_duration is not None:
-                    duration_info.append(f"<{min_duration:.1f}s")
-                duration_str = " or ".join(duration_info)
-                print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
+    # Filter by duration if specified (with caching)
+    dataset = filter_by_duration(
+        dataset,
+        max_duration=max_duration,
+        min_duration=min_duration,
+        cache_dir=cache_root if not force_rebuild else None,
+    )
 
     # Build cache path
-    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
     dataset_key = dataset_name.replace("/", "_")
     config_key = dataset_config or "default"
     cache_name = (

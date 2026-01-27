@@ -29,7 +29,7 @@ dataset:
   dataset_name: fixie-ai/covost2      # CoVoST2 (language pair automatically set from top-level 'language' parameter)
   # Sample limits
   max_train_samples: 50000            # null = use all available
-  max_validation_samples: 10000
+  max_validation_samples: 5000
   max_test_samples: 5000
   # Audio filtering
   max_duration: 20.0                  # Filter out audio longer than this (seconds)
@@ -60,9 +60,9 @@ training:
   gradient_checkpointing_kwargs:
     use_reentrant: false
   # Optimization
-  learning_rate: 1e-5
+  learning_rate: 3e-5
   lr_scheduler_type: cosine
-  warmup_ratio: 0.15                  # Higher warmup for ST (complex task)
+  warmup_ratio: 0.05                  # Higher warmup for ST (complex task)
   weight_decay: 0.01
   max_grad_norm: 1.0
   # Schedule
@@ -71,7 +71,7 @@ training:
   eval_steps: 100
   save_strategy: steps
   save_steps: 100
-  initial_eval: false
+  initial_eval: true
   # Checkpointing
   save_total_limit: 4
   resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
