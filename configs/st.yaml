@@ -82,9 +82,9 @@ training:
   metric_for_best_model: bleu
   greater_is_better: true             # BLEU: higher is better
   # Data loading
-  dataloader_num_workers: 8
+  dataloader_num_workers: 16
   dataloader_pin_memory: true
-  dataloader_prefetch_factor: 2
+  dataloader_prefetch_factor: 4
   group_by_length: false              # Important for variable length audio
   length_column_name: duration
   # Evaluation

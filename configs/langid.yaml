@@ -97,9 +97,9 @@ training:
   metric_for_best_model: eval_accuracy
   greater_is_better: true
   # Data loading
-  dataloader_num_workers: 8
+  dataloader_num_workers: 16
   dataloader_pin_memory: true
-  dataloader_prefetch_factor: 2
+  dataloader_prefetch_factor: 4
   group_by_length: true
   length_column_name: duration
   balanced_sampling: null             # Options: null (default), "balanced_batch", "weighted"

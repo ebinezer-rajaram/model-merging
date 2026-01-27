@@ -31,7 +31,7 @@ dataset:
   seed: 0
   num_proc: auto
   cache_splits: true
-  force_rebuild: true                 # Force rebuild to ensure we get fresh data
+  force_rebuild: false                 # Force rebuild to ensure we get fresh data
   # Sample limits
   max_speakers: 100                   # Select top 100 speakers by sample count
   pairs_per_speaker: 200              # Generate 200 pairs per speaker (100 pos + 100 neg)
@@ -71,7 +71,7 @@ loss:
 # Training Configuration
 training:
   # Compute & batching
-  per_device_train_batch_size: 16     # Smaller batch size due to dual audio inputs (longer sequences)
+  per_device_train_batch_size: 16   # Smaller batch size due to dual audio inputs (longer sequences)
   per_device_eval_batch_size: 16
   gradient_accumulation_steps: 2
   bf16: true
@@ -86,25 +86,25 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   # Schedule
-  num_train_epochs: 10
+  num_train_epochs: 2
   eval_strategy: steps
-  eval_steps: 100
+  eval_steps: 50
   save_strategy: steps
-  save_steps: 100
+  save_steps: 50
   initial_eval: true
   # Checkpointing
   save_total_limit: 3
-  resume_from_checkpoint: auto        # Options: null (start fresh), "auto" (detect latest), or explicit path
+  resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
-  early_stopping_patience: 5
+  early_stopping_patience: 10
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
-  metric_for_best_model: eval_accuracy  # Binary classification: use accuracy
+  metric_for_best_model: eval_macro_f1  # Binary classification: use accuracy
   greater_is_better: true
   # Data loading
-  dataloader_num_workers: 8
+  dataloader_num_workers: 16
   dataloader_pin_memory: true
-  dataloader_prefetch_factor: 2
+  dataloader_prefetch_factor: 4
   group_by_length: false              # Don't group by length (pairs have variable combined length)
   balanced_sampling: null             # Pairs should already be balanced (50/50), so null is appropriate
   # Evaluation
@@ -119,7 +119,7 @@ training:
     - wandb
   # Generation
   generation_kwargs:
-    max_new_tokens: 3                 # "yes" or "no" are very short
+    max_new_tokens: 2                 # "yes" or "no" are very short
     do_sample: false                  # Greedy decoding for deterministic results
     num_beams: 1                      # No beam search needed
 
