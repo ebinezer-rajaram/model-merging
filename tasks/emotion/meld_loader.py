@@ -43,6 +43,11 @@ def load_meld_from_local(
         DatasetDict with train, validation, test splits
     """
     data_dir = Path(data_dir)
+    if not data_dir.exists():
+        fallback_dir = Path("data") / data_dir
+        if fallback_dir.exists():
+            print(f"Data directory not found at {data_dir}, using {fallback_dir} instead.")
+            data_dir = fallback_dir
 
     # Load CSV annotations
     train_csv = data_dir / "train_sent_emo.csv"
