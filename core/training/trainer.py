@@ -115,15 +115,36 @@ class CustomTrainer(Trainer):
                     continue
                 prompt_len = min(prompt_len, seq_len)
 
-                source_tokens = input_ids[row_idx, :prompt_len]
-                dest_len = min(prompt_len, max_prompt_len)
+                if attention_mask is not None:
+                    non_pad = (attention_mask[row_idx] != 0).nonzero(as_tuple=False).squeeze(-1)
+                else:
+                    non_pad = (input_ids[row_idx] != pad_token_id).nonzero(as_tuple=False).squeeze(-1)
+
+                if non_pad.numel() == 0:
+                    continue
+
+                first_non_pad = int(non_pad[0].item())
+                non_pad_len = int(non_pad.numel())
+
+                # prompt_len is an absolute index into the full (padded) sequence.
+                # Convert to a length within the non-padded region so we don't
+                # accidentally include the assistant answer tokens.
+                rel_prompt_len = max(0, min(prompt_len - first_non_pad, non_pad_len))
+                if rel_prompt_len <= 0:
+                    continue
+
+                start_idx = first_non_pad
+                end_idx = min(first_non_pad + rel_prompt_len, seq_len)
+                source_tokens = input_ids[row_idx, start_idx:end_idx]
+
+                dest_len = min(source_tokens.size(0), max_prompt_len)
                 new_input_ids[row_idx, -dest_len:] = source_tokens[-dest_len:]
 
                 if new_attention_mask is not None:
                     if attention_mask is not None:
-                        source_mask = attention_mask[row_idx, :prompt_len]
+                        source_mask = attention_mask[row_idx, start_idx:end_idx]
                     else:
-                        source_mask = source_tokens.new_ones((prompt_len,), dtype=new_attention_mask.dtype)
+                        source_mask = source_tokens.new_ones((source_tokens.size(0),), dtype=new_attention_mask.dtype)
                     new_attention_mask[row_idx, -dest_len:] = source_mask[-dest_len:]
 
             gen_inputs["input_ids"] = new_input_ids
@@ -173,7 +194,14 @@ class CustomTrainer(Trainer):
 
         generated = model.generate(**gen_inputs, **final_gen_kwargs)
 
-        preds = generated.detach().cpu()
+        # For metrics, return only newly generated tokens (exclude the prompt).
+        input_len = None
+        if "input_ids" in gen_inputs:
+            input_len = gen_inputs["input_ids"].shape[1]
+        if input_len is not None and generated.size(1) >= input_len:
+            preds = generated[:, input_len:].detach().cpu()
+        else:
+            preds = generated.detach().cpu()
         label_ids = inputs["labels"].detach().cpu() if has_labels else None
 
         return loss, preds, label_ids
