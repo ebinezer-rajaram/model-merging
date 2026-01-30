@@ -62,22 +62,22 @@ training:
   # Optimization
   learning_rate: 3e-5
   lr_scheduler_type: cosine
-  warmup_ratio: 0.05                  # Higher warmup for ST (complex task)
+  warmup_ratio: 0.03                  # Higher warmup for ST (complex task)
   weight_decay: 0.01
   max_grad_norm: 1.0
   # Schedule
   num_train_epochs: 3
   eval_strategy: steps
-  eval_steps: 100
+  eval_steps: 500
   save_strategy: steps
-  save_steps: 100
+  save_steps: 500
   initial_eval: true
   # Checkpointing
   save_total_limit: 4
   resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
-  early_stopping_patience: 5
-  early_stopping_threshold: 0.1       # BLEU improvement threshold
+  early_stopping_patience: 10
+  early_stopping_threshold: 0       # BLEU improvement threshold
   load_best_model_at_end: true
   metric_for_best_model: bleu
   greater_is_better: true             # BLEU: higher is better
@@ -101,7 +101,7 @@ training:
   generation_kwargs:
     max_new_tokens: 128               # Translations can be longer
     do_sample: false
-    num_beams: 1                      # Beam search for better translations
+    num_beams: 4                      # Beam search for better translations
     length_penalty: 1.0               # Linear penalty (crucial for stable BLEU)
 
 # Artifacts Configuration
