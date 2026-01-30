@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any
+
+CURRENT_DIR = Path(__file__).resolve().parent
+PACKAGE_ROOT = CURRENT_DIR.parent
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
 
 from core import (
     ensure_dir,
@@ -64,8 +70,6 @@ from tasks.speaker_ver import (
     get_config_path as get_speaker_ver_config_path,
 )
 
-
-PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
