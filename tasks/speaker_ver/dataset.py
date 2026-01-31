@@ -24,8 +24,6 @@ from core.tasks.dataset import (
     print_dataset_summary,
 )
 
-# Reuse speaker selection from speaker_id
-from tasks.speaker_id.dataset import _select_speakers
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "speaker_ver" / "datasets"
@@ -78,14 +76,14 @@ def _extract_audio_array(audio_data: Any) -> np.ndarray:
 
 def _generate_ver_pairs(
     dataset: Dataset,
-    pairs_per_speaker: int,
+    total_pairs: int,
     seed: int,
 ) -> Dataset:
     """Generate balanced positive/negative speaker verification pairs.
 
     Args:
         dataset: Dataset with 'label' and 'audio' columns
-        pairs_per_speaker: Total number of pairs per speaker (split 50/50 positive/negative)
+        total_pairs: Total number of pairs to generate (split 50/50 positive/negative)
         seed: Random seed for reproducibility
 
     Returns:
@@ -100,35 +98,48 @@ def _generate_ver_pairs(
         speaker_to_indices[speaker_id].append(idx)
 
     speakers = list(speaker_to_indices.keys())
-    num_pos = pairs_per_speaker // 2
-    num_neg = pairs_per_speaker // 2
+    if len(speakers) < 2:
+        print("Warning: Need at least 2 speakers to generate negative pairs.")
+        return Dataset.from_list([])
+
+    speakers_with_pos = [s for s in speakers if len(speaker_to_indices[s]) >= 2]
+    if not speakers_with_pos:
+        print("Warning: No speakers with >=2 samples; cannot generate positive pairs.")
+        return Dataset.from_list([])
+
+    if total_pairs <= 0:
+        return Dataset.from_list([])
+
+    if total_pairs % 2 != 0:
+        print(f"Warning: total_pairs={total_pairs} is odd; dropping 1 to keep 50/50 balance.")
+        total_pairs -= 1
+
+    num_pos = total_pairs // 2
+    num_neg = total_pairs // 2
+
+    # Precompute weights to favor speakers with more data (more realistic sampling)
+    speaker_weights = [len(speaker_to_indices[s]) for s in speakers]
+    pos_weights = [len(speaker_to_indices[s]) * (len(speaker_to_indices[s]) - 1) for s in speakers_with_pos]
 
     # Generate pair indices first (don't access audio data yet)
     pair_indices = []
 
     # Generate positive pairs (same speaker, different utterances)
-    for speaker, indices in speaker_to_indices.items():
-        if len(indices) < 2:
-            continue  # Need at least 2 samples for positive pair
-
-        for _ in range(num_pos):
-            idx_a, idx_b = rng.sample(indices, 2)
-            pair_indices.append((idx_a, idx_b, 1, str(speaker)))
+    for _ in range(num_pos):
+        speaker = rng.choices(speakers_with_pos, weights=pos_weights, k=1)[0]
+        indices = speaker_to_indices[speaker]
+        idx_a, idx_b = rng.sample(indices, 2)
+        pair_indices.append((idx_a, idx_b, 1, str(speaker)))
 
     # Generate negative pairs (different speakers)
-    for speaker in speakers:
-        indices_a = speaker_to_indices[speaker]
-
-        for _ in range(num_neg):
-            # Sample a different speaker
-            other_speakers = [s for s in speakers if s != speaker]
-            if not other_speakers:
-                continue
-
-            other_speaker = rng.choice(other_speakers)
-            idx_a = rng.choice(indices_a)
-            idx_b = rng.choice(speaker_to_indices[other_speaker])
-            pair_indices.append((idx_a, idx_b, 0, f"{speaker}_{other_speaker}"))
+    for _ in range(num_neg):
+        speaker_a = rng.choices(speakers, weights=speaker_weights, k=1)[0]
+        speaker_b = speaker_a
+        while speaker_b == speaker_a:
+            speaker_b = rng.choices(speakers, weights=speaker_weights, k=1)[0]
+        idx_a = rng.choice(speaker_to_indices[speaker_a])
+        idx_b = rng.choice(speaker_to_indices[speaker_b])
+        pair_indices.append((idx_a, idx_b, 0, f"{speaker_a}_{speaker_b}"))
 
     # Shuffle the pair indices
     rng.shuffle(pair_indices)
@@ -260,8 +271,7 @@ def load_speaker_ver_dataset(
     max_train_samples: Optional[int] = None,
     max_validation_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
-    max_speakers: Optional[int] = None,
-    pairs_per_speaker: int = 200,
+    total_pairs: int = 20000,
     max_duration: Optional[float] = None,
     min_duration: Optional[float] = None,
     max_audio_length: Optional[float] = None,  # Not used in loader, used by collator
@@ -293,7 +303,7 @@ def load_speaker_ver_dataset(
     max_train_samples = _normalize_target_count("max_train_samples", max_train_samples)
     max_validation_samples = _normalize_target_count("max_validation_samples", max_validation_samples)
     max_test_samples = _normalize_target_count("max_test_samples", max_test_samples)
-    max_speakers = _normalize_target_count("max_speakers", max_speakers)
+    total_pairs = int(total_pairs)
 
     # Load and prepare base dataset
     dataset, audio_column_name = load_and_prepare_dataset(
@@ -313,24 +323,12 @@ def load_speaker_ver_dataset(
         data_dir=data_dir,
     )
 
-    # Check dataset before speaker selection
-    print(f"\nDataset splits before speaker selection: {list(dataset.keys())}")
+    # Check dataset before speaker splitting
+    print(f"\nDataset splits before speaker splitting: {list(dataset.keys())}")
     for split_name, split_ds in dataset.items():
         num_samples = len(split_ds)
         num_speakers = len(set(split_ds["label"])) if "label" in split_ds.column_names else 0
         print(f"  {split_name}: {num_samples} samples, {num_speakers} speakers")
-
-    # Apply speaker selection
-    dataset, selected_speakers = _select_speakers(
-        dataset,
-        max_speakers=max_speakers,
-        seed=seed,
-        train_split="train" if "train" in dataset else None,
-    )
-
-    # Check after speaker selection
-    if selected_speakers:
-        print(f"\nAfter speaker selection: {len(selected_speakers)} speakers selected")
 
     # Use only the train split for generating pairs
     # VoxCeleb2 typically only has a train split
@@ -365,6 +363,11 @@ def load_speaker_ver_dataset(
         base_dataset = base_dataset.cast_column(audio_column_name, Audio())
     except Exception as e:
         print(f"Warning: Could not cast audio column to Audio() for decode-on-access: {e}")
+
+    # Enforce speaker-disjoint splits for open-set verification
+    if not split_by_speakers:
+        print("Warning: split_by_speakers=False requested; overriding to True for speaker-disjoint splits.")
+    split_by_speakers = True
 
     # Determine split approach
     if split_by_speakers:
@@ -421,15 +424,50 @@ def load_speaker_ver_dataset(
 
         print(f"Base dataset splits: {len(train_base)} train, {len(val_base)} val, {len(test_base)} test samples")
 
-        # Generate pairs separately for each split (with optional caching)
-        print(f"\nGenerating speaker verification pairs ({pairs_per_speaker} per speaker)...")
+        # Determine target pair counts per split
+        if split_percentages:
+            if isinstance(split_percentages, (list, tuple)):
+                train_pct, val_pct, test_pct = split_percentages
+            else:
+                train_pct = split_percentages.get("train", 0.8)
+                val_pct = split_percentages.get("validation", 0.1)
+                test_pct = split_percentages.get("test", 0.1)
+        else:
+            train_pct, val_pct, test_pct = 0.8, 0.1, 0.1
+
+        train_pairs_target = int(total_pairs * train_pct)
+        val_pairs_target = int(total_pairs * val_pct)
+        test_pairs_target = total_pairs - train_pairs_target - val_pairs_target
+
+        # Ensure even counts for 50/50 balance
+        if val_pairs_target > 0 and val_pairs_target % 2 != 0:
+            val_pairs_target -= 1
+            train_pairs_target += 1
+        if test_pairs_target > 0 and test_pairs_target % 2 != 0:
+            test_pairs_target -= 1
+            train_pairs_target += 1
+        if train_pairs_target % 2 != 0:
+            train_pairs_target -= 1
+
+        adjusted_total_pairs = train_pairs_target + val_pairs_target + test_pairs_target
+        if adjusted_total_pairs != total_pairs:
+            print(
+                "Warning: Adjusted total_pairs for even split counts "
+                f"({total_pairs} → {adjusted_total_pairs})."
+            )
+
+        print(
+            f"\nGenerating speaker verification pairs (total={adjusted_total_pairs}; "
+            f"train={train_pairs_target}, val={val_pairs_target}, test={test_pairs_target})..."
+        )
 
         cache_meta = {
             "dataset": dataset_name,
             "config": dataset_config,
-            "max_speakers": max_speakers,
-            "selected_speakers": selected_speakers,
-            "pairs_per_speaker": pairs_per_speaker,
+            "total_pairs": total_pairs,
+            "train_pairs_target": train_pairs_target,
+            "val_pairs_target": val_pairs_target,
+            "test_pairs_target": test_pairs_target,
             "max_duration": max_duration,
             "min_duration": min_duration,
             "split_by_speakers": split_by_speakers,
@@ -446,17 +484,17 @@ def load_speaker_ver_dataset(
         test_pairs = _load_cached_pairs(pairs_cache_dir, "test") if load_pairs_cache else None
 
         if train_pairs is None and len(train_base) > 0:
-            train_pairs = _generate_ver_pairs(train_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 42)
+            train_pairs = _generate_ver_pairs(train_base, total_pairs=train_pairs_target, seed=seed + 42)
             if save_pairs_cache:
                 _save_cached_pairs(pairs_cache_dir, "train", train_pairs)
 
         if val_pairs is None and len(val_base) > 0:
-            val_pairs = _generate_ver_pairs(val_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 43)
+            val_pairs = _generate_ver_pairs(val_base, total_pairs=val_pairs_target, seed=seed + 43)
             if save_pairs_cache:
                 _save_cached_pairs(pairs_cache_dir, "validation", val_pairs)
 
         if test_pairs is None and len(test_base) > 0:
-            test_pairs = _generate_ver_pairs(test_base, pairs_per_speaker=pairs_per_speaker, seed=seed + 44)
+            test_pairs = _generate_ver_pairs(test_base, total_pairs=test_pairs_target, seed=seed + 44)
             if save_pairs_cache:
                 _save_cached_pairs(pairs_cache_dir, "test", test_pairs)
 
@@ -464,14 +502,12 @@ def load_speaker_ver_dataset(
 
     else:
         # Standard approach: Generate all pairs first, then split randomly
-        print(f"\nGenerating speaker verification pairs ({pairs_per_speaker} per speaker)...")
+        print(f"\nGenerating speaker verification pairs (total={total_pairs})...")
 
         cache_meta = {
             "dataset": dataset_name,
             "config": dataset_config,
-            "max_speakers": max_speakers,
-            "selected_speakers": selected_speakers,
-            "pairs_per_speaker": pairs_per_speaker,
+            "total_pairs": total_pairs,
             "max_duration": max_duration,
             "min_duration": min_duration,
             "split_by_speakers": split_by_speakers,
@@ -491,7 +527,7 @@ def load_speaker_ver_dataset(
         if train_pairs is None or val_pairs is None or test_pairs is None:
             pairs_dataset = _generate_ver_pairs(
                 base_dataset,
-                pairs_per_speaker=pairs_per_speaker,
+                total_pairs=total_pairs,
                 seed=seed + 42,
             )
 
@@ -545,12 +581,11 @@ def load_speaker_ver_dataset(
     # Build cache path
     dataset_key = dataset_name.replace("/", "_")
     config_key = dataset_config or "default"
-    speakers_key = "all" if max_speakers is None else str(max_speakers).zfill(4)
-    pairs_key = str(pairs_per_speaker).zfill(4)
+    pairs_key = str(total_pairs).zfill(6)
 
     cache_name = (
         f"{dataset_key}_{config_key}"
-        f"_speakers_{speakers_key}_pairs_{pairs_key}"
+        f"_pairs_total_{pairs_key}"
         f"_train_{_samples_key(max_train_samples)}"
         f"_val_{_samples_key(max_validation_samples)}"
         f"_test_{_samples_key(max_test_samples)}"
@@ -586,14 +621,11 @@ def load_speaker_ver_dataset(
             "dataset": dataset_name,
             "config": dataset_config,
             "label_names": label_names,
-            "pairs_per_speaker": pairs_per_speaker,
-            "max_speakers": max_speakers,
-            "selected_speakers": selected_speakers,
+            "total_pairs": total_pairs,
         },
     )
 
     # Print summary
-    speaker_info = f"{len(selected_speakers)} speakers" if selected_speakers else "all speakers"
     print_dataset_summary(
         task_emoji="🔍",
         task_name="Speaker verification dataset",
@@ -604,7 +636,7 @@ def load_speaker_ver_dataset(
         label_names=label_names,
         seed=payload_seed,
         num_proc=effective_num_proc,
-        extra_info=f"{speaker_info}, {pairs_per_speaker} pairs/speaker",
+        extra_info=f"{total_pairs} total pairs (50/50)",
     )
 
     return train_subset, validation_subset, test_subset, label_names

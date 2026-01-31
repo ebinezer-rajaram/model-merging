@@ -33,8 +33,7 @@ dataset:
   cache_splits: true
   force_rebuild: false                 # Force rebuild to ensure we get fresh data
   # Sample limits
-  max_speakers: 100                   # Select top 100 speakers by sample count
-  pairs_per_speaker: 200              # Generate 200 pairs per speaker (100 pos + 100 neg)
+  total_pairs: 20000                  # Total number of pairs (50/50 pos/neg) across all splits
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
@@ -125,7 +124,7 @@ training:
 
 # Artifacts Configuration
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_speaker_ver
+  adapter_subdir: qwen2_5_omni_lora_speaker_ver_v2
 
 # Metrics Configuration
 metrics:
