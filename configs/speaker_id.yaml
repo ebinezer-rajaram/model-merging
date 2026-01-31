@@ -33,8 +33,8 @@ dataset:
   cache_splits: true
   force_rebuild: false
   # Sample limits
-  max_speakers: 100                   # Select top 100 speakers by sample count
-  max_samples_per_speaker: 200        # Limit to 200 utterances per speaker
+  max_speakers: 1000                   # Select top 100 speakers by sample count
+  max_samples_per_speaker: 20        # Limit to 200 utterances per speaker
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
@@ -128,7 +128,7 @@ training:
 
 # Artifacts Configuration
 artifacts:
-  adapter_subdir: qwen2_5_omni_lora_speaker_id_voxceleb2
+  adapter_subdir: qwen2_5_omni_lora_speaker_id_voxceleb2_v2
 
 # Metrics Configuration
 metrics:
