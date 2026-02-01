@@ -171,6 +171,54 @@ def _build_pairs_cache_dir(cache_root: Path, cache_meta: Dict[str, Any]) -> Path
     return cache_root / "pairs" / cache_key
 
 
+def _write_pairs_cache_meta(cache_dir: Path, cache_meta: Dict[str, Any]) -> None:
+    """Persist cache metadata for later lookup."""
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = cache_dir / "meta.json"
+        if not meta_path.exists():
+            meta_path.write_text(json.dumps(cache_meta, indent=2, sort_keys=True))
+    except Exception:
+        # Best-effort only; caching should still work without this metadata.
+        pass
+
+
+def _find_cached_pairs_dir(cache_root: Path, required_meta: Dict[str, Any]) -> Optional[Path]:
+    """Find a cached pairs directory matching required metadata.
+
+    Falls back to a single existing cache directory when metadata is missing.
+    """
+    pairs_root = cache_root / "pairs"
+    if not pairs_root.exists():
+        return None
+
+    candidates: List[Path] = [p for p in pairs_root.iterdir() if p.is_dir()]
+    if not candidates:
+        return None
+
+    matched: List[Path] = []
+    for candidate in candidates:
+        meta_path = candidate / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        if all(meta.get(key) == value for key, value in required_meta.items()):
+            matched.append(candidate)
+
+    if matched:
+        matched.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return matched[0]
+
+    if len(candidates) == 1:
+        # Legacy cache without meta.json; only safe if there's exactly one.
+        return candidates[0]
+
+    return None
+
+
 def _load_cached_pairs(cache_dir: Path, split_name: str) -> Optional[Dataset]:
     """Load cached pairs split if available."""
     split_dir = cache_dir / split_name
@@ -334,11 +382,98 @@ def load_speaker_ver_dataset(
     # VoxCeleb2 typically only has a train split
     base_dataset = dataset.get("train") or next(iter(dataset.values()))
 
-    # Add duration information to base dataset before filtering
-    from core.tasks.dataset import add_duration_to_dataset, filter_by_duration
-
     effective_num_proc = resolve_num_proc(num_proc)
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
+
+    # Fast path: reuse cached pairs to skip duration filtering and pair generation
+    pairs_loaded_from_cache = False
+    train_pairs = val_pairs = test_pairs = None
+    if cache_splits and not force_rebuild:
+        required_meta = {
+            "dataset": dataset_name,
+            "config": dataset_config,
+            "total_pairs": total_pairs,
+            "max_duration": max_duration,
+            "min_duration": min_duration,
+            "split_by_speakers": split_by_speakers,
+            "split_percentages": split_percentages,
+            "seed": seed,
+        }
+        pairs_cache_dir = _find_cached_pairs_dir(cache_root, required_meta)
+        if pairs_cache_dir is not None:
+            print("✓ Found cached speaker verification pairs; skipping duration filtering.")
+            train_pairs = _load_cached_pairs(pairs_cache_dir, "train")
+            val_pairs = _load_cached_pairs(pairs_cache_dir, "validation")
+            test_pairs = _load_cached_pairs(pairs_cache_dir, "test")
+            if any(pair is not None for pair in (train_pairs, val_pairs, test_pairs)):
+                pairs_loaded_from_cache = True
+
+    if pairs_loaded_from_cache:
+        # Build cache path
+        dataset_key = dataset_name.replace("/", "_")
+        config_key = dataset_config or "default"
+        pairs_key = str(total_pairs).zfill(6)
+
+        cache_name = (
+            f"{dataset_key}_{config_key}"
+            f"_pairs_total_{pairs_key}"
+            f"_train_{_samples_key(max_train_samples)}"
+            f"_val_{_samples_key(max_validation_samples)}"
+            f"_test_{_samples_key(max_test_samples)}"
+            f"_seed_{int(seed)}.json"
+        )
+        cache_path = cache_root / cache_name
+
+        # Label names for binary classification
+        label_names = ["no", "yes"]
+
+        # Create DatasetDict for caching
+        dataset_dict = DatasetDict()
+        if train_pairs is not None:
+            dataset_dict["train"] = train_pairs
+        if val_pairs is not None:
+            dataset_dict["validation"] = val_pairs
+        if test_pairs is not None:
+            dataset_dict["test"] = test_pairs
+
+        # Cache and sample splits
+        train_subset, validation_subset, test_subset, splits_metadata, payload_seed = cache_and_sample_splits(
+            dataset_dict,
+            cache_path=cache_path,
+            max_train_samples=max_train_samples,
+            max_validation_samples=max_validation_samples,
+            max_test_samples=max_test_samples,
+            seed=seed,
+            manifest_fields=MANIFEST_FIELDS,
+            audio_column=None,  # We have two audio columns
+            cache_splits=cache_splits,
+            force_rebuild=force_rebuild,
+            additional_metadata={
+                "dataset": dataset_name,
+                "config": dataset_config,
+                "label_names": label_names,
+                "total_pairs": total_pairs,
+            },
+        )
+
+        # Print summary
+        print_dataset_summary(
+            task_emoji="🔍",
+            task_name="Speaker verification dataset",
+            train_subset=train_subset,
+            validation_subset=validation_subset,
+            test_subset=test_subset,
+            splits_metadata=splits_metadata,
+            label_names=label_names,
+            seed=payload_seed,
+            num_proc=effective_num_proc,
+            extra_info=f"{total_pairs} total pairs (50/50)",
+        )
+
+        return train_subset, validation_subset, test_subset, label_names
+
+    # Add duration information to base dataset before filtering
+    from core.tasks.dataset import add_duration_to_dataset, filter_by_duration
 
     base_dataset_dict = DatasetDict({"train": base_dataset})
     base_dataset_dict = add_duration_to_dataset(
@@ -476,6 +611,7 @@ def load_speaker_ver_dataset(
             "base_count": len(base_dataset),
         }
         pairs_cache_dir = _build_pairs_cache_dir(cache_root, cache_meta)
+        _write_pairs_cache_meta(pairs_cache_dir, cache_meta)
 
         load_pairs_cache = cache_splits and not force_rebuild
         save_pairs_cache = cache_splits
@@ -516,6 +652,7 @@ def load_speaker_ver_dataset(
             "base_count": len(base_dataset),
         }
         pairs_cache_dir = _build_pairs_cache_dir(cache_root, cache_meta)
+        _write_pairs_cache_meta(pairs_cache_dir, cache_meta)
         load_pairs_cache = cache_splits and not force_rebuild
         save_pairs_cache = cache_splits
 
