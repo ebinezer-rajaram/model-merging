@@ -9,15 +9,16 @@ import sacrebleu
 def compute_st_metrics(
     eval_pred: Any,
     processor,
+    target_lang: str = "en",
 ) -> Dict[str, float]:
-    """Compute case-sensitive detokenized BLEU for speech translation evaluation.
+    """Compute case-sensitive detokenized BLEU and chrF for speech translation evaluation.
 
     Args:
         eval_pred: Evaluation predictions (preds, labels) from trainer
         processor: Model processor with tokenizer
 
     Returns:
-        Dictionary with BLEU score: {"bleu": <value>}
+        Dictionary with BLEU and chrF scores: {"bleu": <value>, "chrf": <value>}
     """
     preds, labels = eval_pred
     if isinstance(preds, tuple):
@@ -49,21 +50,31 @@ def compute_st_metrics(
     pred_texts = [clean_text(text) for text in pred_texts_raw]
     label_texts = [clean_text(text) for text in label_texts_raw]
 
+    # Pick BLEU tokenization based on target language.
+    # sacrebleu's "13a" is for space-delimited text; Chinese needs "zh" to avoid zero BLEU.
+    lang_code = (target_lang or "").split("_")[-1]
+    lang_base = lang_code.split("-")[0].lower()
+    tokenize = "zh" if lang_base == "zh" else "13a"
+
     # Compute case-sensitive detokenized BLEU with smoothing
     # sacrebleu expects references as list of lists (multiple references per prediction)
     references = [[text] for text in label_texts]
 
     # lowercase=False: case-sensitive evaluation
     # tokenize='13a': international tokenization (standard for MT evaluation)
+    # tokenize='zh': Chinese tokenization (character-based)
     # smooth_method='exp': exponential smoothing (BLEU+1) to handle short sentences and rare n-grams
     # smooth_value=0.01: small epsilon for smoothing (default but explicit)
     bleu = sacrebleu.corpus_bleu(
         pred_texts,
         references,
         lowercase=False,
-        tokenize='13a',
+        tokenize=tokenize,
         smooth_method='exp',
         smooth_value=0.01
     )
 
-    return {"bleu": bleu.score}
+    # chrF is character n-gram F-score; useful for morphologically rich or non-segmented languages.
+    chrf = sacrebleu.corpus_chrf(pred_texts, references)
+
+    return {"bleu": bleu.score, "chrf": chrf.score}

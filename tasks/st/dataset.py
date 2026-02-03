@@ -53,6 +53,8 @@ LANGUAGE_NAMES = {
     "nl": "Dutch",
     "ru": "Russian",
     "zh": "Chinese",
+    "zh-CN": "Chinese",
+    "zh-TW": "Chinese",
     "ja": "Japanese",
     "ar": "Arabic",
     "tr": "Turkish",
@@ -440,18 +442,21 @@ class STCollator:
 
             # Search for the translation tokens in the sequence (search from the end backwards)
             found = False
-            # Start from the end and work backwards to find the last occurrence
-            for j in range(len(input_ids) - translation_length, -1, -1):
-                # Skip padding tokens
-                if input_ids[j] == pad_id:
-                    continue
-                # Check if translation matches at this position
-                translation_tensor = torch.tensor(translation_tokens, device=input_ids.device, dtype=input_ids.dtype)
-                if torch.equal(input_ids[j:j + translation_length], translation_tensor):
-                    # Mask everything before the translation
-                    labels[i, :j] = -100
-                    found = True
-                    break
+            if translation_length > 0:
+                # Start from the end and work backwards to find the last occurrence
+                for j in range(len(input_ids) - translation_length, -1, -1):
+                    # Skip padding tokens
+                    if input_ids[j] == pad_id:
+                        continue
+                    # Check if translation matches at this position
+                    translation_tensor = torch.tensor(
+                        translation_tokens, device=input_ids.device, dtype=input_ids.dtype
+                    )
+                    if torch.equal(input_ids[j:j + translation_length], translation_tensor):
+                        # Mask everything before the translation
+                        labels[i, :j] = -100
+                        found = True
+                        break
 
             # If we didn't find an exact match, try a more flexible approach
             if not found:
