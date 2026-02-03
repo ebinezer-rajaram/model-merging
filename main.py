@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     eval_merged_parser.add_argument(
         "--method",
         default=None,
-        choices=("uniform", "weighted", "task_vector"),
+        choices=("uniform", "weighted", "task_vector", "weighted_delta"),
         help="Merge method used (for resolving adapter path).",
     )
     eval_merged_parser.add_argument(
@@ -151,6 +151,12 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         dest="save_results",
         help="Disable saving merged evaluation summary.",
+    )
+    eval_merged_parser.add_argument(
+        "--save",
+        action="store_true",
+        dest="save_merged",
+        help="Save merged adapter before evaluation (default: in-memory only).",
     )
     eval_merged_parser.set_defaults(confusion_matrix=True, save_results=True)
 

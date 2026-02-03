@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         dest="save_results",
         help="Disable saving merged evaluation summary.",
     )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        dest="save_merged",
+        help="Save merged adapter before evaluation (default: in-memory only).",
+    )
     parser.set_defaults(confusion_matrix=True, save_results=True)
     return parser.parse_args()
 
@@ -83,6 +89,7 @@ def evaluate_from_args(args: argparse.Namespace) -> dict:
         split=args.split,
         batch_size=args.batch_size,
         generate_confusion_matrix=args.confusion_matrix,
+        save_merged=args.save_merged,
         save_results=args.save_results,
         show_summary=True,
     )

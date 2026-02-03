@@ -234,32 +234,52 @@ def load_model_and_processor(
 
 def _apply_delta_weights(model, delta_weights: Dict[str, torch.Tensor]) -> None:
     """Apply in-memory delta weights to the base model parameters."""
+    state_keys = list(model.state_dict().keys())
+    state_key_set = set(state_keys)
     missing = []
     shape_mismatch = []
     applied = 0
 
     for base_key, delta in delta_weights.items():
         candidates = [f"{base_key}.weight"]
-        if base_key.startswith("base_model."):
-            trimmed = base_key.replace("base_model.", "", 1)
-            candidates.append(f"{trimmed}.weight")
-        # Common PEFT prefix artifact: model.model -> model
-        if base_key.startswith("base_model.model.model."):
-            trimmed = base_key.replace("base_model.model.model.", "model.", 1)
-            candidates.append(f"{trimmed}.weight")
-        if base_key.startswith("model.model."):
-            trimmed = base_key.replace("model.model.", "model.", 1)
-            candidates.append(f"{trimmed}.weight")
+        suffix_bases = {base_key}
+
+        def _add_candidate(prefix_from: str, prefix_to: str) -> None:
+            if base_key.startswith(prefix_from):
+                trimmed = base_key.replace(prefix_from, prefix_to, 1)
+                candidates.append(f"{trimmed}.weight")
+                suffix_bases.add(trimmed)
+
+        # Strip base_model.* prefix (PEFT) to common model prefixes
+        _add_candidate("base_model.model.model.", "model.")
+        _add_candidate("base_model.model.", "model.")
+        _add_candidate("base_model.model.", "")
+        _add_candidate("base_model.", "")
+
+        # Alternative nesting variants seen across model wrappers
+        _add_candidate("model.model.model.", "model.")
+        _add_candidate("model.model.", "model.")
+        _add_candidate("model.", "model.model.")
 
         param = None
         matched_key = None
         for weight_key in candidates:
-            try:
+            if weight_key in state_key_set:
                 param = model.get_parameter(weight_key)
                 matched_key = weight_key
                 break
-            except Exception:
-                continue
+
+        if param is None:
+            # Fallback: suffix match for weight keys ending with base_key
+            for suffix_base in suffix_bases:
+                suffix = f".{suffix_base}.weight"
+                for key in state_keys:
+                    if key.endswith(suffix):
+                        param = model.get_parameter(key)
+                        matched_key = key
+                        break
+                if param is not None:
+                    break
 
         if param is None:
             missing.append(candidates[0])
@@ -275,8 +295,12 @@ def _apply_delta_weights(model, delta_weights: Dict[str, torch.Tensor]) -> None:
 
     if missing:
         print(f"⚠️  Delta merge: {len(missing)} parameters not found in model.")
+        for key in missing[:5]:
+            print(f"   - missing: {key}")
     if shape_mismatch:
         print(f"⚠️  Delta merge: {len(shape_mismatch)} shape mismatches; skipped.")
+        for key, model_shape, delta_shape in shape_mismatch[:5]:
+            print(f"   - shape mismatch: {key} model={model_shape} delta={delta_shape}")
     print(f"✅ Applied delta weights to {applied} parameters.")
 
 
