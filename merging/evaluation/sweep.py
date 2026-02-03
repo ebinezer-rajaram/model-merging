@@ -159,6 +159,7 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
             best_score = score
             best_tiebreak = tiebreak
             best_idx = idx - 1
+            print(f"🏆 Best so far: params={params} score={best_score:.4f}")
 
     summary = {
         "timestamp": datetime.now().isoformat(),

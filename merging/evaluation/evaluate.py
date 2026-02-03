@@ -16,7 +16,8 @@ from merging.core.utils import (
     infer_merged_source_tasks,
     load_merge_metadata,
     PACKAGE_ROOT,
-    resolve_merge_summary_dir,
+    resolve_merge_eval_dir,
+    update_results_index,
     resolve_merged_adapter_path,
     save_merged_adapter,
 )
@@ -133,8 +134,17 @@ def evaluate_merged_adapter(
 
                 if show_summary:
                     print(f"✅ {task} evaluation complete:")
-                    for key, value in sorted(result.metrics.items())[:5]:
-                        if isinstance(value, (int, float)):
+                    task_key = task.lower()
+                    metric_key = None
+                    if task_key in TASK_METRICS:
+                        metric_key, _ = TASK_METRICS[task_key]
+                        metric_value = result.metrics.get(metric_key)
+                        if isinstance(metric_value, (int, float)):
+                            print(f"   {metric_key}: {metric_value:.4f}")
+                    if "interference_delta" in result.metrics:
+                        print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
+                    for key, value in sorted(result.metrics.items())[:3]:
+                        if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
                             print(f"   {key}: {value:.4f}")
             except Exception as exc:
                 print(f"❌ Failed to evaluate on {task}: {exc}")
@@ -154,13 +164,54 @@ def evaluate_merged_adapter(
             if metadata.get("lambda") is not None:
                 summary["lambda"] = metadata.get("lambda")
             method_name = metadata.get("merge_method", "merged")
-            summary_dir = resolve_merge_summary_dir(method_name, source_tasks, metadata)
-            summary_dir.mkdir(parents=True, exist_ok=True)
-            results_path = summary_dir / f"eval_results_{merge_tag}_{split}.json"
+            eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
             with results_path.open("w") as handle:
                 json.dump(summary, handle, indent=2)
             if show_summary:
                 print(f"\n💾 Evaluation results saved to {results_path}")
+
+            # Also write a run bundle for in-memory merges.
+            output_path = create_merge_output_path(
+                method_name,
+                source_tasks or task_names or [],
+                {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,
+            )
+            merge_metadata_path = output_path / "merge_metadata.json"
+            with merge_metadata_path.open("w") as handle:
+                json.dump(metadata, handle, indent=2)
+            run_results_path = output_path / f"eval_results_{split}.json"
+            with run_results_path.open("w") as handle:
+                json.dump(summary, handle, indent=2)
+            summary_path = output_path / "summary.json"
+            with summary_path.open("w") as handle:
+                json.dump(
+                    {
+                        "timestamp": summary["timestamp"],
+                        "merge_tag": merge_tag,
+                        "merge_method": metadata.get("merge_method"),
+                        "params": metadata.get("params", {}),
+                        "source_tasks": source_tasks,
+                        "evaluated_tasks": tasks_to_eval,
+                        "split": split,
+                        "results_path": str(run_results_path),
+                    },
+                    handle,
+                    indent=2,
+                )
+            if show_summary:
+                print(f"📦 Run bundle saved to {output_path}")
+
+            update_results_index(
+                eval_dir,
+                merge_tag=merge_tag,
+                split=split,
+                results_path=results_path,
+                metadata=metadata,
+                summary=summary,
+                run_path=output_path,
+            )
 
         return results
 
@@ -203,8 +254,17 @@ def evaluate_merged_adapter(
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")
-                for key, value in sorted(result.metrics.items())[:5]:
-                    if isinstance(value, (int, float)):
+                task_key = task.lower()
+                metric_key = None
+                if task_key in TASK_METRICS:
+                    metric_key, _ = TASK_METRICS[task_key]
+                    metric_value = result.metrics.get(metric_key)
+                    if isinstance(metric_value, (int, float)):
+                        print(f"   {metric_key}: {metric_value:.4f}")
+                if "interference_delta" in result.metrics:
+                    print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
+                for key, value in sorted(result.metrics.items())[:3]:
+                    if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
                         print(f"   {key}: {value:.4f}")
         except Exception as exc:
             print(f"❌ Failed to evaluate on {task}: {exc}")
@@ -225,6 +285,25 @@ def evaluate_merged_adapter(
             json.dump(summary, handle, indent=2)
         if show_summary:
             print(f"\n💾 Evaluation results saved to {results_path}")
+
+        method_name = metadata.get("merge_method", "merged")
+        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
+        with eval_results_path.open("w") as handle:
+            json.dump(summary, handle, indent=2)
+        if show_summary:
+            print(f"💾 Evaluation results saved to {eval_results_path}")
+
+        update_results_index(
+            eval_dir,
+            merge_tag=merge_tag,
+            split=split,
+            results_path=eval_results_path,
+            metadata=metadata,
+            summary=summary,
+            run_path=merged_run_path,
+        )
 
     return results
 
@@ -394,8 +473,17 @@ def _evaluate_saved_merged(
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")
-                for key, value in sorted(result.metrics.items())[:5]:
-                    if isinstance(value, (int, float)):
+                task_key = task.lower()
+                metric_key = None
+                if task_key in TASK_METRICS:
+                    metric_key, _ = TASK_METRICS[task_key]
+                    metric_value = result.metrics.get(metric_key)
+                    if isinstance(metric_value, (int, float)):
+                        print(f"   {metric_key}: {metric_value:.4f}")
+                if "interference_delta" in result.metrics:
+                    print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
+                for key, value in sorted(result.metrics.items())[:3]:
+                    if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
                         print(f"   {key}: {value:.4f}")
         except Exception as exc:
             print(f"❌ Failed to evaluate on {task}: {exc}")
@@ -416,6 +504,25 @@ def _evaluate_saved_merged(
             json.dump(summary, handle, indent=2)
         if show_summary:
             print(f"\n💾 Evaluation results saved to {results_path}")
+
+        method_name = metadata.get("merge_method", "merged")
+        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
+        with eval_results_path.open("w") as handle:
+            json.dump(summary, handle, indent=2)
+        if show_summary:
+            print(f"💾 Evaluation results saved to {eval_results_path}")
+
+        update_results_index(
+            eval_dir,
+            merge_tag=merge_tag,
+            split=split,
+            results_path=eval_results_path,
+            metadata=metadata,
+            summary=summary,
+            run_path=merged_run_path,
+        )
 
     return results
 

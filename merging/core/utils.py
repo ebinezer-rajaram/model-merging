@@ -213,12 +213,62 @@ def resolve_merge_summary_dir(
         base_dir = PACKAGE_ROOT / "artifacts" / "merged"
 
     summary_dir = base_dir / method_name
-    if method_name == "weighted_delta" and source_tasks:
+    if source_tasks:
         task_combo = "_".join(sorted(source_tasks))
         summary_dir = summary_dir / task_combo
-        if metadata.get("lambda") is not None:
-            summary_dir = summary_dir / _format_lambda(float(metadata["lambda"]))
     return summary_dir
+
+
+def resolve_merge_eval_dir(
+    method_name: str,
+    source_tasks: Optional[List[str]],
+    split: str,
+    base_dir: Optional[Path] = None,
+) -> Path:
+    """Resolve directory for merged evaluation outputs."""
+    summary_dir = resolve_merge_summary_dir(method_name, source_tasks, {}, base_dir=base_dir)
+    return summary_dir / "eval" / split
+
+
+def update_results_index(
+    eval_dir: Path,
+    *,
+    merge_tag: str,
+    split: str,
+    results_path: Path,
+    metadata: Dict,
+    summary: Dict,
+    run_path: Optional[Path] = None,
+) -> None:
+    """Append an entry to the eval results index."""
+    index_path = eval_dir.parent / "index.json"
+    entry = {
+        "timestamp": summary.get("timestamp"),
+        "merge_tag": merge_tag,
+        "split": split,
+        "results_path": str(results_path),
+        "run_path": str(run_path) if run_path else None,
+        "method": metadata.get("merge_method"),
+        "params": metadata.get("params", {}),
+        "lambda": metadata.get("lambda"),
+        "source_tasks": summary.get("source_tasks"),
+        "evaluated_tasks": summary.get("evaluated_tasks"),
+    }
+
+    if index_path.exists():
+        try:
+            with index_path.open("r") as handle:
+                index = json.load(handle)
+        except Exception:
+            index = {}
+    else:
+        index = {}
+
+    index.setdefault("entries", [])
+    index["entries"].append(entry)
+
+    with index_path.open("w") as handle:
+        json.dump(index, handle, indent=2)
 
 
 def get_task_module(task_name: str):
@@ -583,4 +633,6 @@ __all__ = [
     "infer_task_from_path",
     "build_merge_tag",
     "resolve_merge_summary_dir",
+    "resolve_merge_eval_dir",
+    "update_results_index",
 ]

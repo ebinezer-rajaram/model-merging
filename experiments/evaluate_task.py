@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from core import (
     prepare_task_for_evaluation,
     run_evaluation,
 )
+from merging.core.utils import resolve_merge_eval_dir
 from tasks.asr import (
     TASK_NAME as ASR_TASK_NAME,
     get_artifact_directories as get_asr_artifact_directories,
@@ -299,6 +301,15 @@ def _save_metrics_to_locations(
 
     # Save merged evaluations into a dedicated subfolder to avoid clutter.
     if merged_tasks:
+        method_name = merged_method or "merged"
+        merged_eval_dir = resolve_merge_eval_dir(method_name, merged_tasks, split)
+        merged_eval_dir.mkdir(parents=True, exist_ok=True)
+        label = adapter_label or merged_method or "merged"
+        merged_filename = f"{task}_{label}_metrics.json"
+        merged_metrics_path = merged_eval_dir / merged_filename
+        with merged_metrics_path.open("w") as handle:
+            json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
+
         merged_dir = resolve_merged_eval_dir(
             metrics_dir=metrics_dir,
             split=split,
@@ -307,13 +318,16 @@ def _save_metrics_to_locations(
             adapter_label=adapter_label,
             merged_method=merged_method,
         )
-        filename = "metrics.json"
-        save_path = merged_dir / filename
-        with save_path.open("w") as handle:
-            json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
-        saved_paths.append(save_path)
+        save_path = merged_dir / "metrics.json"
+        if save_path.exists() or save_path.is_symlink():
+            save_path.unlink()
+        relative_target = os.path.relpath(merged_metrics_path, start=merged_dir)
+        os.symlink(relative_target, save_path)
+
+        saved_paths.append(merged_metrics_path)
         if show_summary:
-            print(f"💾 Saved metrics to: {save_path}")
+            print(f"💾 Saved metrics to: {merged_metrics_path}")
+            print(f"🔗 Linked metrics at: {save_path}")
         return saved_paths
 
     # Save to task-centric eval directory
