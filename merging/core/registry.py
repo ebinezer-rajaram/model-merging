@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from datetime import datetime
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Any
 from pathlib import Path
 
 import torch
@@ -18,9 +19,23 @@ class MergeOutput:
 
 
 @dataclass(frozen=True)
+class MergeResult:
+    method: str
+    params: Dict[str, Any]
+    adapter_paths: list["Path"]
+    source_metadata: list[Dict]
+    task_names: list[str]
+    output_path: Optional["Path"]
+    merge_output: MergeOutput
+    merge_tag: str
+
+
+@dataclass(frozen=True)
 class MergeMethod:
     name: str
     required_params: tuple[str, ...]
+    params_defaults: Dict[str, Any]
+    params_validator: Optional[Callable[[Dict[str, Any]], None]]
     min_adapters: int
     max_adapters: Optional[int]
     saveable: bool
@@ -45,6 +60,8 @@ class MergeMethod:
             if missing:
                 missing_str = ", ".join(missing)
                 raise ValueError(f"{self.name} requires params: {missing_str}.")
+        if self.params_validator and params is not None:
+            self.params_validator(params)
 
 
 _REGISTRY: Dict[str, MergeMethod] = {}
@@ -78,8 +95,11 @@ def build_merge_metadata(
     num_adapters: int,
     source_metadata: list[Dict],
     num_parameters: int,
+    params: Optional[Dict[str, Any]] = None,
     lambda_weight: Optional[float] = None,
 ) -> Dict:
+    if params and lambda_weight is None and "lambda" in params:
+        lambda_weight = params.get("lambda")
     metadata = {
         "merge_method": method,
         "merge_mode": merge_mode,
@@ -88,6 +108,21 @@ def build_merge_metadata(
         "source_adapters": source_metadata,
         "num_parameters": num_parameters,
     }
+    if params is not None:
+        metadata["params"] = params
     if lambda_weight is not None:
         metadata["lambda"] = lambda_weight
     return metadata
+
+
+def normalize_params(
+    method: MergeMethod,
+    params: Optional[Dict[str, Any]] = None,
+    legacy_lambda_weight: Optional[float] = None,
+) -> Dict[str, Any]:
+    normalized = dict(method.params_defaults)
+    if params:
+        normalized.update(params)
+    if legacy_lambda_weight is not None and "lambda" not in normalized:
+        normalized["lambda"] = legacy_lambda_weight
+    return normalized

@@ -236,17 +236,9 @@ def dispatch_train(args: argparse.Namespace) -> None:
 
 def dispatch_merge(args: argparse.Namespace) -> None:
     """Invoke the merge workflow."""
-    from experiments.merge_vectors import merge_adapters_cli
+    from merging.cli import merge_from_args
 
-    merge_adapters_cli(
-        adapter_specs=args.adapters,
-        method=args.method,
-        lambda_weight=args.lambda_weight,
-        merge_mode=args.merge_mode,
-        output=args.output,
-        evaluate=args.evaluate,
-        eval_split=args.eval_split,
-    )
+    merge_from_args(args)
 
 
 def dispatch_evaluate(args: argparse.Namespace) -> None:

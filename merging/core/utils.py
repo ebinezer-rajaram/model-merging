@@ -146,7 +146,7 @@ def load_merge_metadata(adapter_path: Path) -> Dict:
         return json.load(handle)
 
 
-def _infer_task_from_path(path_str: str) -> Optional[str]:
+def infer_task_from_path(path_str: str) -> Optional[str]:
     """Infer a task name from an adapter path when possible."""
     normalized = Path(path_str).resolve()
     parts = normalized.parts
@@ -179,7 +179,7 @@ def infer_merged_source_tasks(metadata: Dict, fallback: Optional[List[str]] = No
             continue
         path_str = entry.get("path")
         if path_str:
-            inferred = _infer_task_from_path(path_str)
+            inferred = infer_task_from_path(path_str)
             if inferred:
                 tasks.append(inferred)
 
@@ -200,6 +200,25 @@ def build_merge_tag(metadata: Dict, task_names: Optional[List[str]] = None) -> s
     if lambda_weight is not None:
         tag_parts.append(f"lambda{_format_lambda(lambda_weight)}")
     return "_".join(tag_parts)
+
+
+def resolve_merge_summary_dir(
+    method_name: str,
+    source_tasks: Optional[List[str]],
+    metadata: Dict,
+    base_dir: Optional[Path] = None,
+) -> Path:
+    """Resolve directory for merge evaluation summaries."""
+    if base_dir is None:
+        base_dir = PACKAGE_ROOT / "artifacts" / "merged"
+
+    summary_dir = base_dir / method_name
+    if method_name == "weighted_delta" and source_tasks:
+        task_combo = "_".join(sorted(source_tasks))
+        summary_dir = summary_dir / task_combo
+        if metadata.get("lambda") is not None:
+            summary_dir = summary_dir / _format_lambda(float(metadata["lambda"]))
+    return summary_dir
 
 
 def get_task_module(task_name: str):
@@ -561,5 +580,7 @@ __all__ = [
     "resolve_merged_adapter_path",
     "load_merge_metadata",
     "infer_merged_source_tasks",
+    "infer_task_from_path",
     "build_merge_tag",
+    "resolve_merge_summary_dir",
 ]

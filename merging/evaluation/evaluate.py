@@ -7,7 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from merging.core.registry import get_merge_method
+from merging.core.registry import get_merge_method, normalize_params
+from merging.core.runner import resolve_adapter_specs
 from merging.core.utils import (
     _format_lambda,
     build_merge_tag,
@@ -15,7 +16,7 @@ from merging.core.utils import (
     infer_merged_source_tasks,
     load_merge_metadata,
     PACKAGE_ROOT,
-    resolve_best_adapter,
+    resolve_merge_summary_dir,
     resolve_merged_adapter_path,
     save_merged_adapter,
 )
@@ -60,17 +61,16 @@ def evaluate_merged_adapter(
         if not task_names:
             raise ValueError("task_names are required for in-memory merged evaluation.")
 
-        adapter_paths = []
-        source_metadata = []
-        for task_name in task_names:
-            adapter_path_resolved, meta = resolve_best_adapter(task_name)
-            adapter_paths.append(adapter_path_resolved)
-            source_metadata.append(meta)
+        resolved = resolve_adapter_specs(task_names)
+        adapter_paths = [path for path, _ in resolved]
+        source_metadata = [meta for _, meta in resolved]
 
         method_impl = get_merge_method(method)
-        effective_params = dict(params or {})
-        if lambda_weight is not None:
-            effective_params.setdefault("lambda", lambda_weight)
+        effective_params = normalize_params(
+            method_impl,
+            params=params,
+            legacy_lambda_weight=lambda_weight,
+        )
         if save_merged and not method_impl.saveable:
             raise ValueError(f"{method} cannot be saved as a LoRA adapter.")
 
@@ -82,12 +82,12 @@ def evaluate_merged_adapter(
             merge_mode=merge_mode,
         )
 
-        source_tasks = task_names
-        tasks_to_eval = eval_tasks or source_tasks
+        source_tasks = [meta.get("task") for meta in source_metadata if meta.get("task")]
+        tasks_to_eval = eval_tasks or source_tasks or task_names
         if not tasks_to_eval:
             raise ValueError("No evaluation tasks provided for merged adapter.")
 
-        merge_tag = build_merge_tag(metadata, source_tasks)
+        merge_tag = build_merge_tag(metadata, source_tasks or None)
 
         if save_merged:
             merged_run_path = _save_merged_adapter(
@@ -154,12 +154,7 @@ def evaluate_merged_adapter(
             if metadata.get("lambda") is not None:
                 summary["lambda"] = metadata.get("lambda")
             method_name = metadata.get("merge_method", "merged")
-            summary_dir = PACKAGE_ROOT / "artifacts" / "merged" / method_name
-            if method_name == "weighted_delta" and source_tasks:
-                task_combo = "_".join(sorted(source_tasks))
-                summary_dir = summary_dir / task_combo
-                if metadata.get("lambda") is not None:
-                    summary_dir = summary_dir / _format_lambda(float(metadata["lambda"]))
+            summary_dir = resolve_merge_summary_dir(method_name, source_tasks, metadata)
             summary_dir.mkdir(parents=True, exist_ok=True)
             results_path = summary_dir / f"eval_results_{merge_tag}_{split}.json"
             with results_path.open("w") as handle:
@@ -243,12 +238,13 @@ def _merge_in_memory(
     merge_mode: str,
 ) -> tuple[Dict[str, "torch.Tensor"], Optional[Dict[str, "torch.Tensor"]], Dict]:
     method_impl = get_merge_method(method)
-    method_impl.validate(len(adapter_paths), params)
+    effective_params = normalize_params(method_impl, params=params)
+    method_impl.validate(len(adapter_paths), effective_params)
     merge_output = method_impl.merge_in_memory(
         adapter_paths=adapter_paths,
         source_metadata=source_metadata,
         merge_mode=merge_mode,
-        params=params,
+        params=effective_params,
     )
     return merge_output.merged_delta, merge_output.merged_weights, merge_output.metadata
 

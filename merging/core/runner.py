@@ -6,8 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from merging.core.registry import MergeOutput, get_merge_method
+from merging.core.registry import MergeResult, get_merge_method, normalize_params
 from merging.core.utils import create_merge_output_path, resolve_best_adapter, save_merged_adapter
+from merging.core.utils import build_merge_tag
 
 
 def resolve_adapter_specs(
@@ -21,6 +22,14 @@ def resolve_adapter_specs(
         if path.exists() and path.is_dir():
             adapter_path = path.resolve()
             metadata = {"path": str(adapter_path)}
+            inferred_task = None
+            try:
+                from merging.core.utils import infer_task_from_path
+                inferred_task = infer_task_from_path(str(adapter_path))
+            except Exception:
+                inferred_task = None
+            if inferred_task:
+                metadata["task"] = inferred_task
             resolved.append((adapter_path, metadata))
             print(f"✅ Using adapter at: {adapter_path}")
             continue
@@ -49,7 +58,7 @@ def run_merge(
     output: Optional[str],
     save_merged: bool,
     show_progress: bool = True,
-) -> Tuple[Optional[Path], MergeOutput, List[str]]:
+) -> MergeResult:
     """Run a merge and optionally save a merged adapter."""
     if show_progress:
         print("\n" + "=" * 60)
@@ -63,9 +72,7 @@ def run_merge(
     task_names = [meta.get("task", f"adapter{i}") for i, meta in enumerate(source_metadata)]
 
     method_impl = get_merge_method(method)
-    effective_params = dict(params or {})
-    if lambda_weight is not None:
-        effective_params.setdefault("lambda", lambda_weight)
+    effective_params = normalize_params(method_impl, params=params, legacy_lambda_weight=lambda_weight)
     method_impl.validate(len(adapter_paths), effective_params)
 
     output_path: Optional[Path] = None
@@ -119,4 +126,14 @@ def run_merge(
                 register_run=True,
             )
 
-    return output_path, merge_output, task_names
+    merge_tag = build_merge_tag(merge_output.metadata, task_names)
+    return MergeResult(
+        method=method,
+        params=effective_params,
+        adapter_paths=adapter_paths,
+        source_metadata=source_metadata,
+        task_names=task_names,
+        output_path=output_path,
+        merge_output=merge_output,
+        merge_tag=merge_tag,
+    )

@@ -12,7 +12,7 @@ import json
 import yaml
 
 from merging.evaluation.evaluate import evaluate_merged_adapter
-from merging.core.registry import get_merge_method
+from merging.core.registry import get_merge_method, normalize_params
 from merging.core.utils import PACKAGE_ROOT
 
 
@@ -128,14 +128,15 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
 
     for idx, params in enumerate(params_grid, 1):
         method_impl = get_merge_method(config.method)
-        method_impl.validate(len(config.adapters), params)
+        effective_params = normalize_params(method_impl, params=params)
+        method_impl.validate(len(config.adapters), effective_params)
 
         print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")
         results = evaluate_merged_adapter(
             adapter_path=None,
             method=config.method,
             task_names=config.adapters,
-            params=params,
+            params=effective_params,
             eval_tasks=config.eval_tasks,
             split=config.split,
             save_merged=config.save_merged,
