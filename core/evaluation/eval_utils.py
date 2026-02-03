@@ -285,7 +285,7 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
-def _compute_base_cache_path(
+def compute_base_cache_path(
     eval_dir: Path,
     *,
     task: str,
@@ -310,7 +310,7 @@ def _compute_base_cache_path(
     return eval_dir / filename
 
 
-def _resolve_merged_eval_dir(
+def resolve_merged_eval_dir(
     *,
     metrics_dir: Path,
     split: str,
@@ -333,7 +333,7 @@ def _resolve_merged_eval_dir(
     return ensure_dir(merged_base / other_tag / method_tag)
 
 
-def _print_metrics(label: str, task: str, split: str, metrics: Dict[str, Any]) -> None:
+def print_metrics(label: str, task: str, split: str, metrics: Dict[str, Any]) -> None:
     """Pretty-print evaluation metrics."""
     print(f"✅ Evaluation complete for {label} on {task}/{split}")
     for key, value in metrics.items():

@@ -16,9 +16,9 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from core import (
-    _compute_base_cache_path,
-    _print_metrics,
-    _resolve_merged_eval_dir,
+    compute_base_cache_path,
+    print_metrics,
+    resolve_merged_eval_dir,
     ensure_dir,
     load_config,
     load_model_and_processor,
@@ -299,7 +299,7 @@ def _save_metrics_to_locations(
 
     # Save merged evaluations into a dedicated subfolder to avoid clutter.
     if merged_tasks:
-        merged_dir = _resolve_merged_eval_dir(
+        merged_dir = resolve_merged_eval_dir(
             metrics_dir=metrics_dir,
             split=split,
             task=task,
@@ -434,7 +434,7 @@ def evaluate(
     metrics: Optional[Dict[str, Any]] = None
 
     if enable_cache and adapter_path is None:
-        cache_path = _compute_base_cache_path(
+        cache_path = compute_base_cache_path(
             eval_output_dir,
             task=task,
             split=split,
@@ -489,7 +489,7 @@ def evaluate(
 
                 # Determine save path
                 if merged_tasks:
-                    merged_dir = _resolve_merged_eval_dir(
+                    merged_dir = resolve_merged_eval_dir(
                         metrics_dir=artifact_dirs["metrics"],
                         split=split,
                         task=task,
@@ -572,7 +572,7 @@ def evaluate(
     else:
         target_label = f"adapter@{adapter_path.name}"
     if show_summary:
-        _print_metrics(target_label, task, split, metrics)
+        print_metrics(target_label, task, split, metrics)
 
     return EvaluationResult(
         metrics=metrics,
