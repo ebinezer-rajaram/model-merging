@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 import json
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +16,9 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from core import (
+    _compute_base_cache_path,
+    _print_metrics,
+    _resolve_merged_eval_dir,
     ensure_dir,
     load_config,
     load_model_and_processor,
@@ -263,48 +265,16 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
-def _compute_base_cache_path(
-    eval_dir: Path,
-    *,
-    task: str,
-    split: str,
-    config_path: Path,
-    batch_size: int,
-    generation_kwargs: Dict[str, Any],
-    dataset_cfg: Dict[str, Any],
-) -> Path:
-    """Generate a deterministic cache file path for base-model metrics."""
-    fingerprint_payload = {
-        "task": task,
-        "split": split,
-        "config_path": str(config_path.resolve()),
-        "batch_size": int(batch_size),
-        "generation_kwargs": generation_kwargs,
-        "dataset_cfg": dataset_cfg,
-    }
-    fingerprint_raw = json.dumps(fingerprint_payload, sort_keys=True, default=_json_default).encode("utf-8")
-    fingerprint = hashlib.md5(fingerprint_raw).hexdigest()[:12]
-    filename = f"{task}_{split}_base_{fingerprint}.json"
-    return eval_dir / filename
-
-
-def _print_metrics(label: str, task: str, split: str, metrics: Dict[str, Any]) -> None:
-    """Pretty-print evaluation metrics."""
-    print(f"✅ Evaluation complete for {label} on {task}/{split}")
-    for key, value in metrics.items():
-        if isinstance(value, (int, float)):
-            print(f"  {key}: {value:.4f}")
-        else:
-            print(f"  {key}: {value}")
-
-
 def _save_metrics_to_locations(
     metrics: Dict[str, Any],
     adapter_path: Optional[Path],
+    adapter_label: Optional[str],
     metrics_dir: Path,
     task: str,
     split: str,
     trained_on_task: Optional[str] = None,
+    merged_tasks: Optional[list[str]] = None,
+    merged_method: Optional[str] = None,
     show_summary: bool = True,
 ) -> list[Path]:
     """Save metrics to task-centric evaluation structure.
@@ -327,13 +297,35 @@ def _save_metrics_to_locations(
     """
     saved_paths = []
 
+    # Save merged evaluations into a dedicated subfolder to avoid clutter.
+    if merged_tasks:
+        merged_dir = _resolve_merged_eval_dir(
+            metrics_dir=metrics_dir,
+            split=split,
+            task=task,
+            merged_tasks=merged_tasks,
+            adapter_label=adapter_label,
+            merged_method=merged_method,
+        )
+        filename = "metrics.json"
+        save_path = merged_dir / filename
+        with save_path.open("w") as handle:
+            json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
+        saved_paths.append(save_path)
+        if show_summary:
+            print(f"💾 Saved metrics to: {save_path}")
+        return saved_paths
+
     # Save to task-centric eval directory
     eval_dir = ensure_dir(metrics_dir / "eval" / split)
 
     # Determine filename based on what's being evaluated
     if adapter_path is None:
-        # Base model evaluation
-        filename = "base_model.json"
+        if adapter_label:
+            filename = f"{adapter_label}.json"
+        else:
+            # Base model evaluation
+            filename = "base_model.json"
     elif trained_on_task is not None and trained_on_task != task:
         # Cross-task evaluation: adapter from trained_on_task evaluated on task
         filename = f"best_{trained_on_task}_adapter.json"
@@ -375,6 +367,10 @@ def evaluate(
     enable_cache: bool = False,
     show_summary: bool = True,
     generate_confusion_matrix: bool = False,
+    delta_weights: Optional[Dict[str, Any]] = None,
+    adapter_label: Optional[str] = None,
+    merged_tasks: Optional[list[str]] = None,
+    merged_method: Optional[str] = None,
 ) -> EvaluationResult:
     """Run evaluation with optional caching for the base model."""
     if task == ASR_TASK_NAME:
@@ -417,6 +413,8 @@ def evaluate(
 
     model_path = _get_model_path(config, task)
     adapter_path, detected_trained_on_task = _resolve_adapter_path(adapter, run_id, trained_on_task)
+    if delta_weights is not None and adapter_path is not None:
+        raise ValueError("delta_weights cannot be used with adapter_path.")
 
     # Use detected task if not explicitly provided
     if detected_trained_on_task:
@@ -455,7 +453,11 @@ def evaluate(
                 print(f"♻️ Loaded cached base metrics from {cache_path}")
 
     if metrics is None:
-        model, processor = load_model_and_processor(model_path, adapter_path)
+        model, processor = load_model_and_processor(
+            model_path,
+            adapter_path,
+            delta_weights=delta_weights,
+        )
         eval_setup = prepare_task_for_evaluation(
             task,
             processor,
@@ -486,15 +488,29 @@ def evaluate(
                 normalize = metrics_cfg.get("normalize_confusion_matrix", True)
 
                 # Determine save path
-                eval_dir = ensure_dir(artifact_dirs["metrics"] / "eval" / split)
-                if adapter_path is None:
-                    cm_filename = "confusion_matrix_base_model.png"
-                elif trained_on_task is not None and trained_on_task != task:
-                    cm_filename = f"confusion_matrix_{trained_on_task}_adapter.png"
+                if merged_tasks:
+                    merged_dir = _resolve_merged_eval_dir(
+                        metrics_dir=artifact_dirs["metrics"],
+                        split=split,
+                        task=task,
+                        merged_tasks=merged_tasks,
+                        adapter_label=adapter_label,
+                        merged_method=merged_method,
+                    )
+                    cm_path = merged_dir / "confusion_matrix.png"
                 else:
-                    cm_filename = f"confusion_matrix_{task}_adapter.png"
+                    eval_dir = ensure_dir(artifact_dirs["metrics"] / "eval" / split)
+                    if adapter_path is None:
+                        if adapter_label:
+                            cm_filename = f"confusion_matrix_{adapter_label}.png"
+                        else:
+                            cm_filename = "confusion_matrix_base_model.png"
+                    elif trained_on_task is not None and trained_on_task != task:
+                        cm_filename = f"confusion_matrix_{trained_on_task}_adapter.png"
+                    else:
+                        cm_filename = f"confusion_matrix_{task}_adapter.png"
 
-                cm_path = eval_dir / cm_filename
+                    cm_path = eval_dir / cm_filename
 
                 if show_summary:
                     print(f"📊 Generating confusion matrix...")
@@ -527,10 +543,13 @@ def evaluate(
     saved_paths = _save_metrics_to_locations(
         metrics=metrics,
         adapter_path=adapter_path,
+        adapter_label=adapter_label,
         metrics_dir=artifact_dirs["metrics"],
         task=task,
         split=split,
         trained_on_task=trained_on_task,
+        merged_tasks=merged_tasks,
+        merged_method=merged_method,
         show_summary=show_summary,
     )
     if saved_paths:
@@ -548,7 +567,10 @@ def evaluate(
         if show_summary:
             print(f"💾 Saved metrics to custom path: {save_path}")
 
-    target_label = "base model" if adapter_path is None else f"adapter@{adapter_path.name}"
+    if adapter_path is None:
+        target_label = adapter_label or "base model"
+    else:
+        target_label = f"adapter@{adapter_path.name}"
     if show_summary:
         _print_metrics(target_label, task, split, metrics)
 

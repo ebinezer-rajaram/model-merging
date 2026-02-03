@@ -132,6 +132,84 @@ def merge_adapters_weighted(
     return merged_weights
 
 
+def merge_task_vectors_weighted(
+    task_vector1: Dict[str, torch.Tensor],
+    task_vector2: Dict[str, torch.Tensor],
+    lambda_weight: float,
+    merge_mode: str = "common",
+) -> Dict[str, torch.Tensor]:
+    """Merge two task vectors (delta weights) using weighted averaging.
+
+    Computes: delta_W_merged = λ * delta_W_1 + (1 - λ) * delta_W_2
+
+    Args:
+        task_vector1: First task vector dict (base_key -> delta_W)
+        task_vector2: Second task vector dict (base_key -> delta_W)
+        lambda_weight: Weight for first adapter (0.0 to 1.0)
+        merge_mode: How to handle different parameters:
+            - "common": Only merge parameters present in BOTH vectors (default)
+            - "strict": Require identical parameter sets and shapes
+
+    Returns:
+        Merged task vector dict
+    """
+    if not 0.0 <= lambda_weight <= 1.0:
+        raise ValueError(
+            f"lambda_weight must be between 0.0 and 1.0, got {lambda_weight}"
+        )
+
+    if lambda_weight == 0.0:
+        print("⚠️  lambda=0.0: Returning second task vector unchanged")
+        return task_vector2.copy()
+    if lambda_weight == 1.0:
+        print("⚠️  lambda=1.0: Returning first task vector unchanged")
+        return task_vector1.copy()
+
+    keys1 = set(task_vector1.keys())
+    keys2 = set(task_vector2.keys())
+    common_keys = keys1 & keys2
+    unique_to_1 = keys1 - keys2
+    unique_to_2 = keys2 - keys1
+
+    if merge_mode == "strict":
+        if keys1 != keys2:
+            raise ValueError(
+                f"Task vectors have different parameters.\n"
+                f"Unique to vector 1: {unique_to_1}\n"
+                f"Unique to vector 2: {unique_to_2}\n"
+                f"Use merge_mode='common' to merge only common parameters."
+            )
+        keys_to_merge = keys1
+    else:
+        keys_to_merge = common_keys
+        if unique_to_1 or unique_to_2:
+            total_unique = len(unique_to_1) + len(unique_to_2)
+            print(f"⚠️  Warning: {total_unique} parameters not common to both vectors")
+            print(f"   Merging {len(common_keys)} common parameters")
+            print(f"   Excluding {len(unique_to_1)} from vector 1, {len(unique_to_2)} from vector 2")
+
+    merged_vectors: Dict[str, torch.Tensor] = {}
+    weight2 = 1.0 - lambda_weight
+
+    print(f"🧮 Computing weighted average of task vectors with λ={lambda_weight:.3f}")
+    print(f"   Weights: {lambda_weight:.1%} vector 1, {weight2:.1%} vector 2")
+    print(f"   Parameters to merge: {len(keys_to_merge)}")
+
+    for key in keys_to_merge:
+        v1 = task_vector1[key]
+        v2 = task_vector2[key]
+        if v1.shape != v2.shape:
+            message = f"Shape mismatch for {key}: {v1.shape} vs {v2.shape}"
+            if merge_mode == "strict":
+                raise ValueError(message)
+            print(f"⚠️  Skipping {key}: {message}")
+            continue
+        merged_vectors[key] = (lambda_weight * v1) + (weight2 * v2)
+
+    print(f"✅ Weighted task vector merge complete: {len(merged_vectors)} parameters merged")
+    return merged_vectors
+
+
 def merge_weighted(
     adapter1_path: Path,
     adapter2_path: Path,
@@ -263,4 +341,5 @@ def merge_weighted(
 __all__ = [
     "merge_weighted",
     "merge_adapters_weighted",
+    "merge_task_vectors_weighted",
 ]

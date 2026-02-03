@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
@@ -199,6 +201,7 @@ def _configure_special_tokens(model, processor) -> None:
 def load_model_and_processor(
     model_path: Path,
     adapter_path: Optional[Path] = None,
+    delta_weights: Optional[Dict[str, torch.Tensor]] = None,
 ) -> tuple[Any, Qwen2_5OmniProcessor]:
     """Load the base Qwen Omni model and optionally attach a LoRA adapter.
 
@@ -220,8 +223,124 @@ def load_model_and_processor(
     if adapter_path is not None:
         model = PeftModel.from_pretrained(model, str(adapter_path))
 
+    if delta_weights is not None:
+        if adapter_path is not None:
+            raise ValueError("delta_weights cannot be used with adapter_path.")
+        _apply_delta_weights(model, delta_weights)
+
     model.eval()
     return model, processor
+
+
+def _apply_delta_weights(model, delta_weights: Dict[str, torch.Tensor]) -> None:
+    """Apply in-memory delta weights to the base model parameters."""
+    missing = []
+    shape_mismatch = []
+    applied = 0
+
+    for base_key, delta in delta_weights.items():
+        candidates = [f"{base_key}.weight"]
+        if base_key.startswith("base_model."):
+            trimmed = base_key.replace("base_model.", "", 1)
+            candidates.append(f"{trimmed}.weight")
+        # Common PEFT prefix artifact: model.model -> model
+        if base_key.startswith("base_model.model.model."):
+            trimmed = base_key.replace("base_model.model.model.", "model.", 1)
+            candidates.append(f"{trimmed}.weight")
+        if base_key.startswith("model.model."):
+            trimmed = base_key.replace("model.model.", "model.", 1)
+            candidates.append(f"{trimmed}.weight")
+
+        param = None
+        matched_key = None
+        for weight_key in candidates:
+            try:
+                param = model.get_parameter(weight_key)
+                matched_key = weight_key
+                break
+            except Exception:
+                continue
+
+        if param is None:
+            missing.append(candidates[0])
+            continue
+
+        if param.shape != delta.shape:
+            shape_mismatch.append((matched_key or candidates[0], tuple(param.shape), tuple(delta.shape)))
+            continue
+
+        with torch.no_grad():
+            param.add_(delta.to(device=param.device, dtype=param.dtype))
+        applied += 1
+
+    if missing:
+        print(f"⚠️  Delta merge: {len(missing)} parameters not found in model.")
+    if shape_mismatch:
+        print(f"⚠️  Delta merge: {len(shape_mismatch)} shape mismatches; skipped.")
+    print(f"✅ Applied delta weights to {applied} parameters.")
+
+
+def _json_default(value: Any) -> str:
+    """Fallback serializer for JSON encoding of pathlib and similar objects."""
+    return str(value)
+
+
+def _compute_base_cache_path(
+    eval_dir: Path,
+    *,
+    task: str,
+    split: str,
+    config_path: Path,
+    batch_size: int,
+    generation_kwargs: Dict[str, Any],
+    dataset_cfg: Dict[str, Any],
+) -> Path:
+    """Generate a deterministic cache file path for base-model metrics."""
+    fingerprint_payload = {
+        "task": task,
+        "split": split,
+        "config_path": str(config_path.resolve()),
+        "batch_size": int(batch_size),
+        "generation_kwargs": generation_kwargs,
+        "dataset_cfg": dataset_cfg,
+    }
+    fingerprint_raw = json.dumps(fingerprint_payload, sort_keys=True, default=_json_default).encode("utf-8")
+    fingerprint = hashlib.md5(fingerprint_raw).hexdigest()[:12]
+    filename = f"{task}_{split}_base_{fingerprint}.json"
+    return eval_dir / filename
+
+
+def _resolve_merged_eval_dir(
+    *,
+    metrics_dir: Path,
+    split: str,
+    task: str,
+    merged_tasks: list[str],
+    adapter_label: Optional[str],
+    merged_method: Optional[str],
+) -> Path:
+    """Resolve output directory for merged evaluation artifacts."""
+    merged_base = ensure_dir(metrics_dir / "eval" / split / "merged")
+    other_tasks = [t for t in merged_tasks if t != task]
+    if not other_tasks:
+        other_tag = "self"
+    elif len(other_tasks) == 1:
+        other_tag = other_tasks[0]
+    else:
+        other_tag = "multi_" + "_".join(sorted(other_tasks))
+
+    method_tag = adapter_label or merged_method or "merged"
+    return ensure_dir(merged_base / other_tag / method_tag)
+
+
+def _print_metrics(label: str, task: str, split: str, metrics: Dict[str, Any]) -> None:
+    """Pretty-print evaluation metrics."""
+    print(f"✅ Evaluation complete for {label} on {task}/{split}")
+    for key, value in metrics.items():
+        if isinstance(value, (int, float)):
+            print(f"  {key}: {value:.4f}")
+        else:
+            print(f"  {key}: {value}")
 
 
 def prepare_task_for_evaluation(

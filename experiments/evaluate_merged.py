@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--method",
         default=None,
-        choices=("uniform", "weighted", "task_vector"),
+        choices=("uniform", "weighted", "task_vector", "weighted_delta"),
         help="Merge method used (for resolving adapter path).",
     )
     parser.add_argument(
