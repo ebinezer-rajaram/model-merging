@@ -1142,7 +1142,7 @@ def run_st_task(config_path: Path) -> None:
         eval_dataset=eval_val_ds,
         data_collator=collator,
         processing_class=processor,
-        compute_metrics=partial(compute_st_metrics, processor=processor),
+        compute_metrics=partial(compute_st_metrics, processor=processor, target_lang=language),
         callbacks=[EarlyStoppingCallback(**early_stopping_kwargs)],
         generation_kwargs=train_config.generation_kwargs,
     )
