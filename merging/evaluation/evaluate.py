@@ -38,6 +38,7 @@ def evaluate_merged_adapter(
     method: Optional[str] = None,
     task_names: Optional[List[str]] = None,
     lambda_weight: Optional[float] = None,
+    params: Optional[Dict[str, object]] = None,
     run_id: Optional[str] = None,
     eval_tasks: Optional[List[str]] = None,
     split: str = "test",
@@ -67,6 +68,9 @@ def evaluate_merged_adapter(
             source_metadata.append(meta)
 
         method_impl = get_merge_method(method)
+        effective_params = dict(params or {})
+        if lambda_weight is not None:
+            effective_params.setdefault("lambda", lambda_weight)
         if save_merged and not method_impl.saveable:
             raise ValueError(f"{method} cannot be saved as a LoRA adapter.")
 
@@ -74,7 +78,7 @@ def evaluate_merged_adapter(
             method=method,
             adapter_paths=adapter_paths,
             source_metadata=source_metadata,
-            lambda_weight=lambda_weight,
+            params=effective_params,
             merge_mode=merge_mode,
         )
 
@@ -235,16 +239,16 @@ def _merge_in_memory(
     method: str,
     adapter_paths: List[Path],
     source_metadata: List[Dict],
-    lambda_weight: Optional[float],
+    params: Optional[Dict[str, object]],
     merge_mode: str,
 ) -> tuple[Dict[str, "torch.Tensor"], Optional[Dict[str, "torch.Tensor"]], Dict]:
     method_impl = get_merge_method(method)
-    method_impl.validate(len(adapter_paths), lambda_weight)
+    method_impl.validate(len(adapter_paths), params)
     merge_output = method_impl.merge_in_memory(
         adapter_paths=adapter_paths,
         source_metadata=source_metadata,
         merge_mode=merge_mode,
-        lambda_weight=lambda_weight,
+        params=params,
     )
     return merge_output.merged_delta, merge_output.merged_weights, merge_output.metadata
 

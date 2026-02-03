@@ -20,7 +20,8 @@ from merging.core.utils import PACKAGE_ROOT
 class SweepConfig:
     adapters: List[str]
     method: str
-    grid: Dict[str, List[Any]]
+    grid: Dict[str, List[Any]] | None = None
+    search: Optional[Dict[str, Any]] = None
     merge_mode: str = "common"
     eval_tasks: Optional[List[str]] = None
     split: str = "test"
@@ -35,7 +36,8 @@ def load_sweep_config(path: Path) -> SweepConfig:
 
     adapters = data.get("adapters")
     method = data.get("method")
-    grid = data.get("grid", {})
+    grid = data.get("grid")
+    search = data.get("search")
     if not adapters or not method:
         raise ValueError("Sweep config must include 'adapters' and 'method'.")
 
@@ -49,6 +51,7 @@ def load_sweep_config(path: Path) -> SweepConfig:
         adapters=adapters,
         method=method,
         grid=grid,
+        search=search,
         merge_mode=data.get("merge_mode", "common"),
         eval_tasks=data.get("eval_tasks"),
         split=data.get("split", "test"),
@@ -91,7 +94,16 @@ def _score_min_interference(
 
 
 def run_sweep(config: SweepConfig) -> Dict[str, Any]:
-    params_grid = _expand_grid(config.grid)
+    search = config.search or {"type": "grid", "grid": config.grid or {}}
+    search_type = str(search.get("type", "grid")).lower()
+
+    if search_type != "grid":
+        from merging.evaluation.bayes import run_bayes_search
+
+        return run_bayes_search(config, search)
+
+    grid = search.get("grid", config.grid or {})
+    params_grid = _expand_grid(grid)
     if not params_grid:
         params_grid = [{}]
 
@@ -115,16 +127,15 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
     best_tiebreak = float("-inf")
 
     for idx, params in enumerate(params_grid, 1):
-        lambda_weight = params.get("lambda")
         method_impl = get_merge_method(config.method)
-        method_impl.validate(len(config.adapters), lambda_weight)
+        method_impl.validate(len(config.adapters), params)
 
         print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")
         results = evaluate_merged_adapter(
             adapter_path=None,
             method=config.method,
             task_names=config.adapters,
-            lambda_weight=lambda_weight,
+            params=params,
             eval_tasks=config.eval_tasks,
             split=config.split,
             save_merged=config.save_merged,
@@ -156,6 +167,7 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
         "eval_tasks": config.eval_tasks,
         "split": config.split,
         "grid": config.grid,
+        "search": config.search,
         "constraint_nonnegative": config.constraint_nonnegative,
         "best_index": best_idx,
         "best_score": best_score,

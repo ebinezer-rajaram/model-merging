@@ -20,7 +20,7 @@ def _uniform_in_memory(
     adapter_paths: List[Path],
     source_metadata: List[Dict],
     merge_mode: str,
-    lambda_weight: Optional[float],
+    params: Optional[Dict[str, object]],
 ) -> MergeOutput:
     all_weights = [load_adapter_weights(p) for p in adapter_paths]
     merged_weights = merge_adapters_uniform(all_weights, merge_mode=merge_mode)
@@ -40,8 +40,9 @@ def _weighted_in_memory(
     adapter_paths: List[Path],
     source_metadata: List[Dict],
     merge_mode: str,
-    lambda_weight: Optional[float],
+    params: Optional[Dict[str, object]],
 ) -> MergeOutput:
+    lambda_weight = None if params is None else params.get("lambda")
     if lambda_weight is None:
         raise ValueError("weighted requires lambda_weight.")
     weights1 = load_adapter_weights(adapter_paths[0])
@@ -72,7 +73,7 @@ def _task_vector_in_memory(
     adapter_paths: List[Path],
     source_metadata: List[Dict],
     merge_mode: str,
-    lambda_weight: Optional[float],
+    params: Optional[Dict[str, object]],
 ) -> MergeOutput:
     task_vectors = [extract_task_vector_from_lora(p) for p in adapter_paths]
     merged_delta = merge_adapters_uniform(task_vectors, merge_mode=merge_mode)
@@ -91,8 +92,9 @@ def _weighted_delta_in_memory(
     adapter_paths: List[Path],
     source_metadata: List[Dict],
     merge_mode: str,
-    lambda_weight: Optional[float],
+    params: Optional[Dict[str, object]],
 ) -> MergeOutput:
+    lambda_weight = None if params is None else params.get("lambda")
     if lambda_weight is None:
         raise ValueError("weighted_delta requires lambda_weight.")
     tv1 = extract_task_vector_from_lora(adapter_paths[0])
@@ -137,7 +139,7 @@ def register_builtin_methods() -> None:
     register_merge_method(
         MergeMethod(
             name="uniform",
-            requires_lambda=False,
+            required_params=(),
             min_adapters=2,
             max_adapters=None,
             saveable=True,
@@ -147,7 +149,7 @@ def register_builtin_methods() -> None:
     register_merge_method(
         MergeMethod(
             name="weighted",
-            requires_lambda=True,
+            required_params=("lambda",),
             min_adapters=2,
             max_adapters=2,
             saveable=True,
@@ -157,7 +159,7 @@ def register_builtin_methods() -> None:
     register_merge_method(
         MergeMethod(
             name="task_vector",
-            requires_lambda=False,
+            required_params=(),
             min_adapters=2,
             max_adapters=None,
             saveable=True,
@@ -168,7 +170,7 @@ def register_builtin_methods() -> None:
     register_merge_method(
         MergeMethod(
             name="weighted_delta",
-            requires_lambda=True,
+            required_params=("lambda",),
             min_adapters=2,
             max_adapters=2,
             saveable=False,

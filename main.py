@@ -181,6 +181,12 @@ def parse_args() -> argparse.Namespace:
         help="Grid override like key=0.1,0.2,0.3 (repeatable).",
     )
     sweep_parser.add_argument(
+        "--search-type",
+        default=None,
+        choices=["grid", "bayes"],
+        help="Search type override (grid or bayes).",
+    )
+    sweep_parser.add_argument(
         "--merge-mode",
         default=None,
         choices=["common", "strict"],
@@ -358,6 +364,11 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
         config_dict["method"] = args.method
     if args.grid:
         config_dict["grid"] = _parse_grid_args(args.grid)
+        search = config_dict.get("search", {"type": "grid"})
+        search["grid"] = config_dict["grid"]
+        config_dict["search"] = search
+    if args.search_type:
+        config_dict["search"] = {"type": args.search_type}
     if args.merge_mode:
         config_dict["merge_mode"] = args.merge_mode
     if args.eval_tasks:

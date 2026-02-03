@@ -20,14 +20,18 @@ class MergeOutput:
 @dataclass(frozen=True)
 class MergeMethod:
     name: str
-    requires_lambda: bool
+    required_params: tuple[str, ...]
     min_adapters: int
     max_adapters: Optional[int]
     saveable: bool
     merge_in_memory: Callable[..., MergeOutput]
     save_fn: Optional[Callable[..., Path]] = None
 
-    def validate(self, num_adapters: int, lambda_weight: Optional[float]) -> None:
+    def validate(
+        self,
+        num_adapters: int,
+        params: Optional[Dict[str, object]],
+    ) -> None:
         if num_adapters < self.min_adapters:
             raise ValueError(
                 f"{self.name} requires at least {self.min_adapters} adapters, got {num_adapters}"
@@ -36,8 +40,11 @@ class MergeMethod:
             raise ValueError(
                 f"{self.name} supports at most {self.max_adapters} adapters, got {num_adapters}"
             )
-        if self.requires_lambda and lambda_weight is None:
-            raise ValueError(f"{self.name} requires lambda_weight.")
+        if self.required_params:
+            missing = [p for p in self.required_params if not params or p not in params]
+            if missing:
+                missing_str = ", ".join(missing)
+                raise ValueError(f"{self.name} requires params: {missing_str}.")
 
 
 _REGISTRY: Dict[str, MergeMethod] = {}

@@ -44,6 +44,7 @@ def run_merge(
     adapter_specs: List[str],
     method: str,
     lambda_weight: Optional[float],
+    params: Optional[Dict[str, object]] = None,
     merge_mode: str,
     output: Optional[str],
     save_merged: bool,
@@ -62,7 +63,10 @@ def run_merge(
     task_names = [meta.get("task", f"adapter{i}") for i, meta in enumerate(source_metadata)]
 
     method_impl = get_merge_method(method)
-    method_impl.validate(len(adapter_paths), lambda_weight)
+    effective_params = dict(params or {})
+    if lambda_weight is not None:
+        effective_params.setdefault("lambda", lambda_weight)
+    method_impl.validate(len(adapter_paths), effective_params)
 
     output_path: Optional[Path] = None
     if save_merged:
@@ -93,7 +97,7 @@ def run_merge(
         adapter_paths=adapter_paths,
         source_metadata=source_metadata,
         merge_mode=merge_mode,
-        lambda_weight=lambda_weight,
+        params=effective_params,
     )
 
     if save_merged and output_path is not None:
