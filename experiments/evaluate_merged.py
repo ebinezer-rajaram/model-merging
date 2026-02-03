@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import List, Optional
 
-from merging.evaluate import evaluate_merged_adapter
+from merging.evaluation.evaluate import evaluate_merged_adapter
 
 
 def parse_args() -> argparse.Namespace:

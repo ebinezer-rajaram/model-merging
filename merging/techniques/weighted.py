@@ -14,7 +14,7 @@ Special cases:
 
 Usage:
     from merging import merge_weighted
-    from merging.utils import resolve_best_adapter, create_merge_output_path
+    from merging.core.utils import resolve_best_adapter, create_merge_output_path
 
     # Resolve adapters
     adapter1, meta1 = resolve_best_adapter("asr")
@@ -45,7 +45,7 @@ from typing import Dict, Optional
 
 import torch
 
-from merging.utils import load_adapter_weights, save_merged_adapter
+from merging.core.utils import load_adapter_weights, save_merged_adapter
 
 
 def merge_adapters_weighted(
@@ -247,7 +247,7 @@ def merge_weighted(
 
     Example:
         >>> from merging import merge_weighted
-        >>> from merging.utils import resolve_best_adapter, create_merge_output_path
+        >>> from merging.core.utils import resolve_best_adapter, create_merge_output_path
         >>>
         >>> # Resolve best adapters
         >>> adapter1, meta1 = resolve_best_adapter("asr")

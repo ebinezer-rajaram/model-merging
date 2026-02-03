@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from experiments import evaluate_task
 from experiments.train_task import main as train_task_main
@@ -160,6 +161,59 @@ def parse_args() -> argparse.Namespace:
     )
     eval_merged_parser.set_defaults(confusion_matrix=True, save_results=True)
 
+    sweep_parser = subparsers.add_parser("merge-sweep", help="Run a merge hyperparameter sweep.")
+    sweep_parser.add_argument("--config", default=None, help="Path to sweep YAML config.")
+    sweep_parser.add_argument(
+        "--adapters",
+        nargs="+",
+        default=None,
+        help="Adapter specs (task names or paths) if not using --config.",
+    )
+    sweep_parser.add_argument(
+        "--method",
+        default=None,
+        help="Merge method for sweep (overrides config).",
+    )
+    sweep_parser.add_argument(
+        "--grid",
+        action="append",
+        default=None,
+        help="Grid override like key=0.1,0.2,0.3 (repeatable).",
+    )
+    sweep_parser.add_argument(
+        "--merge-mode",
+        default=None,
+        choices=["common", "strict"],
+        help="Merge mode override.",
+    )
+    sweep_parser.add_argument(
+        "--eval-tasks",
+        nargs="+",
+        default=None,
+        help="Tasks to evaluate (overrides config).",
+    )
+    sweep_parser.add_argument(
+        "--split",
+        default=None,
+        choices=["train", "validation", "test"],
+        help="Dataset split override.",
+    )
+    sweep_parser.add_argument(
+        "--save-merged",
+        action="store_true",
+        help="Save merged adapters during sweep (overrides config).",
+    )
+    sweep_parser.add_argument(
+        "--allow-negative",
+        action="store_true",
+        help="Allow negative interference delta in ranking (default: disallow).",
+    )
+    sweep_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory for sweep summary.",
+    )
+
     return parser.parse_args()
 
 
@@ -258,6 +312,69 @@ def dispatch_evaluate_merged(args: argparse.Namespace) -> None:
     evaluate_from_args(args)
 
 
+def _parse_grid_args(grid_args: list[str] | None) -> dict:
+    if not grid_args:
+        return {}
+    grid: dict = {}
+    for entry in grid_args:
+        if "=" not in entry:
+            raise ValueError(f"Invalid grid entry '{entry}'. Expected key=val1,val2")
+        key, values_str = entry.split("=", 1)
+        values = []
+        for raw in values_str.split(","):
+            raw = raw.strip()
+            if raw == "":
+                continue
+            try:
+                if "." in raw or "e" in raw or "E" in raw:
+                    values.append(float(raw))
+                else:
+                    values.append(int(raw))
+            except ValueError:
+                values.append(raw)
+        grid[key] = values
+    return grid
+
+
+def dispatch_merge_sweep(args: argparse.Namespace) -> None:
+    from merging.evaluation.sweep import load_sweep_config, run_sweep, SweepConfig
+
+    if args.config:
+        config = load_sweep_config(Path(args.config))
+        config_dict = config.__dict__.copy()
+    else:
+        if not args.adapters or not args.method:
+            raise ValueError("Provide --config or both --adapters and --method.")
+        config_dict = {
+            "adapters": args.adapters,
+            "method": args.method,
+            "grid": _parse_grid_args(args.grid),
+        }
+
+    # Overrides
+    if args.adapters:
+        config_dict["adapters"] = args.adapters
+    if args.method:
+        config_dict["method"] = args.method
+    if args.grid:
+        config_dict["grid"] = _parse_grid_args(args.grid)
+    if args.merge_mode:
+        config_dict["merge_mode"] = args.merge_mode
+    if args.eval_tasks:
+        config_dict["eval_tasks"] = args.eval_tasks
+    if args.split:
+        config_dict["split"] = args.split
+    if args.save_merged:
+        config_dict["save_merged"] = True
+    if args.allow_negative:
+        config_dict["constraint_nonnegative"] = False
+    if args.output_dir:
+        config_dict["output_dir"] = Path(args.output_dir)
+
+    config = SweepConfig(**config_dict)
+    run_sweep(config)
+
+
 def main() -> None:
     """Dispatch commands."""
     args = parse_args()
@@ -269,6 +386,8 @@ def main() -> None:
         dispatch_evaluate(args)
     elif args.command == "evaluate-merged":
         dispatch_evaluate_merged(args)
+    elif args.command == "merge-sweep":
+        dispatch_merge_sweep(args)
     else:
         raise NotImplementedError(f"Command '{args.command}' not supported.")
 

@@ -7,17 +7,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from merging.utils import (
+from merging.core.registry import get_merge_method
+from merging.core.utils import (
+    _format_lambda,
     build_merge_tag,
     create_merge_output_path,
     infer_merged_source_tasks,
-    load_adapter_weights,
     load_merge_metadata,
     PACKAGE_ROOT,
     resolve_best_adapter,
     resolve_merged_adapter_path,
     save_merged_adapter,
 )
+
+EPS = 1e-8
+TASK_METRICS = {
+    "asr": ("wer", False),
+    "emotion": ("macro_f1", True),
+    "intent": ("accuracy", True),
+    "kws": ("macro_f1", True),
+    "langid": ("accuracy", True),
+    "speaker_id": ("accuracy", True),
+    "speaker_ver": ("accuracy", True),
+}
 
 
 def evaluate_merged_adapter(
@@ -35,6 +47,7 @@ def evaluate_merged_adapter(
     save_merged: bool = False,
     save_results: bool = True,
     show_summary: bool = True,
+    merge_mode: str = "common",
 ) -> Dict[str, Dict]:
     """Evaluate a merged adapter on one or more tasks."""
     from experiments.evaluate_task import evaluate
@@ -53,14 +66,16 @@ def evaluate_merged_adapter(
             adapter_paths.append(adapter_path_resolved)
             source_metadata.append(meta)
 
-        if method == "weighted_delta" and save_merged:
-            raise ValueError("weighted_delta cannot be saved as a LoRA adapter.")
+        method_impl = get_merge_method(method)
+        if save_merged and not method_impl.saveable:
+            raise ValueError(f"{method} cannot be saved as a LoRA adapter.")
 
         merged_delta, merged_weights, metadata = _merge_in_memory(
             method=method,
             adapter_paths=adapter_paths,
             source_metadata=source_metadata,
             lambda_weight=lambda_weight,
+            merge_mode=merge_mode,
         )
 
         source_tasks = task_names
@@ -110,6 +125,7 @@ def evaluate_merged_adapter(
                     merged_method=metadata.get("merge_method"),
                 )
                 results[task] = result.metrics
+                _maybe_add_interference_delta(task, results[task], split, show_summary)
 
                 if show_summary:
                     print(f"✅ {task} evaluation complete:")
@@ -133,7 +149,13 @@ def evaluate_merged_adapter(
             }
             if metadata.get("lambda") is not None:
                 summary["lambda"] = metadata.get("lambda")
-            summary_dir = PACKAGE_ROOT / "artifacts" / "merged" / metadata.get("merge_method", "merged")
+            method_name = metadata.get("merge_method", "merged")
+            summary_dir = PACKAGE_ROOT / "artifacts" / "merged" / method_name
+            if method_name == "weighted_delta" and source_tasks:
+                task_combo = "_".join(sorted(source_tasks))
+                summary_dir = summary_dir / task_combo
+                if metadata.get("lambda") is not None:
+                    summary_dir = summary_dir / _format_lambda(float(metadata["lambda"]))
             summary_dir.mkdir(parents=True, exist_ok=True)
             results_path = summary_dir / f"eval_results_{merge_tag}_{split}.json"
             with results_path.open("w") as handle:
@@ -178,6 +200,7 @@ def evaluate_merged_adapter(
                 merged_method=metadata.get("merge_method"),
             )
             results[task] = result.metrics
+            _maybe_add_interference_delta(task, results[task], split, show_summary)
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")
@@ -213,96 +236,81 @@ def _merge_in_memory(
     adapter_paths: List[Path],
     source_metadata: List[Dict],
     lambda_weight: Optional[float],
+    merge_mode: str,
 ) -> tuple[Dict[str, "torch.Tensor"], Optional[Dict[str, "torch.Tensor"]], Dict]:
-    import torch
-    from experiments.extract_vector import extract_task_vector_from_lora
-    from merging.uniform import merge_adapters_uniform
-    from merging.weighted import merge_adapters_weighted, merge_task_vectors_weighted
+    method_impl = get_merge_method(method)
+    method_impl.validate(len(adapter_paths), lambda_weight)
+    merge_output = method_impl.merge_in_memory(
+        adapter_paths=adapter_paths,
+        source_metadata=source_metadata,
+        merge_mode=merge_mode,
+        lambda_weight=lambda_weight,
+    )
+    return merge_output.merged_delta, merge_output.merged_weights, merge_output.metadata
 
-    if method == "weighted" and lambda_weight is None:
-        raise ValueError("weighted requires lambda_weight.")
-    if method == "weighted_delta" and lambda_weight is None:
-        raise ValueError("weighted_delta requires lambda_weight.")
 
-    if method == "weighted" and len(adapter_paths) != 2:
-        raise ValueError("weighted requires exactly two adapters.")
-    if method == "weighted_delta" and len(adapter_paths) != 2:
-        raise ValueError("weighted_delta requires exactly two adapters.")
+def _load_eval_metric(task: str, split: str, filename: str, metric_key: str) -> Optional[float]:
+    metrics_path = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split / filename
+    if not metrics_path.exists():
+        return None
+    try:
+        with metrics_path.open("r") as handle:
+            data = json.load(handle)
+    except Exception:
+        return None
+    value = data.get(metric_key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
-    merged_weights: Optional[Dict[str, torch.Tensor]] = None
-    merged_delta: Dict[str, torch.Tensor]
 
-    if method == "uniform":
-        all_weights = [load_adapter_weights(p) for p in adapter_paths]
-        merged_weights = merge_adapters_uniform(all_weights, merge_mode="common")
-        merged_delta = _compute_delta_from_lora_weights(merged_weights, adapter_paths[0])
-    elif method == "weighted":
-        weights1 = load_adapter_weights(adapter_paths[0])
-        weights2 = load_adapter_weights(adapter_paths[1])
-        merged_weights = merge_adapters_weighted(
-            weights1,
-            weights2,
-            lambda_weight=lambda_weight,
-            merge_mode="common",
-        )
-        merged_delta = _compute_delta_from_lora_weights(merged_weights, adapter_paths[0])
-    elif method == "task_vector":
-        task_vectors = [extract_task_vector_from_lora(p) for p in adapter_paths]
-        merged_delta = merge_adapters_uniform(task_vectors, merge_mode="common")
-    elif method == "weighted_delta":
-        tv1 = extract_task_vector_from_lora(adapter_paths[0])
-        tv2 = extract_task_vector_from_lora(adapter_paths[1])
-        merged_delta = merge_task_vectors_weighted(
-            tv1,
-            tv2,
-            lambda_weight=lambda_weight,
-            merge_mode="common",
-        )
-    else:
-        raise ValueError(f"Unknown merge method: {method}")
+def _oriented_score(value: float, higher_is_better: bool) -> float:
+    return value if higher_is_better else -value
 
-    metadata = {
-        "merge_method": method,
-        "merge_mode": "common",
-        "num_adapters": len(adapter_paths),
-        "timestamp": datetime.now().isoformat(),
-        "source_adapters": source_metadata,
-        "num_parameters": len(merged_delta),
+
+def _maybe_add_interference_delta(task: str, metrics: Dict, split: str, show_summary: bool) -> None:
+    task_key = task.lower()
+    if task_key not in TASK_METRICS:
+        return
+
+    metric_key, higher_is_better = TASK_METRICS[task_key]
+    merged_value = metrics.get(metric_key)
+    if not isinstance(merged_value, (int, float)):
+        return
+
+    base_value = _load_eval_metric(task_key, split, "base_model.json", metric_key)
+    task_value = _load_eval_metric(task_key, split, f"best_{task_key}_adapter.json", metric_key)
+    if base_value is None or task_value is None:
+        if show_summary:
+            missing = []
+            if base_value is None:
+                missing.append("base_model.json")
+            if task_value is None:
+                missing.append(f"best_{task_key}_adapter.json")
+            missing_str = ", ".join(missing)
+            print(
+                f"⚠️  Skipping interference_delta for {task_key}/{split}: "
+                f"missing {missing_str} under artifacts/{task_key}/metrics/eval/{split}"
+            )
+        return
+
+    merged_score = _oriented_score(float(merged_value), higher_is_better)
+    base_score = _oriented_score(base_value, higher_is_better)
+    task_score = _oriented_score(task_value, higher_is_better)
+    denom = task_score - base_score
+    if abs(denom) < EPS:
+        return
+
+    metrics["interference_delta"] = (merged_score - base_score) / denom
+    metrics["interference_delta_meta"] = {
+        "metric": metric_key,
+        "base": base_value,
+        "task_adapter": task_value,
+        "merged": float(merged_value),
+        "split": split,
     }
-    if lambda_weight is not None:
-        metadata["lambda"] = lambda_weight
-    return merged_delta, merged_weights, metadata
-
-
-def _compute_delta_from_lora_weights(
-    lora_weights: Dict[str, "torch.Tensor"],
-    reference_adapter_path: Path,
-) -> Dict[str, "torch.Tensor"]:
-    import json
-
-    config_path = reference_adapter_path / "adapter_config.json"
-    with open(config_path, "r") as handle:
-        config = json.load(handle)
-
-    lora_alpha = config["lora_alpha"]
-    lora_r = config["r"]
-    scaling = lora_alpha / lora_r
-
-    lora_pairs: Dict[str, Dict[str, "torch.Tensor"]] = {}
-    for key, tensor in lora_weights.items():
-        if ".lora_A." in key:
-            base_key = key.replace(".lora_A.weight", "")
-            lora_pairs.setdefault(base_key, {})["A"] = tensor
-        elif ".lora_B." in key:
-            base_key = key.replace(".lora_B.weight", "")
-            lora_pairs.setdefault(base_key, {})["B"] = tensor
-
-    task_vectors: Dict[str, "torch.Tensor"] = {}
-    for base_key, pair in lora_pairs.items():
-        if "A" in pair and "B" in pair:
-            task_vectors[base_key] = (pair["B"] @ pair["A"]) * scaling
-
-    return task_vectors
+    if show_summary:
+        print(f"   interference_delta: {metrics['interference_delta']:.4f}")
 
 
 def _save_merged_adapter(
@@ -313,8 +321,9 @@ def _save_merged_adapter(
     merged_weights: Optional[Dict[str, "torch.Tensor"]],
     metadata: Dict,
 ) -> Path:
-    if method == "weighted_delta":
-        raise ValueError("weighted_delta cannot be saved as a LoRA adapter.")
+    method_impl = get_merge_method(method)
+    if not method_impl.saveable:
+        raise ValueError(f"{method} cannot be saved as a LoRA adapter.")
 
     output_path = create_merge_output_path(
         method,
@@ -322,10 +331,8 @@ def _save_merged_adapter(
         {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,
     )
 
-    if method == "task_vector":
-        from experiments.merge_vectors import merge_uniform_via_task_vectors
-
-        merge_uniform_via_task_vectors(
+    if method_impl.save_fn is not None:
+        method_impl.save_fn(
             adapter_paths=adapter_paths,
             output_path=output_path,
             merge_mode=metadata.get("merge_mode", "common"),
@@ -383,6 +390,7 @@ def _evaluate_saved_merged(
                 merged_method=metadata.get("merge_method"),
             )
             results[task] = result.metrics
+            _maybe_add_interference_delta(task, results[task], split, show_summary)
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")

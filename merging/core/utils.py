@@ -343,6 +343,36 @@ def load_adapter_weights(adapter_path: Path) -> Dict[str, torch.Tensor]:
     return weights
 
 
+def compute_delta_from_lora_weights(
+    lora_weights: Dict[str, torch.Tensor],
+    reference_adapter_path: Path,
+) -> Dict[str, torch.Tensor]:
+    """Compute full-rank task vectors (delta weights) from LoRA weights."""
+    config_path = reference_adapter_path / "adapter_config.json"
+    with open(config_path, "r") as handle:
+        config = json.load(handle)
+
+    lora_alpha = config["lora_alpha"]
+    lora_r = config["r"]
+    scaling = lora_alpha / lora_r
+
+    lora_pairs: Dict[str, Dict[str, torch.Tensor]] = {}
+    for key, tensor in lora_weights.items():
+        if ".lora_A." in key:
+            base_key = key.replace(".lora_A.weight", "")
+            lora_pairs.setdefault(base_key, {})["A"] = tensor
+        elif ".lora_B." in key:
+            base_key = key.replace(".lora_B.weight", "")
+            lora_pairs.setdefault(base_key, {})["B"] = tensor
+
+    task_vectors: Dict[str, torch.Tensor] = {}
+    for base_key, pair in lora_pairs.items():
+        if "A" in pair and "B" in pair:
+            task_vectors[base_key] = (pair["B"] @ pair["A"]) * scaling
+
+    return task_vectors
+
+
 def create_merged_adapter_config(
     reference_adapter_path: Path,
     merged_weights: Dict[str, torch.Tensor],
@@ -522,6 +552,7 @@ def create_merge_output_path(
 __all__ = [
     "resolve_best_adapter",
     "load_adapter_weights",
+    "compute_delta_from_lora_weights",
     "create_merged_adapter_config",
     "save_merged_adapter",
     "create_merge_output_path",
