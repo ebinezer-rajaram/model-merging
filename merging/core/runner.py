@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from merging.core.registry import MergeResult, get_merge_method, normalize_params
 from merging.core.utils import create_merge_output_path, resolve_best_adapter, save_merged_adapter
 from merging.core.utils import build_merge_tag
+from merging.core.utils import PACKAGE_ROOT
 
 
 def resolve_adapter_specs(
@@ -37,7 +38,13 @@ def resolve_adapter_specs(
         try:
             adapter_path, metadata = resolve_best_adapter(spec)
             print(f"✅ Resolved '{spec}' to: {adapter_path}")
-            print(f"   Metrics: {metadata.get('metrics', {})}")
+            metrics = metadata.get("metrics", {}) or {}
+            # Print only a small scalar summary to avoid terminal spam.
+            preferred = ("wer", "eval_wer", "accuracy", "eval_accuracy", "macro_f1", "eval_macro_f1", "eval_loss")
+            shown = {k: metrics[k] for k in preferred if k in metrics}
+            if not shown:
+                shown = {k: v for k, v in list(metrics.items())[:6]}
+            print(f"   Metrics: {shown}")
             resolved.append((adapter_path, metadata))
         except Exception as exc:
             raise ValueError(
@@ -83,7 +90,7 @@ def run_merge(
         if output:
             base = Path(output)
             if not base.is_absolute():
-                base = Path(__file__).resolve().parents[1] / base
+                base = PACKAGE_ROOT / base
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_path = base / "runs" / f"run_{timestamp}"
             output_path.mkdir(parents=True, exist_ok=True)

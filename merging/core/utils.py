@@ -19,9 +19,10 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-# Add package root to path for imports
+# Add repo root to path for imports
+# `merging/core/utils.py` lives at `<repo>/merging/core/utils.py`, so the repo root is two levels up.
 CURRENT_DIR = Path(__file__).resolve().parent
-PACKAGE_ROOT = CURRENT_DIR.parent
+PACKAGE_ROOT = CURRENT_DIR.parent.parent
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
@@ -366,12 +367,23 @@ def resolve_best_adapter(task_name: str) -> Tuple[Path, Dict]:
             f"Best adapter not found at {best_path} for task {task_name}"
         )
 
+    def _filter_metrics_for_metadata(raw: Dict) -> Dict:
+        """Keep only small scalar metrics; drop large arrays (e.g., eval__predictions)."""
+        filtered: Dict = {}
+        for key, value in (raw or {}).items():
+            # Common offenders: eval__predictions / eval__labels
+            if "__" in key:
+                continue
+            if isinstance(value, (int, float, bool, str)):
+                filtered[key] = value
+        return filtered
+
     # Build metadata
     metadata = {
         "task": task_name,
         "path": str(best_path.resolve()),
         "run_id": best_run["run_id"],
-        "metrics": best_run.get("metrics", {}),
+        "metrics": _filter_metrics_for_metadata(best_run.get("metrics", {})),
         "config_hash": best_run.get("config_hash"),
         "timestamp": best_run.get("timestamp"),
     }
