@@ -589,12 +589,13 @@ def create_merge_output_path(
 
     Generates paths like:
     - artifacts/merged/uniform/asr_emotion/runs/run_20260116_143052/
-    - artifacts/merged/weighted/asr_emotion_lambda0.7/runs/run_20260116_144523/
+    - artifacts/merged/weighted/asr_emotion/runs/run_20260116_144523/
 
     Args:
         method: Merge method name (e.g., "uniform", "weighted")
         task_names: List of task names being merged
-        extra_params: Optional dict with extra parameters (e.g., {"lambda": 0.7})
+        extra_params: Optional dict with extra parameters (e.g., {"lambda": 0.7}).
+            Note: params are stored in metadata and do not affect directory layout.
         base_dir: Optional base directory (defaults to PACKAGE_ROOT/artifacts/merged)
 
     Returns:
@@ -603,7 +604,7 @@ def create_merge_output_path(
     Example:
         >>> path = create_merge_output_path("weighted", ["asr", "emotion"], {"lambda": 0.7})
         >>> print(path)
-        /path/to/artifacts/merged/weighted/asr_emotion_lambda0.7/runs/run_20260116_143052
+        /path/to/artifacts/merged/weighted/asr_emotion/runs/run_20260116_143052
     """
     if base_dir is None:
         base_dir = PACKAGE_ROOT / "artifacts" / "merged"
@@ -611,14 +612,8 @@ def create_merge_output_path(
     # Create task combination name
     task_combo = "_".join(sorted(task_names))
 
-    # Add extra parameters to name if provided
-    if extra_params:
-        for key, value in sorted(extra_params.items()):
-            # Format floats nicely (0.7 instead of 0.70000)
-            if isinstance(value, float):
-                task_combo += f"_{key}{value:.10g}"
-            else:
-                task_combo += f"_{key}{value}"
+    # NOTE: extra_params are intentionally not encoded into the directory name.
+    # We rely on per-run metadata (`merge_metadata.json`) and tags to distinguish runs.
 
     # Create full path: merged/{method}/{task_combo}/runs/run_{timestamp}
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from merging.core.registry import get_merge_method, normalize_params
 from merging.core.runner import resolve_adapter_specs
@@ -21,6 +21,7 @@ from merging.core.utils import (
     resolve_merged_adapter_path,
     save_merged_adapter,
 )
+from core import compute_eval_subset_tag
 
 EPS = 1e-8
 TASK_METRICS = {
@@ -51,11 +52,16 @@ def evaluate_merged_adapter(
     save_results: bool = True,
     show_summary: bool = True,
     merge_mode: str = "common",
+    compute_missing_interference_baselines: bool = True,
+    eval_subset: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict]:
     """Evaluate a merged adapter on one or more tasks."""
     from experiments.evaluate_task import evaluate
 
     results: Dict[str, Dict] = {}
+    eval_tag: Optional[str] = None
+    if eval_subset and bool(eval_subset.get("enabled", True)):
+        eval_tag = compute_eval_subset_tag(eval_subset)
     if adapter_path is None:
         if not method:
             raise ValueError("method is required for in-memory merged evaluation.")
@@ -90,6 +96,16 @@ def evaluate_merged_adapter(
 
         merge_tag = build_merge_tag(metadata, source_tasks or None)
 
+        if compute_missing_interference_baselines:
+            _maybe_compute_interference_baselines(
+                tasks=tasks_to_eval,
+                split=split,
+                enable_cache=enable_cache,
+                batch_size=batch_size,
+                show_summary=show_summary,
+                eval_subset=eval_subset,
+            )
+
         if save_merged:
             merged_run_path = _save_merged_adapter(
                 method=method,
@@ -108,6 +124,7 @@ def evaluate_merged_adapter(
                 generate_confusion_matrix=generate_confusion_matrix,
                 save_results=save_results,
                 show_summary=show_summary,
+                eval_subset=eval_subset,
             )
 
         print(f"\n📊 Evaluating {metadata.get('merge_method')} in-memory on {len(tasks_to_eval)} task(s) ({split} split)")
@@ -128,9 +145,10 @@ def evaluate_merged_adapter(
                     adapter_label=merge_tag,
                     merged_tasks=source_tasks,
                     merged_method=metadata.get("merge_method"),
+                    eval_subset=eval_subset,
                 )
                 results[task] = result.metrics
-                _maybe_add_interference_delta(task, results[task], split, show_summary)
+                _maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
 
                 if show_summary:
                     print(f"✅ {task} evaluation complete:")
@@ -163,10 +181,15 @@ def evaluate_merged_adapter(
             }
             if metadata.get("lambda") is not None:
                 summary["lambda"] = metadata.get("lambda")
+            if eval_subset is not None:
+                summary["eval_subset"] = eval_subset
+            if eval_tag is not None:
+                summary["eval_tag"] = eval_tag
             method_name = metadata.get("merge_method", "merged")
             eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
             eval_dir.mkdir(parents=True, exist_ok=True)
-            results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
+            suffix = f"__{eval_tag}" if eval_tag else ""
+            results_path = eval_dir / f"eval_results_{merge_tag}{suffix}_{split}.json"
             with results_path.open("w") as handle:
                 json.dump(summary, handle, indent=2)
             if show_summary:
@@ -181,7 +204,8 @@ def evaluate_merged_adapter(
             merge_metadata_path = output_path / "merge_metadata.json"
             with merge_metadata_path.open("w") as handle:
                 json.dump(metadata, handle, indent=2)
-            run_results_path = output_path / f"eval_results_{split}.json"
+            run_suffix = f"__{eval_tag}" if eval_tag else ""
+            run_results_path = output_path / f"eval_results_{split}{run_suffix}.json"
             with run_results_path.open("w") as handle:
                 json.dump(summary, handle, indent=2)
             summary_path = output_path / "summary.json"
@@ -195,6 +219,7 @@ def evaluate_merged_adapter(
                         "source_tasks": source_tasks,
                         "evaluated_tasks": tasks_to_eval,
                         "split": split,
+                        "eval_tag": eval_tag,
                         "results_path": str(run_results_path),
                     },
                     handle,
@@ -232,6 +257,16 @@ def evaluate_merged_adapter(
 
     merge_tag = build_merge_tag(metadata, source_tasks or task_names)
 
+    if compute_missing_interference_baselines:
+        _maybe_compute_interference_baselines(
+            tasks=tasks_to_eval,
+            split=split,
+            enable_cache=enable_cache,
+            batch_size=batch_size,
+            show_summary=show_summary,
+            eval_subset=eval_subset,
+        )
+
     print(f"\n📊 Evaluating merged adapter on {len(tasks_to_eval)} task(s) ({split} split)")
 
     for i, task in enumerate(tasks_to_eval, 1):
@@ -248,9 +283,10 @@ def evaluate_merged_adapter(
                 generate_confusion_matrix=generate_confusion_matrix,
                 merged_tasks=source_tasks,
                 merged_method=metadata.get("merge_method"),
+                eval_subset=eval_subset,
             )
             results[task] = result.metrics
-            _maybe_add_interference_delta(task, results[task], split, show_summary)
+            _maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")
@@ -280,7 +316,12 @@ def evaluate_merged_adapter(
             "evaluated_tasks": tasks_to_eval,
             "results": results,
         }
-        results_path = merged_run_path / f"eval_results_{split}.json"
+        if eval_subset is not None:
+            summary["eval_subset"] = eval_subset
+        if eval_tag is not None:
+            summary["eval_tag"] = eval_tag
+        suffix = f"__{eval_tag}" if eval_tag else ""
+        results_path = merged_run_path / f"eval_results_{split}{suffix}.json"
         with results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
         if show_summary:
@@ -289,7 +330,7 @@ def evaluate_merged_adapter(
         method_name = metadata.get("merge_method", "merged")
         eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
         eval_dir.mkdir(parents=True, exist_ok=True)
-        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
+        eval_results_path = eval_dir / f"eval_results_{merge_tag}{suffix}_{split}.json"
         with eval_results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
         if show_summary:
@@ -328,8 +369,25 @@ def _merge_in_memory(
     return merge_output.merged_delta, merge_output.merged_weights, merge_output.metadata
 
 
-def _load_eval_metric(task: str, split: str, filename: str, metric_key: str) -> Optional[float]:
-    metrics_path = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split / filename
+def _with_eval_tag(filename: str, eval_tag: Optional[str]) -> str:
+    if not eval_tag:
+        return filename
+    stem, dot, ext = filename.rpartition(".")
+    if not dot:
+        stem, ext = filename, "json"
+    return f"{stem}__{eval_tag}.{ext}"
+
+
+def _load_eval_metric(task: str, split: str, filename: str, metric_key: str, *, eval_tag: Optional[str] = None) -> Optional[float]:
+    candidates = [_with_eval_tag(filename, eval_tag), filename] if eval_tag else [filename]
+    metrics_path = None
+    for name in candidates:
+        path = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split / name
+        if path.exists():
+            metrics_path = path
+            break
+    if metrics_path is None:
+        return None
     if not metrics_path.exists():
         return None
     try:
@@ -347,7 +405,78 @@ def _oriented_score(value: float, higher_is_better: bool) -> float:
     return value if higher_is_better else -value
 
 
-def _maybe_add_interference_delta(task: str, metrics: Dict, split: str, show_summary: bool) -> None:
+def _maybe_compute_interference_baselines(
+    *,
+    tasks: List[str],
+    split: str,
+    enable_cache: bool,
+    batch_size: Optional[int],
+    show_summary: bool,
+    eval_subset: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Ensure baseline metrics exist for computing interference_delta."""
+    # Import lazily to avoid pulling in heavyweight deps for call sites
+    # that only want to read or post-process metrics.
+    from experiments.evaluate_task import evaluate
+
+    eval_tag: Optional[str] = None
+    if eval_subset and bool(eval_subset.get("enabled", True)):
+        eval_tag = compute_eval_subset_tag(eval_subset)
+
+    for task in tasks:
+        task_key = task.lower()
+        if task_key not in TASK_METRICS:
+            continue
+
+        metric_key, _ = TASK_METRICS[task_key]
+        base_value = _load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=eval_tag)
+        task_value = _load_eval_metric(task_key, split, f"best_{task_key}_adapter.json", metric_key, eval_tag=eval_tag)
+        if base_value is not None and task_value is not None:
+            continue
+
+        if show_summary:
+            missing = []
+            if base_value is None:
+                missing.append("base_model.json")
+            if task_value is None:
+                missing.append(f"best_{task_key}_adapter.json")
+            print(f"🧮 Computing missing interference baselines for {task_key}/{split}: {', '.join(missing)}")
+
+        try:
+            if base_value is None:
+                evaluate(
+                    task=task_key,
+                    adapter=None,
+                    split=split,
+                    batch_size=batch_size,
+                    enable_cache=enable_cache,
+                    show_summary=show_summary,
+                    generate_confusion_matrix=False,
+                    eval_subset=eval_subset,
+                )
+        except Exception as exc:
+            if show_summary:
+                print(f"⚠️  Failed to compute base_model metrics for {task_key}/{split}: {exc}")
+
+        try:
+            if task_value is None:
+                # Passing adapter=<task> resolves that task's "best" adapter run.
+                evaluate(
+                    task=task_key,
+                    adapter=task_key,
+                    split=split,
+                    batch_size=batch_size,
+                    enable_cache=enable_cache,
+                    show_summary=show_summary,
+                    generate_confusion_matrix=False,
+                    eval_subset=eval_subset,
+                )
+        except Exception as exc:
+            if show_summary:
+                print(f"⚠️  Failed to compute best adapter metrics for {task_key}/{split}: {exc}")
+
+
+def _maybe_add_interference_delta(task: str, metrics: Dict, split: str, show_summary: bool, *, eval_tag: Optional[str]) -> None:
     task_key = task.lower()
     if task_key not in TASK_METRICS:
         return
@@ -357,15 +486,15 @@ def _maybe_add_interference_delta(task: str, metrics: Dict, split: str, show_sum
     if not isinstance(merged_value, (int, float)):
         return
 
-    base_value = _load_eval_metric(task_key, split, "base_model.json", metric_key)
-    task_value = _load_eval_metric(task_key, split, f"best_{task_key}_adapter.json", metric_key)
+    base_value = _load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=eval_tag)
+    task_value = _load_eval_metric(task_key, split, f"best_{task_key}_adapter.json", metric_key, eval_tag=eval_tag)
     if base_value is None or task_value is None:
         if show_summary:
             missing = []
             if base_value is None:
-                missing.append("base_model.json")
+                missing.append(_with_eval_tag("base_model.json", eval_tag))
             if task_value is None:
-                missing.append(f"best_{task_key}_adapter.json")
+                missing.append(_with_eval_tag(f"best_{task_key}_adapter.json", eval_tag))
             missing_str = ", ".join(missing)
             print(
                 f"⚠️  Skipping interference_delta for {task_key}/{split}: "
@@ -444,12 +573,16 @@ def _evaluate_saved_merged(
     generate_confusion_matrix: bool,
     save_results: bool,
     show_summary: bool,
+    eval_subset: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict]:
     from experiments.evaluate_task import evaluate
 
     results: Dict[str, Dict] = {}
     source_tasks = infer_merged_source_tasks(metadata)
     merge_tag = build_merge_tag(metadata, source_tasks)
+    eval_tag: Optional[str] = None
+    if eval_subset and bool(eval_subset.get("enabled", True)):
+        eval_tag = compute_eval_subset_tag(eval_subset)
 
     print(f"\n📊 Evaluating saved merged adapter on {len(tasks_to_eval)} task(s) ({split} split)")
 
@@ -467,9 +600,10 @@ def _evaluate_saved_merged(
                 generate_confusion_matrix=generate_confusion_matrix,
                 merged_tasks=source_tasks,
                 merged_method=metadata.get("merge_method"),
+                eval_subset=eval_subset,
             )
             results[task] = result.metrics
-            _maybe_add_interference_delta(task, results[task], split, show_summary)
+            _maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")

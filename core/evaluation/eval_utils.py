@@ -7,7 +7,7 @@ from functools import partial
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 import torch
 from peft import PeftModel
@@ -22,6 +22,16 @@ from core.data.io_utils import ensure_dir
 from core.training.trainer import CustomTrainer
 
 DEFAULT_GENERATION_KWARGS: Dict[str, Any] = {"max_new_tokens": 128, "do_sample": False}
+
+def compute_eval_subset_tag(eval_subset: Mapping[str, Any]) -> str:
+    """Return a stable short tag for evaluation-subset settings.
+
+    This tag is used to namespace metrics so that subset-based evaluations do not
+    overwrite full-split metrics (e.g., base_model.json).
+    """
+    payload = json.dumps(dict(eval_subset), sort_keys=True, default=str).encode("utf-8")
+    digest = hashlib.md5(payload).hexdigest()[:10]
+    return f"subset_{digest}"
 
 CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "dataset_name",

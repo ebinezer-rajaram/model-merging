@@ -25,6 +25,7 @@ from .data import (
 from .evaluation import (
     TaskEvalSetup,
     compute_base_cache_path,
+    compute_eval_subset_tag,
     compute_wer_from_texts,
     decode_tokens,
     get_registered_eval_tasks,
@@ -99,6 +100,7 @@ __all__ = [
     "plot_loss_and_wer",
     "plot_confusion_matrix",
     "compute_base_cache_path",
+    "compute_eval_subset_tag",
     "resolve_merged_eval_dir",
     "print_metrics",
     "set_global_seed",

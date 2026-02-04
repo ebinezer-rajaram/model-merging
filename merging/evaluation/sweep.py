@@ -22,12 +22,21 @@ class SweepConfig:
     method: str
     grid: Dict[str, List[Any]] | None = None
     search: Optional[Dict[str, Any]] = None
+    eval_subset: Optional[Dict[str, Any]] = None
     merge_mode: str = "common"
     eval_tasks: Optional[List[str]] = None
     split: str = "test"
     save_merged: bool = False
+    compute_missing_interference_baselines: bool = True
     constraint_nonnegative: bool = True
     output_dir: Optional[Path] = None
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w") as handle:
+        json.dump(payload, handle, indent=2)
+    tmp_path.replace(path)
 
 
 def load_sweep_config(path: Path) -> SweepConfig:
@@ -52,10 +61,12 @@ def load_sweep_config(path: Path) -> SweepConfig:
         method=method,
         grid=grid,
         search=search,
+        eval_subset=data.get("eval_subset"),
         merge_mode=data.get("merge_mode", "common"),
         eval_tasks=data.get("eval_tasks"),
         split=data.get("split", "test"),
         save_merged=bool(data.get("save_merged", False)),
+        compute_missing_interference_baselines=bool(data.get("compute_missing_interference_baselines", True)),
         constraint_nonnegative=bool(data.get("constraint_nonnegative", True)),
         output_dir=output_dir,
     )
@@ -107,7 +118,8 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
     if not params_grid:
         params_grid = [{}]
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    started_at = datetime.now()
+    timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     summary_dir = config.output_dir
     if summary_dir is None:
         summary_dir = (
@@ -126,58 +138,73 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
     best_score = float("-inf")
     best_tiebreak = float("-inf")
 
-    for idx, params in enumerate(params_grid, 1):
-        method_impl = get_merge_method(config.method)
-        effective_params = normalize_params(method_impl, params=params)
-        method_impl.validate(len(config.adapters), effective_params)
-
-        print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")
-        results = evaluate_merged_adapter(
-            adapter_path=None,
-            method=config.method,
-            task_names=config.adapters,
-            params=effective_params,
-            eval_tasks=config.eval_tasks,
-            split=config.split,
-            save_merged=config.save_merged,
-            save_results=True,
-            show_summary=True,
-            merge_mode=config.merge_mode,
-        )
-
-        score, stats = _score_min_interference(results, config.constraint_nonnegative)
-        run_entry = {
-            "params": params,
-            "score": score,
-            "score_details": stats,
-            "results": results,
-        }
-        runs.append(run_entry)
-
-        tiebreak = stats.get("mean_interference_delta", float("-inf"))
-        if score > best_score or (score == best_score and tiebreak > best_tiebreak):
-            best_score = score
-            best_tiebreak = tiebreak
-            best_idx = idx - 1
-            print(f"🏆 Best so far: params={params} score={best_score:.4f}")
-
-    summary = {
-        "timestamp": datetime.now().isoformat(),
+    summary: Dict[str, Any] = {
+        "timestamp": started_at.isoformat(),
         "method": config.method,
         "adapters": config.adapters,
         "merge_mode": config.merge_mode,
         "eval_tasks": config.eval_tasks,
         "split": config.split,
+        "eval_subset": config.eval_subset,
         "grid": config.grid,
-        "search": config.search,
+        "search": search,
         "constraint_nonnegative": config.constraint_nonnegative,
         "best_index": best_idx,
         "best_score": best_score,
         "runs": runs,
     }
+    _atomic_write_json(summary_path, summary)
 
-    with summary_path.open("w") as handle:
-        json.dump(summary, handle, indent=2)
+    try:
+        for idx, params in enumerate(params_grid, 1):
+            method_impl = get_merge_method(config.method)
+            effective_params = normalize_params(method_impl, params=params)
+            method_impl.validate(len(config.adapters), effective_params)
+
+            print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")
+            results = evaluate_merged_adapter(
+                adapter_path=None,
+                method=config.method,
+                task_names=config.adapters,
+                params=effective_params,
+                eval_tasks=config.eval_tasks,
+                split=config.split,
+                save_merged=config.save_merged,
+                save_results=True,
+                show_summary=True,
+                merge_mode=config.merge_mode,
+                compute_missing_interference_baselines=config.compute_missing_interference_baselines,
+                eval_subset=config.eval_subset,
+            )
+
+            score, stats = _score_min_interference(results, config.constraint_nonnegative)
+            run_entry = {
+                "params": params,
+                "score": score,
+                "score_details": stats,
+                "results": results,
+            }
+            runs.append(run_entry)
+
+            tiebreak = stats.get("mean_interference_delta", float("-inf"))
+            if score > best_score or (score == best_score and tiebreak > best_tiebreak):
+                best_score = score
+                best_tiebreak = tiebreak
+                best_idx = idx - 1
+                print(f"🏆 Best so far: params={params} score={best_score:.4f}")
+
+            summary["best_index"] = best_idx
+            summary["best_score"] = best_score
+            _atomic_write_json(summary_path, summary)
+    except KeyboardInterrupt:
+        summary["best_index"] = best_idx
+        summary["best_score"] = best_score
+        _atomic_write_json(summary_path, summary)
+        print(f"\n⏹️  Sweep interrupted. Partial summary saved to {summary_path}")
+        if best_idx is not None and runs:
+            best_params = runs[best_idx]["params"]
+            print(f"🏆 Best params so far: {best_params} (score={best_score:.4f})")
+        return summary
 
     print(f"\n💾 Sweep summary saved to {summary_path}")
     if best_idx is not None:

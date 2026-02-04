@@ -360,7 +360,11 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
         search["grid"] = config_dict["grid"]
         config_dict["search"] = search
     if args.search_type:
-        config_dict["search"] = {"type": args.search_type}
+        search = config_dict.get("search") or {}
+        if not isinstance(search, dict):
+            search = {}
+        search["type"] = args.search_type
+        config_dict["search"] = search
     if args.merge_mode:
         config_dict["merge_mode"] = args.merge_mode
     if args.eval_tasks:

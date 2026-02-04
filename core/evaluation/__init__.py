@@ -3,6 +3,7 @@
 from .eval_utils import (
     TaskEvalSetup,
     compute_base_cache_path,
+    compute_eval_subset_tag,
     get_registered_eval_tasks,
     load_model_and_processor,
     print_metrics,
@@ -17,6 +18,7 @@ from .plotting import plot_confusion_matrix, plot_loss_and_wer
 __all__ = [
     "TaskEvalSetup",
     "compute_base_cache_path",
+    "compute_eval_subset_tag",
     "get_registered_eval_tasks",
     "load_model_and_processor",
     "print_metrics",

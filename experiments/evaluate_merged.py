@@ -73,6 +73,13 @@ def parse_args() -> argparse.Namespace:
         dest="save_merged",
         help="Save merged adapter before evaluation (default: in-memory only).",
     )
+    parser.add_argument(
+        "--no-compute-interference-baselines",
+        action="store_false",
+        dest="compute_missing_interference_baselines",
+        help="Do not auto-compute base_model/best_adapter metrics needed for interference_delta.",
+    )
+    parser.set_defaults(compute_missing_interference_baselines=True)
     parser.set_defaults(confusion_matrix=True, save_results=True)
     return parser.parse_args()
 
@@ -92,6 +99,7 @@ def evaluate_from_args(args: argparse.Namespace) -> dict:
         save_merged=args.save_merged,
         save_results=args.save_results,
         show_summary=True,
+        compute_missing_interference_baselines=args.compute_missing_interference_baselines,
     )
 
 

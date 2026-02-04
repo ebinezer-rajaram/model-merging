@@ -6,6 +6,8 @@ import argparse
 import sys
 import json
 import os
+import random
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 from core import (
     compute_base_cache_path,
+    compute_eval_subset_tag,
     print_metrics,
     resolve_merged_eval_dir,
     ensure_dir,
@@ -267,6 +270,40 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _resolve_eval_subset_cache_path(
+    *,
+    dataset_cfg: Dict[str, Any],
+    artifact_dirs: Dict[str, Path],
+    task: str,
+    split: str,
+    eval_tag: str,
+) -> Path:
+    cache_root = Path(dataset_cfg.get("cache_dir") or artifact_dirs["datasets"])
+    cache_dir = cache_root / "eval_subsets"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"eval_subset_{task}_{split}_{eval_tag}.json"
+
+
+def _load_eval_subset_cache(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict) and "indices" in payload:
+            return payload
+    except Exception:
+        return None
+    return None
+
+
+def _write_eval_subset_cache(path: Path, payload: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True, default=_json_default)
+    tmp.replace(path)
+
+
 def _save_metrics_to_locations(
     metrics: Dict[str, Any],
     adapter_path: Optional[Path],
@@ -277,6 +314,7 @@ def _save_metrics_to_locations(
     trained_on_task: Optional[str] = None,
     merged_tasks: Optional[list[str]] = None,
     merged_method: Optional[str] = None,
+    eval_tag: Optional[str] = None,
     show_summary: bool = True,
 ) -> list[Path]:
     """Save metrics to task-centric evaluation structure.
@@ -299,14 +337,23 @@ def _save_metrics_to_locations(
     """
     saved_paths = []
 
+    def _apply_eval_tag(filename: str) -> str:
+        if not eval_tag:
+            return filename
+        base, ext = os.path.splitext(filename)
+        return f"{base}__{eval_tag}{ext or '.json'}"
+
     # Save merged evaluations into a dedicated subfolder to avoid clutter.
     if merged_tasks:
         method_name = merged_method or "merged"
         merged_eval_dir = resolve_merge_eval_dir(method_name, merged_tasks, split)
         merged_eval_dir.mkdir(parents=True, exist_ok=True)
         label = adapter_label or merged_method or "merged"
-        merged_filename = f"{task}_{label}_metrics.json"
-        merged_metrics_path = merged_eval_dir / merged_filename
+        label_for_paths = f"{label}__{eval_tag}" if eval_tag else label
+        merged_filename = _apply_eval_tag(f"{task}_{label}_metrics.json")
+        merged_metrics_dir = merged_eval_dir / "per_task" / task
+        merged_metrics_dir.mkdir(parents=True, exist_ok=True)
+        merged_metrics_path = merged_metrics_dir / merged_filename
         with merged_metrics_path.open("w") as handle:
             json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
 
@@ -315,7 +362,7 @@ def _save_metrics_to_locations(
             split=split,
             task=task,
             merged_tasks=merged_tasks,
-            adapter_label=adapter_label,
+            adapter_label=label_for_paths,
             merged_method=merged_method,
         )
         save_path = merged_dir / "metrics.json"
@@ -336,16 +383,16 @@ def _save_metrics_to_locations(
     # Determine filename based on what's being evaluated
     if adapter_path is None:
         if adapter_label:
-            filename = f"{adapter_label}.json"
+            filename = _apply_eval_tag(f"{adapter_label}.json")
         else:
             # Base model evaluation
-            filename = "base_model.json"
+            filename = _apply_eval_tag("base_model.json")
     elif trained_on_task is not None and trained_on_task != task:
         # Cross-task evaluation: adapter from trained_on_task evaluated on task
-        filename = f"best_{trained_on_task}_adapter.json"
+        filename = _apply_eval_tag(f"best_{trained_on_task}_adapter.json")
     else:
         # Same-task evaluation: task's own adapter
-        filename = f"best_{task}_adapter.json"
+        filename = _apply_eval_tag(f"best_{task}_adapter.json")
 
     save_path = eval_dir / filename
     with save_path.open("w") as handle:
@@ -385,6 +432,7 @@ def evaluate(
     adapter_label: Optional[str] = None,
     merged_tasks: Optional[list[str]] = None,
     merged_method: Optional[str] = None,
+    eval_subset: Optional[Dict[str, Any]] = None,
 ) -> EvaluationResult:
     """Run evaluation with optional caching for the base model."""
     if task == ASR_TASK_NAME:
@@ -443,11 +491,61 @@ def evaluate(
     eval_output_dir = ensure_dir(artifact_dirs["metrics"] / "eval")
     dataset_cfg = config.get("dataset", {})
 
+    eval_tag: Optional[str] = None
+    max_eval_samples: Optional[int] = None
+    subset_shuffle = False
+    subset_seed = int(config.get("seed", 0) or 0)
+    subset_stratified = False
+    subset_label_column: Optional[str] = None
+    subset_cache_path: Optional[Path] = None
+    if eval_subset and bool(eval_subset.get("enabled", True)):
+        eval_tag = compute_eval_subset_tag(eval_subset)
+        subset_shuffle = bool(eval_subset.get("shuffle", False))
+        if "seed" in eval_subset and eval_subset["seed"] is not None:
+            subset_seed = int(eval_subset["seed"])
+        subset_stratified = bool(eval_subset.get("stratified", False))
+        subset_label_column = eval_subset.get("label_column")
+
+        per_task = eval_subset.get("per_task", {})
+        task_override = per_task.get(task) if isinstance(per_task, dict) else None
+        if isinstance(task_override, (int, float)):
+            max_eval_samples = int(task_override)
+        elif isinstance(task_override, dict):
+            if "max_samples" in task_override and task_override["max_samples"] is not None:
+                max_eval_samples = int(task_override["max_samples"])
+            if "shuffle" in task_override and task_override["shuffle"] is not None:
+                subset_shuffle = bool(task_override["shuffle"])
+            if "seed" in task_override and task_override["seed"] is not None:
+                subset_seed = int(task_override["seed"])
+            if "stratified" in task_override and task_override["stratified"] is not None:
+                subset_stratified = bool(task_override["stratified"])
+            if "label_column" in task_override and task_override["label_column"]:
+                subset_label_column = task_override["label_column"]
+
+        if max_eval_samples is None and "max_samples" in eval_subset and eval_subset["max_samples"] is not None:
+            max_eval_samples = int(eval_subset["max_samples"])
+        if eval_tag is not None:
+            subset_cache_path = _resolve_eval_subset_cache_path(
+                dataset_cfg=dataset_cfg,
+                artifact_dirs=artifact_dirs,
+                task=task,
+                split=split,
+                eval_tag=eval_tag,
+            )
+
     cache_path: Optional[Path] = None
     cache_used = False
     metrics: Optional[Dict[str, Any]] = None
 
     if enable_cache and adapter_path is None:
+        dataset_cfg_for_cache = dict(dataset_cfg)
+        if eval_tag is not None:
+            dataset_cfg_for_cache["_eval_subset"] = {
+                "tag": eval_tag,
+                "max_samples": max_eval_samples,
+                "shuffle": subset_shuffle,
+                "seed": subset_seed,
+            }
         cache_path = compute_base_cache_path(
             eval_output_dir,
             task=task,
@@ -455,7 +553,7 @@ def evaluate(
             config_path=config_path,
             batch_size=resolved_batch_size,
             generation_kwargs=generation_kwargs,
-            dataset_cfg=dataset_cfg,
+            dataset_cfg=dataset_cfg_for_cache,
         )
         if cache_path.exists():
             with cache_path.open("r") as handle:
@@ -478,6 +576,86 @@ def evaluate(
             split=split,
             config=config,
         )
+
+        if max_eval_samples is not None:
+            max_eval_samples = int(max_eval_samples)
+            if max_eval_samples <= 0:
+                raise ValueError("eval_subset max_samples must be > 0.")
+            try:
+                original_size = len(eval_setup.dataset)
+            except Exception:
+                original_size = None
+            if original_size is not None and max_eval_samples < original_size:
+                selected_indices: Optional[list[int]] = None
+                dataset_fingerprint = getattr(eval_setup.dataset, "_fingerprint", None)
+                if subset_cache_path is not None:
+                    cached = _load_eval_subset_cache(subset_cache_path)
+                    if cached:
+                        cached_meta = cached.get("metadata", {})
+                        cached_size = cached_meta.get("dataset_size")
+                        cached_fp = cached_meta.get("dataset_fingerprint")
+                        if cached_size == original_size and (cached_fp is None or cached_fp == dataset_fingerprint):
+                            selected_indices = list(cached.get("indices", []))
+                if selected_indices is None:
+                    if subset_stratified:
+                        label_column = subset_label_column or dataset_cfg.get("label_column")
+                        if not label_column or label_column not in eval_setup.dataset.column_names:
+                            raise ValueError(
+                                "eval_subset stratified requires a valid label_column in config or eval_subset."
+                            )
+                        labels = list(eval_setup.dataset[label_column])
+                        by_label: Dict[Any, list[int]] = defaultdict(list)
+                        for idx, label in enumerate(labels):
+                            by_label[label].append(idx)
+                        rng = random.Random(subset_seed)
+                        total = len(labels)
+                        targets = []
+                        for label, indices in by_label.items():
+                            frac = (len(indices) / total) * max_eval_samples
+                            targets.append((label, frac))
+                        base_counts = {label: int(frac) for label, frac in targets}
+                        remainder = max_eval_samples - sum(base_counts.values())
+                        for label, frac in sorted(targets, key=lambda x: x[1] - int(x[1]), reverse=True):
+                            if remainder <= 0:
+                                break
+                            base_counts[label] += 1
+                            remainder -= 1
+                        selected = []
+                        remaining = []
+                        for label, indices in by_label.items():
+                            k = min(base_counts.get(label, 0), len(indices))
+                            pick = rng.sample(indices, k=k) if k > 0 else []
+                            selected.extend(pick)
+                            pick_set = set(pick)
+                            remaining.extend([i for i in indices if i not in pick_set])
+                        if len(selected) < max_eval_samples and remaining:
+                            extra = rng.sample(remaining, k=min(max_eval_samples - len(selected), len(remaining)))
+                            selected.extend(extra)
+                        selected_indices = sorted(selected)
+                    elif subset_shuffle:
+                        selected_indices = sorted(random.Random(subset_seed).sample(range(original_size), k=max_eval_samples))
+                    else:
+                        selected_indices = list(range(max_eval_samples))
+                    if subset_cache_path is not None:
+                        _write_eval_subset_cache(
+                            subset_cache_path,
+                            {
+                                "indices": selected_indices,
+                                "metadata": {
+                                    "task": task,
+                                    "split": split,
+                                    "eval_tag": eval_tag,
+                                    "dataset_size": original_size,
+                                    "dataset_fingerprint": dataset_fingerprint,
+                                    "max_samples": max_eval_samples,
+                                    "shuffle": subset_shuffle,
+                                    "seed": subset_seed,
+                                    "stratified": subset_stratified,
+                                    "label_column": subset_label_column or dataset_cfg.get("label_column"),
+                                },
+                            },
+                        )
+                eval_setup.dataset = eval_setup.dataset.select(selected_indices)
 
         # Enable prediction storage if confusion matrix is requested
         store_predictions = generate_confusion_matrix and eval_setup.label_names is not None
@@ -542,6 +720,23 @@ def evaluate(
                 metrics.pop("_predictions", None)
                 metrics.pop("_labels", None)
 
+        if eval_tag is not None:
+            used_size = None
+            try:
+                used_size = len(eval_setup.dataset)
+            except Exception:
+                used_size = None
+            metrics["_eval_subset"] = {
+                "tag": eval_tag,
+                "max_samples": max_eval_samples,
+                "shuffle": subset_shuffle,
+                "seed": subset_seed,
+                "stratified": subset_stratified,
+                "label_column": subset_label_column or dataset_cfg.get("label_column"),
+                "used_size": used_size,
+                "cache_path": str(subset_cache_path) if subset_cache_path is not None else None,
+            }
+
         if cache_path is not None:
             with cache_path.open("w") as handle:
                 json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
@@ -564,6 +759,7 @@ def evaluate(
         trained_on_task=trained_on_task,
         merged_tasks=merged_tasks,
         merged_method=merged_method,
+        eval_tag=eval_tag,
         show_summary=show_summary,
     )
     if saved_paths:
