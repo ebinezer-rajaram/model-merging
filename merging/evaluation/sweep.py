@@ -12,8 +12,8 @@ import json
 import yaml
 
 from merging.evaluation.evaluate import evaluate_merged_adapter
-from merging.core.registry import get_merge_method, normalize_params
-from merging.core.utils import PACKAGE_ROOT
+from merging.engine.registry import get_merge_method, normalize_params
+from merging.runtime.utils import PACKAGE_ROOT
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,8 @@ class SweepConfig:
     method: str
     grid: Dict[str, List[Any]] | None = None
     search: Optional[Dict[str, Any]] = None
+    lambda_policy: Optional[Dict[str, Any]] = None
+    optimizer: Optional[Dict[str, Any]] = None
     eval_subset: Optional[Dict[str, Any]] = None
     merge_mode: str = "common"
     eval_tasks: Optional[List[str]] = None
@@ -61,6 +63,8 @@ def load_sweep_config(path: Path) -> SweepConfig:
         method=method,
         grid=grid,
         search=search,
+        lambda_policy=data.get("lambda_policy"),
+        optimizer=data.get("optimizer"),
         eval_subset=data.get("eval_subset"),
         merge_mode=data.get("merge_mode", "common"),
         eval_tasks=data.get("eval_tasks"),
@@ -143,6 +147,8 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
         "method": config.method,
         "adapters": config.adapters,
         "merge_mode": config.merge_mode,
+        "lambda_policy": config.lambda_policy,
+        "optimizer": config.optimizer,
         "eval_tasks": config.eval_tasks,
         "split": config.split,
         "eval_subset": config.eval_subset,
@@ -159,6 +165,10 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
         for idx, params in enumerate(params_grid, 1):
             method_impl = get_merge_method(config.method)
             effective_params = normalize_params(method_impl, params=params)
+            if config.lambda_policy is not None:
+                effective_params["lambda_policy"] = config.lambda_policy
+            if config.optimizer is not None:
+                effective_params["optimizer"] = config.optimizer
             method_impl.validate(len(config.adapters), effective_params)
 
             print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")

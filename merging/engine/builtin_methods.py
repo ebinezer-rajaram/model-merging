@@ -5,14 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import torch
-
 from experiments.extract_vector import extract_task_vector_from_lora
-from merging.techniques.task_vector import merge_uniform_via_task_vectors
-from merging.core.registry import MergeMethod, MergeOutput, build_merge_metadata, register_merge_method
-from merging.techniques.uniform import merge_adapters_uniform
-from merging.core.utils import compute_delta_from_lora_weights, load_adapter_weights
-from merging.techniques.weighted import merge_adapters_weighted, merge_task_vectors_weighted
+from merging.policies.lambda_policy import build_lambda_policy
+from merging.methods.task_vector import merge_uniform_via_task_vectors
+from merging.engine.registry import MergeMethod, MergeOutput, build_merge_metadata, register_merge_method
+from merging.config.specs import merge_spec_from_legacy_args
+from merging.plugins.transforms import apply_transforms
+from merging.methods.ties import merge_ties_scaffold
+from merging.methods.uniform import merge_adapters_uniform
+from merging.runtime.utils import compute_delta_from_lora_weights, load_adapter_weights
+from merging.methods.weighted import merge_adapters_weighted, merge_task_vectors_weighted
 
 
 def _uniform_in_memory(
@@ -22,7 +24,14 @@ def _uniform_in_memory(
     merge_mode: str,
     params: Optional[Dict[str, object]],
 ) -> MergeOutput:
-    all_weights = [load_adapter_weights(p) for p in adapter_paths]
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="uniform",
+        merge_mode=merge_mode,
+        lambda_weight=None,
+        params=params,
+    )
+    all_weights = [apply_transforms(load_adapter_weights(p), spec.transforms) for p in adapter_paths]
     merged_weights = merge_adapters_uniform(all_weights, merge_mode=merge_mode)
     merged_delta = compute_delta_from_lora_weights(merged_weights, adapter_paths[0])
     metadata = build_merge_metadata(
@@ -32,6 +41,10 @@ def _uniform_in_memory(
         source_metadata=source_metadata,
         num_parameters=len(merged_delta),
         params=params or {},
+        method_params=spec.method_params,
+        lambda_policy=spec.method_params.get("lambda_policy"),
+        transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],
+        optimizer=spec.method_params.get("optimizer"),
     )
     return MergeOutput(merged_delta=merged_delta, merged_weights=merged_weights, metadata=metadata)
 
@@ -43,29 +56,44 @@ def _weighted_in_memory(
     merge_mode: str,
     params: Optional[Dict[str, object]],
 ) -> MergeOutput:
-    lambda_weight = None if params is None else params.get("lambda")
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="weighted",
+        merge_mode=merge_mode,
+        lambda_weight=None if params is None else params.get("lambda"),
+        params=params,
+    )
+
+    lambda_weight = spec.method_params.get("lambda")
     if lambda_weight is None:
         raise ValueError("weighted requires lambda_weight.")
-    weights1 = load_adapter_weights(adapter_paths[0])
-    weights2 = load_adapter_weights(adapter_paths[1])
+    lambda_policy = build_lambda_policy(spec.lambda_policy, fallback_lambda=float(lambda_weight))
+
+    weights1 = apply_transforms(load_adapter_weights(adapter_paths[0]), spec.transforms)
+    weights2 = apply_transforms(load_adapter_weights(adapter_paths[1]), spec.transforms)
     merged_weights = merge_adapters_weighted(
         weights1,
         weights2,
-        lambda_weight=lambda_weight,
+        lambda_weight=float(lambda_weight),
         merge_mode=merge_mode,
+        lambda_resolver=lambda_policy.lambda_for_key,
     )
     merged_delta = compute_delta_from_lora_weights(merged_weights, adapter_paths[0])
     weighted_metadata = [dict(source_metadata[0]), dict(source_metadata[1])]
-    weighted_metadata[0]["weight"] = lambda_weight
-    weighted_metadata[1]["weight"] = 1.0 - lambda_weight
+    weighted_metadata[0]["weight"] = float(lambda_weight)
+    weighted_metadata[1]["weight"] = 1.0 - float(lambda_weight)
     metadata = build_merge_metadata(
         method="weighted",
         merge_mode=merge_mode,
         num_adapters=len(adapter_paths),
         source_metadata=weighted_metadata,
         num_parameters=len(merged_delta),
-        params={"lambda": lambda_weight},
-        lambda_weight=lambda_weight,
+        params={"lambda": float(lambda_weight)},
+        lambda_weight=float(lambda_weight),
+        method_params=spec.method_params,
+        lambda_policy=lambda_policy.describe(),
+        transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],
+        optimizer=spec.method_params.get("optimizer"),
     )
     return MergeOutput(merged_delta=merged_delta, merged_weights=merged_weights, metadata=metadata)
 
@@ -77,6 +105,13 @@ def _task_vector_in_memory(
     merge_mode: str,
     params: Optional[Dict[str, object]],
 ) -> MergeOutput:
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="task_vector",
+        merge_mode=merge_mode,
+        lambda_weight=None,
+        params=params,
+    )
     task_vectors = [extract_task_vector_from_lora(p) for p in adapter_paths]
     merged_delta = merge_adapters_uniform(task_vectors, merge_mode=merge_mode)
     metadata = build_merge_metadata(
@@ -86,6 +121,9 @@ def _task_vector_in_memory(
         source_metadata=source_metadata,
         num_parameters=len(merged_delta),
         params=params or {},
+        method_params=spec.method_params,
+        transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],
+        optimizer=spec.method_params.get("optimizer"),
     )
     return MergeOutput(merged_delta=merged_delta, merged_weights=None, metadata=metadata)
 
@@ -97,7 +135,14 @@ def _weighted_delta_in_memory(
     merge_mode: str,
     params: Optional[Dict[str, object]],
 ) -> MergeOutput:
-    lambda_weight = None if params is None else params.get("lambda")
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="weighted_delta",
+        merge_mode=merge_mode,
+        lambda_weight=None if params is None else params.get("lambda"),
+        params=params,
+    )
+    lambda_weight = spec.method_params.get("lambda")
     if lambda_weight is None:
         raise ValueError("weighted_delta requires lambda_weight.")
     tv1 = extract_task_vector_from_lora(adapter_paths[0])
@@ -105,20 +150,24 @@ def _weighted_delta_in_memory(
     merged_delta = merge_task_vectors_weighted(
         tv1,
         tv2,
-        lambda_weight=lambda_weight,
+        lambda_weight=float(lambda_weight),
         merge_mode=merge_mode,
     )
     weighted_metadata = [dict(source_metadata[0]), dict(source_metadata[1])]
-    weighted_metadata[0]["weight"] = lambda_weight
-    weighted_metadata[1]["weight"] = 1.0 - lambda_weight
+    weighted_metadata[0]["weight"] = float(lambda_weight)
+    weighted_metadata[1]["weight"] = 1.0 - float(lambda_weight)
     metadata = build_merge_metadata(
         method="weighted_delta",
         merge_mode=merge_mode,
         num_adapters=len(adapter_paths),
         source_metadata=weighted_metadata,
         num_parameters=len(merged_delta),
-        params={"lambda": lambda_weight},
-        lambda_weight=lambda_weight,
+        params={"lambda": float(lambda_weight)},
+        lambda_weight=float(lambda_weight),
+        method_params=spec.method_params,
+        lambda_policy=spec.method_params.get("lambda_policy"),
+        transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],
+        optimizer=spec.method_params.get("optimizer"),
     )
     return MergeOutput(merged_delta=merged_delta, merged_weights=None, metadata=metadata)
 
@@ -157,7 +206,16 @@ def register_builtin_methods() -> None:
             name="weighted",
             required_params=("lambda",),
             params_defaults={},
-            params_validator=None,
+            params_validator=lambda p: build_lambda_policy(
+                merge_spec_from_legacy_args(
+                    adapters=[],
+                    method="weighted",
+                    merge_mode="common",
+                    lambda_weight=p.get("lambda"),
+                    params=p,
+                ).lambda_policy,
+                fallback_lambda=float(p.get("lambda")),
+            ),
             min_adapters=2,
             max_adapters=2,
             saveable=True,
@@ -187,6 +245,18 @@ def register_builtin_methods() -> None:
             max_adapters=2,
             saveable=False,
             merge_in_memory=_weighted_delta_in_memory,
+        )
+    )
+    register_merge_method(
+        MergeMethod(
+            name="ties",
+            required_params=(),
+            params_defaults={},
+            params_validator=None,
+            min_adapters=2,
+            max_adapters=None,
+            saveable=False,
+            merge_in_memory=merge_ties_scaffold,
         )
     )
 

@@ -7,9 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from merging.core.registry import get_merge_method, normalize_params
-from merging.core.runner import resolve_adapter_specs
-from merging.core.utils import (
+from merging.plugins.optimizers import OptimizerContext, optimize_lambda_policy
+from merging.engine.registry import get_merge_method, normalize_params
+from merging.engine.runner import resolve_adapter_specs
+from merging.config.specs import merge_spec_from_legacy_args
+from merging.runtime.utils import (
     _format_lambda,
     build_merge_tag,
     create_merge_output_path,
@@ -106,6 +108,39 @@ def evaluate_merged_adapter(
                 eval_subset=eval_subset,
             )
 
+        cached_endpoint_results: Optional[Dict[str, Dict]] = None
+        lambda_value = metadata.get("lambda")
+        if (
+            isinstance(lambda_value, (int, float))
+            and lambda_value in (0.0, 1.0)
+            and source_tasks
+            and len(source_tasks) == 2
+            and all(source_tasks)
+        ):
+            endpoint_task = source_tasks[0] if lambda_value == 1.0 else source_tasks[1]
+            cached: Dict[str, Dict] = {}
+            cache_ok = True
+            for task in tasks_to_eval:
+                task_key = task.lower()
+                metrics = _load_eval_metrics_json(
+                    task_key,
+                    split,
+                    f"best_{endpoint_task}_adapter.json",
+                    eval_tag=eval_tag,
+                )
+                if metrics is None:
+                    cache_ok = False
+                    break
+                cached[task] = metrics
+                _maybe_add_interference_delta(task, cached[task], split, show_summary, eval_tag=eval_tag)
+            if cache_ok:
+                cached_endpoint_results = cached
+                if show_summary:
+                    print(
+                        f"♻️  Using cached cross-task metrics for endpoint λ={lambda_value:.1f} "
+                        f"(adapter={endpoint_task})"
+                    )
+
         if save_merged:
             merged_run_path = _save_merged_adapter(
                 method=method,
@@ -129,44 +164,47 @@ def evaluate_merged_adapter(
 
         print(f"\n📊 Evaluating {metadata.get('merge_method')} in-memory on {len(tasks_to_eval)} task(s) ({split} split)")
 
-        for i, task in enumerate(tasks_to_eval, 1):
-            print(f"\n[{i}/{len(tasks_to_eval)}] Evaluating on {task}...")
-            try:
-                result = evaluate(
-                    task=task,
-                    adapter=None,
-                    split=split,
-                    batch_size=batch_size,
-                    trained_on_task=merge_tag,
-                    enable_cache=enable_cache,
-                    show_summary=show_summary,
-                    generate_confusion_matrix=generate_confusion_matrix,
-                    delta_weights=merged_delta,
-                    adapter_label=merge_tag,
-                    merged_tasks=source_tasks,
-                    merged_method=metadata.get("merge_method"),
-                    eval_subset=eval_subset,
-                )
-                results[task] = result.metrics
-                _maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
+        if cached_endpoint_results is not None:
+            results.update(cached_endpoint_results)
+        else:
+            for i, task in enumerate(tasks_to_eval, 1):
+                print(f"\n[{i}/{len(tasks_to_eval)}] Evaluating on {task}...")
+                try:
+                    result = evaluate(
+                        task=task,
+                        adapter=None,
+                        split=split,
+                        batch_size=batch_size,
+                        trained_on_task=merge_tag,
+                        enable_cache=enable_cache,
+                        show_summary=show_summary,
+                        generate_confusion_matrix=generate_confusion_matrix,
+                        delta_weights=merged_delta,
+                        adapter_label=merge_tag,
+                        merged_tasks=source_tasks,
+                        merged_method=metadata.get("merge_method"),
+                        eval_subset=eval_subset,
+                    )
+                    results[task] = result.metrics
+                    _maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
 
-                if show_summary:
-                    print(f"✅ {task} evaluation complete:")
-                    task_key = task.lower()
-                    metric_key = None
-                    if task_key in TASK_METRICS:
-                        metric_key, _ = TASK_METRICS[task_key]
-                        metric_value = result.metrics.get(metric_key)
-                        if isinstance(metric_value, (int, float)):
-                            print(f"   {metric_key}: {metric_value:.4f}")
-                    if "interference_delta" in result.metrics:
-                        print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
-                    for key, value in sorted(result.metrics.items())[:3]:
-                        if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
-                            print(f"   {key}: {value:.4f}")
-            except Exception as exc:
-                print(f"❌ Failed to evaluate on {task}: {exc}")
-                results[task] = {"error": str(exc)}
+                    if show_summary:
+                        print(f"✅ {task} evaluation complete:")
+                        task_key = task.lower()
+                        metric_key = None
+                        if task_key in TASK_METRICS:
+                            metric_key, _ = TASK_METRICS[task_key]
+                            metric_value = result.metrics.get(metric_key)
+                            if isinstance(metric_value, (int, float)):
+                                print(f"   {metric_key}: {metric_value:.4f}")
+                        if "interference_delta" in result.metrics:
+                            print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
+                        for key, value in sorted(result.metrics.items())[:3]:
+                            if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
+                                print(f"   {key}: {value:.4f}")
+                except Exception as exc:
+                    print(f"❌ Failed to evaluate on {task}: {exc}")
+                    results[task] = {"error": str(exc)}
 
         if save_results:
             summary = {
@@ -358,7 +396,37 @@ def _merge_in_memory(
     merge_mode: str,
 ) -> tuple[Dict[str, "torch.Tensor"], Optional[Dict[str, "torch.Tensor"]], Dict]:
     method_impl = get_merge_method(method)
-    effective_params = normalize_params(method_impl, params=params)
+    merge_spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method=method,
+        merge_mode=merge_mode,
+        lambda_weight=None if params is None else params.get("lambda"),
+        params=params,
+    )
+    effective_params = normalize_params(method_impl, params=merge_spec.method_params)
+    optimizer_result = optimize_lambda_policy(
+        merge_spec,
+        OptimizerContext(
+            method=method,
+            adapter_specs=[str(p) for p in adapter_paths],
+            merge_mode=merge_mode,
+            output_dir=None,
+            method_params=dict(effective_params),
+            lambda_policy=merge_spec.lambda_policy,
+        ),
+    )
+    if optimizer_result.lambda_policy is not None:
+        effective_params["lambda_policy"] = {
+            "type": optimizer_result.lambda_policy.type,
+            "value": optimizer_result.lambda_policy.value,
+            "default": optimizer_result.lambda_policy.default,
+            "overrides": dict(optimizer_result.lambda_policy.overrides),
+        }
+    effective_params["optimizer"] = {
+        "type": (merge_spec.optimizer.type if merge_spec.optimizer is not None else "none"),
+        "params": (dict(merge_spec.optimizer.params) if merge_spec.optimizer is not None else {}),
+        "provenance": optimizer_result.provenance,
+    }
     method_impl.validate(len(adapter_paths), effective_params)
     merge_output = method_impl.merge_in_memory(
         adapter_paths=adapter_paths,
@@ -398,6 +466,34 @@ def _load_eval_metric(task: str, split: str, filename: str, metric_key: str, *, 
     value = data.get(metric_key)
     if isinstance(value, (int, float)):
         return float(value)
+    return None
+
+
+def _load_eval_metrics_json(
+    task: str,
+    split: str,
+    filename: str,
+    *,
+    eval_tag: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    candidates = [_with_eval_tag(filename, eval_tag), filename] if eval_tag else [filename]
+    metrics_path = None
+    for name in candidates:
+        path = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split / name
+        if path.exists():
+            metrics_path = path
+            break
+    if metrics_path is None:
+        return None
+    if not metrics_path.exists():
+        return None
+    try:
+        with metrics_path.open("r") as handle:
+            data = json.load(handle)
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        return data
     return None
 
 

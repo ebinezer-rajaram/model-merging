@@ -6,10 +6,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from merging.core.registry import MergeResult, get_merge_method, normalize_params
-from merging.core.utils import create_merge_output_path, resolve_best_adapter, save_merged_adapter
-from merging.core.utils import build_merge_tag
-from merging.core.utils import PACKAGE_ROOT
+from merging.plugins.optimizers import OptimizerContext, optimize_lambda_policy
+from merging.engine.registry import MergeResult, get_merge_method, normalize_params
+from merging.config.specs import MergeSpec, merge_spec_from_legacy_args, merge_spec_to_params
+from merging.runtime.utils import create_merge_output_path, resolve_best_adapter, save_merged_adapter
+from merging.runtime.utils import build_merge_tag
+from merging.runtime.utils import PACKAGE_ROOT
 
 
 def resolve_adapter_specs(
@@ -25,7 +27,7 @@ def resolve_adapter_specs(
             metadata = {"path": str(adapter_path)}
             inferred_task = None
             try:
-                from merging.core.utils import infer_task_from_path
+                from merging.runtime.utils import infer_task_from_path
                 inferred_task = infer_task_from_path(str(adapter_path))
             except Exception:
                 inferred_task = None
@@ -65,8 +67,25 @@ def run_merge(
     output: Optional[str],
     save_merged: bool,
     show_progress: bool = True,
+    merge_spec: Optional[MergeSpec] = None,
 ) -> MergeResult:
     """Run a merge and optionally save a merged adapter."""
+    if merge_spec is not None:
+        adapter_specs = list(merge_spec.adapters)
+        method = merge_spec.method
+        merge_mode = merge_spec.merge_mode
+        params = merge_spec_to_params(merge_spec)
+        lambda_weight = merge_spec.method_params.get("lambda", lambda_weight)
+    else:
+        merge_spec = merge_spec_from_legacy_args(
+            adapters=adapter_specs,
+            method=method,
+            merge_mode=merge_mode,
+            lambda_weight=lambda_weight,
+            params=params,
+        )
+        params = merge_spec_to_params(merge_spec)
+
     if show_progress:
         print("\n" + "=" * 60)
         print("🔀 Adapter Merging")
@@ -82,6 +101,30 @@ def run_merge(
     effective_params = normalize_params(method_impl, params=params, legacy_lambda_weight=lambda_weight)
     method_impl.validate(len(adapter_paths), effective_params)
 
+    optimizer_result = optimize_lambda_policy(
+        merge_spec,
+        OptimizerContext(
+            method=method,
+            adapter_specs=adapter_specs,
+            merge_mode=merge_mode,
+            output_dir=Path(output) if output else None,
+            method_params=dict(effective_params),
+            lambda_policy=merge_spec.lambda_policy,
+        ),
+    )
+    if optimizer_result.lambda_policy is not None:
+        effective_params["lambda_policy"] = {
+            "type": optimizer_result.lambda_policy.type,
+            "value": optimizer_result.lambda_policy.value,
+            "default": optimizer_result.lambda_policy.default,
+            "overrides": dict(optimizer_result.lambda_policy.overrides),
+        }
+    effective_params["optimizer"] = {
+        "type": (merge_spec.optimizer.type if merge_spec.optimizer is not None else "none"),
+        "params": (dict(merge_spec.optimizer.params) if merge_spec.optimizer is not None else {}),
+        "provenance": optimizer_result.provenance,
+    }
+
     output_path: Optional[Path] = None
     if save_merged:
         if not method_impl.saveable:
@@ -96,8 +139,8 @@ def run_merge(
             output_path.mkdir(parents=True, exist_ok=True)
         else:
             extra_params = {}
-            if lambda_weight is not None:
-                extra_params["lambda"] = lambda_weight
+            if effective_params.get("lambda") is not None:
+                extra_params["lambda"] = effective_params["lambda"]
             output_path = create_merge_output_path(
                 method=method,
                 task_names=task_names,

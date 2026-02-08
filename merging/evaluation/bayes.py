@@ -27,8 +27,8 @@ from sklearn.gaussian_process.kernels import (
     WhiteKernel,
 )
 
-from merging.core.registry import get_merge_method, normalize_params
-from merging.core.utils import PACKAGE_ROOT
+from merging.engine.registry import get_merge_method, normalize_params
+from merging.runtime.utils import PACKAGE_ROOT
 from merging.evaluation.evaluate import evaluate_merged_adapter
 from merging.evaluation.sweep import SweepConfig, _atomic_write_json, _score_min_interference
 
@@ -252,6 +252,11 @@ def _compatible_sweep(config: SweepConfig, sweep: Mapping[str, Any]) -> bool:
     if config.eval_subset is not None and sweep_eval_subset != config.eval_subset:
         return False
 
+    if sweep.get("lambda_policy") != config.lambda_policy:
+        return False
+    if sweep.get("optimizer") != config.optimizer:
+        return False
+
     return True
 
 
@@ -320,6 +325,8 @@ def run_bayes_search(config: SweepConfig, search: Dict[str, Any]) -> Dict[str, A
         "method": config.method,
         "adapters": config.adapters,
         "merge_mode": config.merge_mode,
+        "lambda_policy": config.lambda_policy,
+        "optimizer": config.optimizer,
         "eval_tasks": config.eval_tasks,
         "split": config.split,
         "eval_subset": config.eval_subset,
@@ -359,6 +366,10 @@ def run_bayes_search(config: SweepConfig, search: Dict[str, Any]) -> Dict[str, A
         method_impl = get_merge_method(config.method)
         try:
             effective_params = normalize_params(method_impl, params=params)
+            if config.lambda_policy is not None:
+                effective_params["lambda_policy"] = config.lambda_policy
+            if config.optimizer is not None:
+                effective_params["optimizer"] = config.optimizer
             method_impl.validate(len(config.adapters), effective_params)
             results = evaluate_merged_adapter(
                 adapter_path=None,

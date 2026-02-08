@@ -14,7 +14,7 @@ Special cases:
 
 Usage:
     from merging import merge_weighted
-    from merging.core.utils import resolve_best_adapter, create_merge_output_path
+    from merging.runtime.utils import resolve_best_adapter, create_merge_output_path
 
     # Resolve adapters
     adapter1, meta1 = resolve_best_adapter("asr")
@@ -41,11 +41,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import torch
 
-from merging.core.utils import load_adapter_weights, save_merged_adapter
+from merging.runtime.utils import load_adapter_weights, save_merged_adapter
 
 
 def merge_adapters_weighted(
@@ -53,6 +53,7 @@ def merge_adapters_weighted(
     adapter2_weights: Dict[str, torch.Tensor],
     lambda_weight: float,
     merge_mode: str = "common",
+    lambda_resolver: Optional[Callable[[str], float]] = None,
 ) -> Dict[str, torch.Tensor]:
     """Merge two adapters using weighted averaging.
 
@@ -72,17 +73,15 @@ def merge_adapters_weighted(
     Raises:
         ValueError: If lambda not in [0, 1] or strict mode has mismatched params
     """
-    # Validate lambda
+    # Validate scalar fallback lambda
     if not 0.0 <= lambda_weight <= 1.0:
-        raise ValueError(
-            f"lambda_weight must be between 0.0 and 1.0, got {lambda_weight}"
-        )
+        raise ValueError(f"lambda_weight must be between 0.0 and 1.0, got {lambda_weight}")
 
-    # Handle edge cases
-    if lambda_weight == 0.0:
+    # Handle scalar edge cases.
+    if lambda_resolver is None and lambda_weight == 0.0:
         print("⚠️  lambda=0.0: Returning second adapter unchanged")
         return adapter2_weights.copy()
-    if lambda_weight == 1.0:
+    if lambda_resolver is None and lambda_weight == 1.0:
         print("⚠️  lambda=1.0: Returning first adapter unchanged")
         return adapter1_weights.copy()
 
@@ -118,13 +117,19 @@ def merge_adapters_weighted(
 
     print(f"🧮 Computing weighted average with λ={lambda_weight:.3f}")
     print(f"   Weights: {lambda_weight:.1%} adapter 1, {weight2:.1%} adapter 2")
+    if lambda_resolver is not None:
+        print("   Lambda policy: key-aware (resolver enabled)")
     print(f"   Parameters to merge: {len(keys_to_merge)}")
 
     for key in keys_to_merge:
+        lam = lambda_weight if lambda_resolver is None else float(lambda_resolver(key))
+        if not 0.0 <= lam <= 1.0:
+            raise ValueError(f"lambda for key '{key}' must be in [0,1], got {lam}")
+        key_weight2 = 1.0 - lam
         # W_merged = λ * W_1 + (1 - λ) * W_2
         merged_weights[key] = (
-            lambda_weight * adapter1_weights[key] +
-            weight2 * adapter2_weights[key]
+            lam * adapter1_weights[key] +
+            key_weight2 * adapter2_weights[key]
         )
 
     print(f"✅ Weighted merge complete: {len(merged_weights)} parameters merged")
@@ -247,7 +252,7 @@ def merge_weighted(
 
     Example:
         >>> from merging import merge_weighted
-        >>> from merging.core.utils import resolve_best_adapter, create_merge_output_path
+        >>> from merging.runtime.utils import resolve_best_adapter, create_merge_output_path
         >>>
         >>> # Resolve best adapters
         >>> adapter1, meta1 = resolve_best_adapter("asr")

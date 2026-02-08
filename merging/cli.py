@@ -7,30 +7,38 @@ import sys
 from typing import List, Optional
 
 from merging import evaluate_merged_adapter
-from merging.core.logging import banner
-from merging.core.runner import run_merge
+from merging.runtime.logging import banner
+from merging.engine.registry import list_merge_methods
+from merging.engine.runner import run_merge
+from merging.config.specs import load_merge_spec
 
 
 def merge_adapters_cli(
-    adapter_specs: List[str],
+    adapter_specs: Optional[List[str]],
     method: str = "uniform",
     lambda_weight: float = 0.5,
     merge_mode: str = "common",
     output: Optional[str] = None,
+    config: Optional[str] = None,
     evaluate: bool = False,
     eval_split: str = "test",
 ) -> None:
     """CLI entry point for adapter merging."""
     banner("🔀 Adapter Merging")
 
+    effective_specs = adapter_specs or []
+    if not config and not effective_specs:
+        raise ValueError("Provide --adapters or --config.")
+
     merge_result = run_merge(
-        adapter_specs=adapter_specs,
+        adapter_specs=effective_specs if not config else [],
         method=method,
         lambda_weight=lambda_weight,
         merge_mode=merge_mode,
         output=output,
         save_merged=True,
         show_progress=True,
+        merge_spec=load_merge_spec(config) if config else None,
     )
     merged_path = merge_result.output_path
     task_names = merge_result.task_names
@@ -64,6 +72,7 @@ def merge_adapters_cli(
 
 
 def parse_args() -> argparse.Namespace:
+    methods = list_merge_methods()
     parser = argparse.ArgumentParser(
         description="Merge LoRA adapters using various strategies",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -85,14 +94,14 @@ Examples:
     parser.add_argument(
         "--adapters",
         nargs="+",
-        required=True,
+        required=False,
         help="Adapter specifications: task names (e.g., 'asr emotion') or paths",
     )
     parser.add_argument(
         "--method",
         type=str,
         default="uniform",
-        choices=["uniform", "weighted", "task_vector"],
+        choices=methods,
         help="Merging method: 'uniform' (equal averaging), 'weighted' (lambda-based), "
              "'task_vector' (merge via task vectors, works with different ranks)",
     )
@@ -119,6 +128,12 @@ Examples:
         help="Output directory for merged adapter (auto-generated if not specified)",
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Advanced merge YAML config path (overrides adapters/method/lambda when provided).",
+    )
+    parser.add_argument(
         "--evaluate",
         action="store_true",
         help="Evaluate merged adapter on all source tasks after merging",
@@ -142,6 +157,7 @@ def main() -> None:
             lambda_weight=args.lambda_weight,
             merge_mode=args.merge_mode,
             output=args.output,
+            config=args.config,
             evaluate=args.evaluate,
             eval_split=args.eval_split,
         )
@@ -157,7 +173,7 @@ def merge_from_args(args: argparse.Namespace) -> None:
         lambda_weight=args.lambda_weight,
         merge_mode=args.merge_mode,
         output=args.output,
+        config=getattr(args, "config", None),
         evaluate=args.evaluate,
         eval_split=args.eval_split,
     )
-

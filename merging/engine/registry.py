@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from datetime import datetime
 from typing import Callable, Dict, Optional, Any
 from pathlib import Path
@@ -75,7 +74,7 @@ def register_merge_method(method: MergeMethod) -> None:
 
 def get_merge_method(name: str) -> MergeMethod:
     if not _REGISTRY:
-        from merging.core import methods as _methods  # noqa: F401
+        from merging.engine import builtin_methods as _methods  # noqa: F401
     if name not in _REGISTRY:
         available = ", ".join(sorted(_REGISTRY.keys()))
         raise ValueError(f"Unknown merge method: {name}. Available: {available}")
@@ -84,7 +83,7 @@ def get_merge_method(name: str) -> MergeMethod:
 
 def list_merge_methods() -> list[str]:
     if not _REGISTRY:
-        from merging.core import methods as _methods  # noqa: F401
+        from merging.engine import builtin_methods as _methods  # noqa: F401
     return sorted(_REGISTRY.keys())
 
 
@@ -97,6 +96,10 @@ def build_merge_metadata(
     num_parameters: int,
     params: Optional[Dict[str, Any]] = None,
     lambda_weight: Optional[float] = None,
+    method_params: Optional[Dict[str, Any]] = None,
+    lambda_policy: Optional[Dict[str, Any]] = None,
+    transforms: Optional[list[Dict[str, Any]]] = None,
+    optimizer: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     if params and lambda_weight is None and "lambda" in params:
         lambda_weight = params.get("lambda")
@@ -110,6 +113,14 @@ def build_merge_metadata(
     }
     if params is not None:
         metadata["params"] = params
+    if method_params is not None:
+        metadata["method_params"] = method_params
+    if lambda_policy is not None:
+        metadata["lambda_policy"] = lambda_policy
+    if transforms is not None:
+        metadata["transforms"] = transforms
+    if optimizer is not None:
+        metadata["optimizer"] = optimizer
     if lambda_weight is not None:
         metadata["lambda"] = lambda_weight
     return metadata

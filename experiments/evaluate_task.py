@@ -30,7 +30,7 @@ from core import (
     prepare_task_for_evaluation,
     run_evaluation,
 )
-from merging.core.utils import resolve_merge_eval_dir
+from merging.runtime.utils import resolve_merge_eval_dir
 from tasks.asr import (
     TASK_NAME as ASR_TASK_NAME,
     get_artifact_directories as get_asr_artifact_directories,
@@ -597,9 +597,14 @@ def evaluate(
                         if cached_size == original_size and (cached_fp is None or cached_fp == dataset_fingerprint):
                             selected_indices = list(cached.get("indices", []))
                 if selected_indices is None:
+                    label_column: Optional[str] = None
                     if subset_stratified:
                         label_column = subset_label_column or dataset_cfg.get("label_column")
-                        if not label_column or label_column not in eval_setup.dataset.column_names:
+                        if not label_column:
+                            label_column = "label"
+                        if label_column not in eval_setup.dataset.column_names and "label" in eval_setup.dataset.column_names:
+                            label_column = "label"
+                        if label_column not in eval_setup.dataset.column_names:
                             raise ValueError(
                                 "eval_subset stratified requires a valid label_column in config or eval_subset."
                             )
@@ -637,22 +642,24 @@ def evaluate(
                     else:
                         selected_indices = list(range(max_eval_samples))
                     if subset_cache_path is not None:
+                        metadata = {
+                            "task": task,
+                            "split": split,
+                            "eval_tag": eval_tag,
+                            "dataset_size": original_size,
+                            "dataset_fingerprint": dataset_fingerprint,
+                            "max_samples": max_eval_samples,
+                            "shuffle": subset_shuffle,
+                            "seed": subset_seed,
+                            "stratified": subset_stratified,
+                        }
+                        if label_column is not None:
+                            metadata["label_column"] = label_column
                         _write_eval_subset_cache(
                             subset_cache_path,
                             {
                                 "indices": selected_indices,
-                                "metadata": {
-                                    "task": task,
-                                    "split": split,
-                                    "eval_tag": eval_tag,
-                                    "dataset_size": original_size,
-                                    "dataset_fingerprint": dataset_fingerprint,
-                                    "max_samples": max_eval_samples,
-                                    "shuffle": subset_shuffle,
-                                    "seed": subset_seed,
-                                    "stratified": subset_stratified,
-                                    "label_column": subset_label_column or dataset_cfg.get("label_column"),
-                                },
+                                "metadata": metadata,
                             },
                         )
                 eval_setup.dataset = eval_setup.dataset.select(selected_indices)
@@ -732,7 +739,7 @@ def evaluate(
                 "shuffle": subset_shuffle,
                 "seed": subset_seed,
                 "stratified": subset_stratified,
-                "label_column": subset_label_column or dataset_cfg.get("label_column"),
+                "label_column": subset_label_column or dataset_cfg.get("label_column") or "label",
                 "used_size": used_size,
                 "cache_path": str(subset_cache_path) if subset_cache_path is not None else None,
             }

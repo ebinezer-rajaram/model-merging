@@ -10,6 +10,9 @@ from experiments.train_task import main as train_task_main
 
 def parse_args() -> argparse.Namespace:
     """Parse high-level command."""
+    from merging.engine.registry import list_merge_methods
+
+    merge_methods = list_merge_methods()
     parser = argparse.ArgumentParser(description="Speech merging pipeline.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -21,14 +24,14 @@ def parse_args() -> argparse.Namespace:
     merge_parser.add_argument(
         "--adapters",
         nargs="+",
-        required=True,
+        required=False,
         help="Task names or paths to merge (e.g., 'asr emotion')",
     )
     merge_parser.add_argument(
         "--method",
         default="uniform",
-        choices=["uniform", "weighted", "task_vector"],
-        help="Merging method: uniform (equal avg), weighted (lambda), task_vector (full space)",
+        choices=merge_methods,
+        help="Merging method.",
     )
     merge_parser.add_argument(
         "--lambda",
@@ -47,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         "--output",
         default=None,
         help="Output directory override (auto-generated if not specified)",
+    )
+    merge_parser.add_argument(
+        "--config",
+        default=None,
+        help="Advanced merge YAML config path. If provided, adapters/method/lambda are taken from config.",
     )
     merge_parser.add_argument(
         "--evaluate",
@@ -101,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     eval_merged_parser.add_argument(
         "--method",
         default=None,
-        choices=("uniform", "weighted", "task_vector", "weighted_delta"),
+        choices=tuple(merge_methods),
         help="Merge method used (for resolving adapter path).",
     )
     eval_merged_parser.add_argument(
@@ -159,6 +167,13 @@ def parse_args() -> argparse.Namespace:
         dest="save_merged",
         help="Save merged adapter before evaluation (default: in-memory only).",
     )
+    eval_merged_parser.add_argument(
+        "--no-compute-interference-baselines",
+        action="store_false",
+        dest="compute_missing_interference_baselines",
+        help="Do not auto-compute base_model/best_adapter metrics needed for interference_delta.",
+    )
+    eval_merged_parser.set_defaults(compute_missing_interference_baselines=True)
     eval_merged_parser.set_defaults(confusion_matrix=True, save_results=True)
 
     sweep_parser = subparsers.add_parser("merge-sweep", help="Run a merge hyperparameter sweep.")
@@ -172,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     sweep_parser.add_argument(
         "--method",
         default=None,
+        choices=merge_methods,
         help="Merge method for sweep (overrides config).",
     )
     sweep_parser.add_argument(

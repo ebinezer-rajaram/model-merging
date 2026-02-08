@@ -1,6 +1,6 @@
 # Merging Framework Overview
 
-This package implements a modular framework for merging LoRA adapters, evaluating merged models, and running parameter sweeps. It is designed to be extensible (new merge techniques) and consistent in output artifacts.
+This package implements a modular framework for merging LoRA adapters, evaluating merged models, and running parameter sweeps. It is designed to be extensible (new methods, lambda policies, transforms, optimizers) and consistent in output artifacts.
 
 ## High‑Level Flow
 
@@ -14,11 +14,17 @@ The canonical CLI entrypoint is `main.py`. Legacy CLI is `experiments/merge_vect
 
 ## Package Structure
 
-- `merging/techniques/`  
+- `merging/methods/`  
   Method implementations (uniform, weighted, task_vector, etc.)
 
-- `merging/core/`  
-  Registry, runner, metadata helpers, output paths
+- `merging/engine/`  
+  Registry, runner, built-in method registration
+
+- `merging/runtime/`  
+  Metadata helpers, output paths, logging
+
+- `merging/config/`, `merging/policies/`, `merging/plugins/`  
+  Merge spec model, lambda policies, transforms/optimizers
 
 - `merging/evaluation/`  
   Evaluation + sweeps (grid now, bayes scaffold)
@@ -28,7 +34,7 @@ The canonical CLI entrypoint is `main.py`. Legacy CLI is `experiments/merge_vect
 
 ## Registry + Method Interface
 
-Merge methods are registered in `merging/core/methods.py` using `MergeMethod`:
+Merge methods are registered in `merging/engine/builtin_methods.py` using `MergeMethod`:
 
 - `name`
 - `required_params`
@@ -39,22 +45,62 @@ Merge methods are registered in `merging/core/methods.py` using `MergeMethod`:
 - `merge_in_memory(...) -> MergeOutput`
 - `save_fn(...)` (optional)
 
-This makes adding a new technique a single‑file change:
+This makes adding a new technique a single-file change:
 
-1. Implement in `merging/techniques/<new_method>.py`
-2. Register in `merging/core/methods.py`
+1. Implement in `merging/methods/<new_method>.py`
+2. Register in `merging/engine/builtin_methods.py`
 
 ## Runner (Single Source of Truth)
 
-`merging/core/runner.run_merge(...)` handles:
+`merging/engine/runner.run_merge(...)` handles:
 
 - adapter resolution (`resolve_adapter_specs`)
-- parameter normalization (`normalize_params`)
+- spec/parameter normalization (`MergeSpec` + `normalize_params`)
 - method dispatch
+- lambda optimizer hook (scaffold-friendly)
+- pre-merge transforms
 - optional saving (LoRA adapter + metadata)
 - returns a `MergeResult` (method, params, tag, output path, metadata)
 
 This is used by the CLI and is the preferred entrypoint for new integrations.
+
+## Merge Spec (New)
+
+The merge stack now normalizes into a typed `MergeSpec`:
+
+- `adapters`: list of task names or adapter paths
+- `method`: `uniform | weighted | task_vector | weighted_delta | ties`
+- `merge_mode`: `common | strict`
+- `method_params`: method-specific params (`lambda`, etc.)
+- `transforms`: pre-merge transform pipeline (`identity` available by default)
+- `lambda_policy`: `scalar` or `per_layer`
+- `optimizer`: `none | bayes | adamerging` (bayes/adamerging are scaffold adapters for direct merge)
+
+Use either legacy CLI args (`--method --lambda`) or `--config` YAML.
+
+## Lambda Policies
+
+Supported policies:
+
+- `scalar`: one lambda for every parameter
+- `per_layer`: default lambda + layer overrides (layer index parsed from LoRA key paths)
+
+Weighted merge accepts per-key lambda resolution while preserving scalar behavior.
+
+## Transforms
+
+Transforms are pre-merge plugins run on each source adapter weight dict before method composition.
+
+- Built-in: `identity`
+- Scaffold hook: `ties_scaffold` (no-op placeholder for future transform experiments)
+
+## Optimizers
+
+Optimizers are registry plugins that can set/adjust lambda policy.
+
+- `none`: no-op
+- `bayes`: adapter scaffold for direct merge; active Bayesian optimization remains in `merge-sweep`
+- `adamerging`: scaffold-only contract (no algorithm loop yet)
 
 ## Evaluation
 
@@ -73,6 +119,11 @@ Key metric logging includes the task’s primary metric plus `interference_delta
 
 - Default: `search.type = grid`
 - Bayes: `search.type = bayes` (Gaussian Process + Expected Improvement)
+
+Sweep configs can now also include:
+
+- `lambda_policy`
+- `optimizer`
 
 Ranking uses **max‑min interference delta** across evaluated tasks.
 
@@ -152,20 +203,29 @@ artifacts/<task>/metrics/eval/<split>/merged/<other_tasks>/<method_or_tag>/metri
 
 To add a new technique:
 
-1. Create `merging/techniques/<name>.py` with a `merge_in_memory` function.
-2. Register it in `merging/core/methods.py` with:
+1. Create `merging/methods/<name>.py` with a `merge_in_memory` function.
+2. Register it in `merging/engine/builtin_methods.py` with:
    - `required_params`
    - `params_defaults`
    - `params_validator` (optional)
-3. Use `main.py merge --method <name>`.
+3. Use `main.py merge --method <name>` or a merge YAML config.
 
 For parameter sweeps, add a config under `configs/merge/` and run:
 ```
 python main.py merge-sweep --config <path>
 ```
 
+### Config Examples
+
+- `configs/merge/merge_weighted_scalar.yaml`
+- `configs/merge/merge_weighted_per_layer.yaml`
+- `configs/merge/merge_weighted_bayes_optimizer.yaml`
+- `configs/merge/merge_ties_scaffold.yaml`
+
 ## Notes
 
 - `weighted_delta` is **not saveable** (in‑memory only).
+- `ties` is currently a scaffold method and raises a clear `NotImplementedError`.
 - Params are stored under `metadata["params"]` and indexed in `eval/index.json`.
+- Extended metadata also includes `method_params`, `lambda_policy`, `transforms`, and `optimizer`.
 - Use `resolve_merge_eval_dir` and `update_results_index` for consistent outputs.

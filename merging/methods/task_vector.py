@@ -9,7 +9,7 @@ from typing import Dict, List
 import torch
 
 from experiments.extract_vector import extract_task_vector_from_lora
-from merging.core.utils import save_merged_adapter
+from merging.runtime.utils import save_merged_adapter
 
 
 def merge_uniform_via_task_vectors(
