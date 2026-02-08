@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -13,6 +13,8 @@ from merging.config.specs import LambdaPolicySpec, MergeSpec, OptimizerSpec
 class OptimizerContext:
     method: str
     adapter_specs: List[str]
+    adapter_paths: List[Path]
+    source_metadata: List[Dict[str, Any]]
     merge_mode: str
     output_dir: Optional[Path]
     method_params: Dict[str, Any]
@@ -23,6 +25,7 @@ class OptimizerContext:
 class OptimizerResult:
     lambda_policy: Optional[LambdaPolicySpec]
     provenance: Dict[str, Any]
+    method_params_overrides: Dict[str, Any] = field(default_factory=dict)
 
 
 class BaseOptimizer:
@@ -64,6 +67,7 @@ class NoneOptimizer(BaseOptimizer):
         return OptimizerResult(
             lambda_policy=spec.lambda_policy,
             provenance={"optimizer": "none", "status": "noop"},
+            method_params_overrides={},
         )
 
 
@@ -83,6 +87,7 @@ class BayesOptimizerAdapter(BaseOptimizer):
                 "status": "scaffold_passthrough",
                 "note": "Use main.py merge-sweep for active bayes optimization.",
             },
+            method_params_overrides={},
         )
 
 
@@ -90,15 +95,9 @@ class AdaMergingOptimizer(BaseOptimizer):
     name = "adamerging"
 
     def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
-        _ = context
-        return OptimizerResult(
-            lambda_policy=spec.lambda_policy,
-            provenance={
-                "optimizer": "adamerging",
-                "status": "scaffold_only",
-                "note": "AdaMerging loop is not implemented yet; returning provided policy.",
-            },
-        )
+        from merging.plugins.adamerging_engine import run_adamerging_optimizer
+
+        return run_adamerging_optimizer(spec=spec, context=context)
 
 
 def resolve_optimizer(spec: Optional[OptimizerSpec]) -> BaseOptimizer:
@@ -110,6 +109,15 @@ def resolve_optimizer(spec: Optional[OptimizerSpec]) -> BaseOptimizer:
 def optimize_lambda_policy(spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
     optimizer = resolve_optimizer(spec.optimizer)
     return optimizer.optimize(spec, context)
+
+
+def apply_optimizer_overrides(
+    method_params: Mapping[str, Any],
+    result: OptimizerResult,
+) -> Dict[str, Any]:
+    merged = dict(method_params)
+    merged.update(result.method_params_overrides or {})
+    return merged
 
 
 def register_builtin_optimizers() -> None:
@@ -132,4 +140,5 @@ __all__ = [
     "list_optimizers",
     "resolve_optimizer",
     "optimize_lambda_policy",
+    "apply_optimizer_overrides",
 ]

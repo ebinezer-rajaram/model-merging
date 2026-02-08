@@ -15,6 +15,7 @@ from merging.methods.ties import merge_ties_scaffold
 from merging.methods.uniform import merge_adapters_uniform
 from merging.runtime.utils import compute_delta_from_lora_weights, load_adapter_weights
 from merging.methods.weighted import merge_adapters_weighted, merge_task_vectors_weighted
+from merging.methods.weighted_delta_n import merge_task_vectors_weighted_n
 
 
 def _uniform_in_memory(
@@ -172,6 +173,56 @@ def _weighted_delta_in_memory(
     return MergeOutput(merged_delta=merged_delta, merged_weights=None, metadata=metadata)
 
 
+def _weighted_delta_n_in_memory(
+    *,
+    adapter_paths: List[Path],
+    source_metadata: List[Dict],
+    merge_mode: str,
+    params: Optional[Dict[str, object]],
+) -> MergeOutput:
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="weighted_delta_n",
+        merge_mode=merge_mode,
+        lambda_weight=None,
+        params=params,
+    )
+    task_vectors = [extract_task_vector_from_lora(p) for p in adapter_paths]
+    task_coefficients = spec.method_params.get("task_coefficients")
+    normalize_coefficients = bool(spec.method_params.get("normalize_coefficients", True))
+    layer_task_coefficients = spec.method_params.get("layer_task_coefficients")
+    default_task_coefficients = spec.method_params.get("default_task_coefficients")
+    merged_delta = merge_task_vectors_weighted_n(
+        task_vectors,
+        merge_mode=merge_mode,
+        task_coefficients=task_coefficients,
+        normalize_coefficients=normalize_coefficients,
+        layer_task_coefficients=layer_task_coefficients,
+        default_task_coefficients=default_task_coefficients,
+    )
+    policy_type = "layer_task_coefficients" if layer_task_coefficients else "task_coefficients"
+    metadata = build_merge_metadata(
+        method="weighted_delta_n",
+        merge_mode=merge_mode,
+        num_adapters=len(adapter_paths),
+        source_metadata=source_metadata,
+        num_parameters=len(merged_delta),
+        params=params or {},
+        method_params=spec.method_params,
+        lambda_policy=spec.method_params.get("lambda_policy"),
+        transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],
+        optimizer=spec.method_params.get("optimizer"),
+    )
+    metadata["coefficient_policy"] = {
+        "type": policy_type,
+        "normalize_coefficients": normalize_coefficients,
+        "task_coefficients": task_coefficients,
+        "default_task_coefficients": default_task_coefficients,
+        "layer_task_coefficients": layer_task_coefficients,
+    }
+    return MergeOutput(merged_delta=merged_delta, merged_weights=None, metadata=metadata)
+
+
 def _task_vector_save(
     *,
     adapter_paths: List[Path],
@@ -245,6 +296,18 @@ def register_builtin_methods() -> None:
             max_adapters=2,
             saveable=False,
             merge_in_memory=_weighted_delta_in_memory,
+        )
+    )
+    register_merge_method(
+        MergeMethod(
+            name="weighted_delta_n",
+            required_params=(),
+            params_defaults={"normalize_coefficients": True},
+            params_validator=None,
+            min_adapters=2,
+            max_adapters=None,
+            saveable=False,
+            merge_in_memory=_weighted_delta_n_in_memory,
         )
     )
     register_merge_method(

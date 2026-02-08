@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from merging.plugins.optimizers import OptimizerContext, optimize_lambda_policy
+from merging.plugins.optimizers import apply_optimizer_overrides, OptimizerContext, optimize_lambda_policy
 from merging.engine.registry import get_merge_method, normalize_params
 from merging.engine.runner import resolve_adapter_specs
 from merging.config.specs import merge_spec_from_legacy_args
@@ -409,12 +409,15 @@ def _merge_in_memory(
         OptimizerContext(
             method=method,
             adapter_specs=[str(p) for p in adapter_paths],
+            adapter_paths=adapter_paths,
+            source_metadata=source_metadata,
             merge_mode=merge_mode,
             output_dir=None,
             method_params=dict(effective_params),
             lambda_policy=merge_spec.lambda_policy,
         ),
     )
+    effective_params = apply_optimizer_overrides(effective_params, optimizer_result)
     if optimizer_result.lambda_policy is not None:
         effective_params["lambda_policy"] = {
             "type": optimizer_result.lambda_policy.type,
