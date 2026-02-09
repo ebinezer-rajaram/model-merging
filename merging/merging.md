@@ -64,9 +64,15 @@ This makes adding a new technique a single-file change:
 
 This is used by the CLI and is the preferred entrypoint for new integrations.
 
-## Merge Spec (New)
+## Unified Merge Config
 
-The merge stack now normalizes into a typed `MergeSpec`:
+Merge and sweep now share one schema and one loader:
+
+- loader: `merging.config.load_merge_config(path)`
+- model: `MergeConfig` (convertible to `MergeSpec` for merge execution)
+- commands: `main.py merge` and `main.py merge-sweep` both consume this schema
+
+Direct merge fields:
 
 - `adapters`: list of task names or adapter paths
 - `method`: `uniform | weighted | task_vector | weighted_delta | ties`
@@ -76,7 +82,18 @@ The merge stack now normalizes into a typed `MergeSpec`:
 - `lambda_policy`: `scalar` or `per_layer`
 - `optimizer`: `none | bayes | adamerging`
 
+Optional sweep fields:
+
+- `search`
+- `constraint_nonnegative`
+- `eval_tasks`
+- `split`
+- `save_merged`
+- `eval_subset`
+- `output_dir`
+
 Use either legacy CLI args (`--method --lambda`) or `--config` YAML.
+Legacy merge/sweep schemas are still accepted and emit `DeprecationWarning`.
 
 ## Lambda Policies
 
@@ -219,12 +236,25 @@ For parameter sweeps, add a config under `configs/merge/` and run:
 python main.py merge-sweep --config <path>
 ```
 
-### Config Examples
+### Canonical Config Set
 
 - `configs/merge/merge_weighted_scalar.yaml`
 - `configs/merge/merge_weighted_per_layer.yaml`
-- `configs/merge/merge_weighted_bayes_optimizer.yaml`
-- `configs/merge/merge_ties.yaml` (or `merge_ties_scaffold.yaml` if you keep the old filename)
+- `configs/merge/merge_ties.yaml`
+- `configs/merge/merge_weighted_delta_sweep_bayes.yaml`
+
+### Migration Table
+
+| Old key/file pattern | New key/file pattern |
+| --- | --- |
+| top-level `grid` | `search.grid` with `search.type: grid` |
+| top-level `lambda` | `method_params.lambda` |
+| top-level `params` | `method_params` |
+| `configs/merge/sweep_weighted_delta_bayes.yaml` | `configs/merge/merge_weighted_delta_sweep_bayes.yaml` |
+| `configs/merge/sweep_weighted_delta_example.yaml` | use `configs/merge/merge_weighted_delta_sweep_bayes.yaml` + CLI `--search-type grid --grid ...` overrides |
+| `configs/merge/merge_ties_scaffold.yaml` | `configs/merge/merge_ties.yaml` |
+| `configs/merge/merge_weighted_bayes_optimizer.yaml` | `configs/merge/merge_weighted_scalar.yaml` for direct merge, or `merge_weighted_delta_sweep_bayes.yaml` for active bayes sweep |
+| `merge_weighted_delta_n_adamerging_*` variants | one canonical config + explicit CLI/YAML overrides for `optimizer.params` |
 
 ## Notes
 

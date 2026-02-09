@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+import warnings
 
 import json
-import yaml
 
+from merging.config.unified import MergeConfig, LambdaPolicySpec, OptimizerSpec, load_merge_config, normalize_merge_config
 from merging.evaluation.evaluate import evaluate_merged_adapter
 from merging.engine.registry import get_merge_method, normalize_params
 from merging.runtime.utils import PACKAGE_ROOT
@@ -33,6 +34,28 @@ class SweepConfig:
     constraint_nonnegative: bool = True
     output_dir: Optional[Path] = None
 
+    def to_merge_config(self) -> MergeConfig:
+        payload: Dict[str, Any] = {
+            "adapters": list(self.adapters),
+            "method": self.method,
+            "merge_mode": self.merge_mode,
+            "search": dict(self.search) if isinstance(self.search, Mapping) else None,
+            "eval_tasks": list(self.eval_tasks) if self.eval_tasks is not None else None,
+            "split": self.split,
+            "save_merged": self.save_merged,
+            "constraint_nonnegative": self.constraint_nonnegative,
+            "eval_subset": dict(self.eval_subset) if isinstance(self.eval_subset, Mapping) else None,
+            "output_dir": str(self.output_dir) if self.output_dir is not None else None,
+            "compute_missing_interference_baselines": self.compute_missing_interference_baselines,
+        }
+        if self.grid is not None:
+            payload["grid"] = dict(self.grid)
+        if self.lambda_policy is not None:
+            payload["lambda_policy"] = dict(self.lambda_policy)
+        if self.optimizer is not None:
+            payload["optimizer"] = dict(self.optimizer)
+        return normalize_merge_config(payload)
+
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -42,37 +65,27 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def load_sweep_config(path: Path) -> SweepConfig:
-    with path.open("r") as handle:
-        data = yaml.safe_load(handle) or {}
-
-    adapters = data.get("adapters")
-    method = data.get("method")
-    grid = data.get("grid")
-    search = data.get("search")
-    if not adapters or not method:
-        raise ValueError("Sweep config must include 'adapters' and 'method'.")
-
-    output_dir = data.get("output_dir")
-    if output_dir:
-        output_dir = Path(output_dir)
-        if not output_dir.is_absolute():
-            output_dir = PACKAGE_ROOT / output_dir
-
+    warnings.warn(
+        "load_sweep_config is deprecated; use merging.config.load_merge_config.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    config = load_merge_config(path)
     return SweepConfig(
-        adapters=adapters,
-        method=method,
-        grid=grid,
-        search=search,
-        lambda_policy=data.get("lambda_policy"),
-        optimizer=data.get("optimizer"),
-        eval_subset=data.get("eval_subset"),
-        merge_mode=data.get("merge_mode", "common"),
-        eval_tasks=data.get("eval_tasks"),
-        split=data.get("split", "test"),
-        save_merged=bool(data.get("save_merged", False)),
-        compute_missing_interference_baselines=bool(data.get("compute_missing_interference_baselines", True)),
-        constraint_nonnegative=bool(data.get("constraint_nonnegative", True)),
-        output_dir=output_dir,
+        adapters=list(config.adapters),
+        method=config.method,
+        grid=(dict(config.search.get("grid", {})) if isinstance(config.search, Mapping) else None),
+        search=dict(config.search) if isinstance(config.search, Mapping) else None,
+        lambda_policy=_lambda_policy_mapping(config.lambda_policy),
+        optimizer=_optimizer_mapping(config.optimizer),
+        eval_subset=(dict(config.eval_subset) if config.eval_subset is not None else None),
+        merge_mode=config.merge_mode,
+        eval_tasks=(list(config.eval_tasks) if config.eval_tasks is not None else None),
+        split=config.split,
+        save_merged=config.save_merged,
+        compute_missing_interference_baselines=config.compute_missing_interference_baselines,
+        constraint_nonnegative=config.constraint_nonnegative,
+        output_dir=config.output_dir,
     )
 
 
@@ -108,16 +121,47 @@ def _score_min_interference(
     return min_delta, {"min_interference_delta": min_delta, "mean_interference_delta": mean_delta}
 
 
-def run_sweep(config: SweepConfig) -> Dict[str, Any]:
-    search = config.search or {"type": "grid", "grid": config.grid or {}}
+def _lambda_policy_mapping(spec: Optional[LambdaPolicySpec | Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if spec is None:
+        return None
+    if isinstance(spec, dict):
+        return dict(spec)
+    return {
+        "type": spec.type,
+        "value": spec.value,
+        "default": spec.default,
+        "overrides": dict(spec.overrides),
+    }
+
+
+def _optimizer_mapping(spec: Optional[OptimizerSpec | Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if spec is None:
+        return None
+    if isinstance(spec, dict):
+        return dict(spec)
+    return {"type": spec.type, "params": dict(spec.params)}
+
+
+def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
+    if isinstance(config, SweepConfig):
+        warnings.warn(
+            "SweepConfig is deprecated; pass MergeConfig from merging.config.load_merge_config.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        config = config.to_merge_config()
+
+    search = config.search or {"type": "grid", "grid": {}}
     search_type = str(search.get("type", "grid")).lower()
+    lambda_policy = _lambda_policy_mapping(config.lambda_policy)
+    optimizer = _optimizer_mapping(config.optimizer)
 
     if search_type != "grid":
         from merging.evaluation.bayes import run_bayes_search
 
         return run_bayes_search(config, search)
 
-    grid = search.get("grid", config.grid or {})
+    grid = search.get("grid", {})
     params_grid = _expand_grid(grid)
     if not params_grid:
         params_grid = [{}]
@@ -147,12 +191,12 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
         "method": config.method,
         "adapters": config.adapters,
         "merge_mode": config.merge_mode,
-        "lambda_policy": config.lambda_policy,
-        "optimizer": config.optimizer,
+        "lambda_policy": lambda_policy,
+        "optimizer": optimizer,
         "eval_tasks": config.eval_tasks,
         "split": config.split,
         "eval_subset": config.eval_subset,
-        "grid": config.grid,
+        "grid": search.get("grid", {}),
         "search": search,
         "constraint_nonnegative": config.constraint_nonnegative,
         "best_index": best_idx,
@@ -165,10 +209,10 @@ def run_sweep(config: SweepConfig) -> Dict[str, Any]:
         for idx, params in enumerate(params_grid, 1):
             method_impl = get_merge_method(config.method)
             effective_params = normalize_params(method_impl, params=params)
-            if config.lambda_policy is not None:
-                effective_params["lambda_policy"] = config.lambda_policy
-            if config.optimizer is not None:
-                effective_params["optimizer"] = config.optimizer
+            if lambda_policy is not None:
+                effective_params["lambda_policy"] = lambda_policy
+            if optimizer is not None:
+                effective_params["optimizer"] = optimizer
             method_impl.validate(len(config.adapters), effective_params)
 
             print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")

@@ -27,10 +27,11 @@ from sklearn.gaussian_process.kernels import (
     WhiteKernel,
 )
 
+from merging.config.unified import MergeConfig
 from merging.engine.registry import get_merge_method, normalize_params
 from merging.runtime.utils import PACKAGE_ROOT
 from merging.evaluation.evaluate import evaluate_merged_adapter
-from merging.evaluation.sweep import SweepConfig, _atomic_write_json, _score_min_interference
+from merging.evaluation.sweep import _atomic_write_json, _lambda_policy_mapping, _optimizer_mapping, _score_min_interference
 
 
 _FLOAT_KINDS = {"float", "continuous"}
@@ -224,7 +225,10 @@ def _iter_sweep_json_paths(raw: str) -> List[Path]:
     return [path]
 
 
-def _compatible_sweep(config: SweepConfig, sweep: Mapping[str, Any]) -> bool:
+def _compatible_sweep(config: MergeConfig, sweep: Mapping[str, Any]) -> bool:
+    lambda_policy = _lambda_policy_mapping(config.lambda_policy)
+    optimizer = _optimizer_mapping(config.optimizer)
+
     if str(sweep.get("method")) != str(config.method):
         return False
     sweep_adapters = sweep.get("adapters")
@@ -252,15 +256,15 @@ def _compatible_sweep(config: SweepConfig, sweep: Mapping[str, Any]) -> bool:
     if config.eval_subset is not None and sweep_eval_subset != config.eval_subset:
         return False
 
-    if sweep.get("lambda_policy") != config.lambda_policy:
+    if sweep.get("lambda_policy") != lambda_policy:
         return False
-    if sweep.get("optimizer") != config.optimizer:
+    if sweep.get("optimizer") != optimizer:
         return False
 
     return True
 
 
-def run_bayes_search(config: SweepConfig, search: Dict[str, Any]) -> Dict[str, Any]:
+def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, Any]:
     """Bayesian optimization sweep runner.
 
     Expected search config shape:
@@ -319,18 +323,20 @@ def run_bayes_search(config: SweepConfig, search: Dict[str, Any]) -> Dict[str, A
     best_idx: Optional[int] = None
     best_score = float("-inf")
     best_tiebreak = float("-inf")
+    lambda_policy = _lambda_policy_mapping(config.lambda_policy)
+    optimizer = _optimizer_mapping(config.optimizer)
 
     summary: Dict[str, Any] = {
         "timestamp": started_at.isoformat(),
         "method": config.method,
         "adapters": config.adapters,
         "merge_mode": config.merge_mode,
-        "lambda_policy": config.lambda_policy,
-        "optimizer": config.optimizer,
+        "lambda_policy": lambda_policy,
+        "optimizer": optimizer,
         "eval_tasks": config.eval_tasks,
         "split": config.split,
         "eval_subset": config.eval_subset,
-        "grid": config.grid,
+        "grid": search.get("grid", {}),
         "search": search,
         "constraint_nonnegative": config.constraint_nonnegative,
         "best_index": best_idx,
@@ -366,10 +372,10 @@ def run_bayes_search(config: SweepConfig, search: Dict[str, Any]) -> Dict[str, A
         method_impl = get_merge_method(config.method)
         try:
             effective_params = normalize_params(method_impl, params=params)
-            if config.lambda_policy is not None:
-                effective_params["lambda_policy"] = config.lambda_policy
-            if config.optimizer is not None:
-                effective_params["optimizer"] = config.optimizer
+            if lambda_policy is not None:
+                effective_params["lambda_policy"] = lambda_policy
+            if optimizer is not None:
+                effective_params["optimizer"] = optimizer
             method_impl.validate(len(config.adapters), effective_params)
             results = evaluate_merged_adapter(
                 adapter_path=None,

@@ -10,7 +10,7 @@ from merging import evaluate_merged_adapter
 from merging.runtime.logging import banner
 from merging.engine.registry import list_merge_methods
 from merging.engine.runner import run_merge
-from merging.config.specs import load_merge_spec
+from merging.config.unified import load_merge_config
 
 
 def merge_adapters_cli(
@@ -38,7 +38,7 @@ def merge_adapters_cli(
         output=output,
         save_merged=True,
         show_progress=True,
-        merge_spec=load_merge_spec(config) if config else None,
+        merge_spec=load_merge_config(config).to_merge_spec() if config else None,
     )
     merged_path = merge_result.output_path
     task_names = merge_result.task_names
