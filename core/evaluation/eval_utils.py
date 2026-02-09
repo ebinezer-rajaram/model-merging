@@ -212,6 +212,8 @@ def load_model_and_processor(
     model_path: Path,
     adapter_path: Optional[Path] = None,
     delta_weights: Optional[Dict[str, torch.Tensor]] = None,
+    device_map_override: Optional[Any] = None,
+    torch_dtype_override: Optional[torch.dtype] = None,
 ) -> tuple[Any, Qwen2_5OmniProcessor]:
     """Load the base Qwen Omni model and optionally attach a LoRA adapter.
 
@@ -224,8 +226,12 @@ def load_model_and_processor(
     model, processor = load_qwen_model(
         model_path,
         apply_lora=False,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        device_map="auto",
+        torch_dtype=(
+            torch_dtype_override
+            if torch_dtype_override is not None
+            else (torch.bfloat16 if torch.cuda.is_available() else torch.float32)
+        ),
+        device_map=("auto" if device_map_override is None else device_map_override),
         use_fast_tokenizer=False,
     )
 

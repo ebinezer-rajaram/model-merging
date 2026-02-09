@@ -11,7 +11,7 @@ from merging.methods.task_vector import merge_uniform_via_task_vectors
 from merging.engine.registry import MergeMethod, MergeOutput, build_merge_metadata, register_merge_method
 from merging.config.specs import merge_spec_from_legacy_args
 from merging.plugins.transforms import apply_transforms
-from merging.methods.ties import merge_ties_scaffold
+from merging.methods.ties import merge_ties, _validate_ties_params
 from merging.methods.uniform import merge_adapters_uniform
 from merging.runtime.utils import compute_delta_from_lora_weights, load_adapter_weights
 from merging.methods.weighted import merge_adapters_weighted, merge_task_vectors_weighted
@@ -314,12 +314,12 @@ def register_builtin_methods() -> None:
         MergeMethod(
             name="ties",
             required_params=(),
-            params_defaults={},
-            params_validator=None,
+            params_defaults={"k": 20.0, "lambda": 1.0},
+            params_validator=_validate_ties_params,
             min_adapters=2,
             max_adapters=None,
             saveable=False,
-            merge_in_memory=merge_ties_scaffold,
+            merge_in_memory=merge_ties,
         )
     )
 

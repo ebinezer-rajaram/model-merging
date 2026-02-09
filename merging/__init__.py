@@ -8,7 +8,7 @@ Available Methods:
     - weighted: Weighted averaging with configurable lambda parameter
     - task_vector: Merge in full weight space via task vectors
     - weighted_delta: Weighted merge in task-vector (delta) space
-    - ties: Scaffolded merge method placeholder
+    - ties: Paper-core TIES merge in task-vector (delta) space (in-memory only)
 
 Usage:
     from merging import merge_uniform, merge_weighted

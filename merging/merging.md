@@ -74,7 +74,7 @@ The merge stack now normalizes into a typed `MergeSpec`:
 - `method_params`: method-specific params (`lambda`, etc.)
 - `transforms`: pre-merge transform pipeline (`identity` available by default)
 - `lambda_policy`: `scalar` or `per_layer`
-- `optimizer`: `none | bayes | adamerging` (bayes/adamerging are scaffold adapters for direct merge)
+- `optimizer`: `none | bayes | adamerging`
 
 Use either legacy CLI args (`--method --lambda`) or `--config` YAML.
 
@@ -100,7 +100,11 @@ Optimizers are registry plugins that can set/adjust lambda policy.
 
 - `none`: no-op
 - `bayes`: adapter scaffold for direct merge; active Bayesian optimization remains in `merge-sweep`
-- `adamerging`: scaffold-only contract (no algorithm loop yet)
+- `adamerging`: entropy-minimization optimizer for classification tasks with low-VRAM defaults
+  - `optimizer.params.merge_impl`: `streaming_parametrize` (default) or `functional_clone_legacy`
+  - `optimizer.params.delta_residency`: `cpu_stream` (default) or `gpu_cache`
+  - `optimizer.params.dtype_compute`: `auto` (default), `bf16`, `fp16`, `fp32`
+  - `optimizer.params.force_cpu=true` now loads directly on CPU (`device_map={"": "cpu"}`, `torch_dtype=float32`)
 
 ## Evaluation
 
@@ -220,12 +224,15 @@ python main.py merge-sweep --config <path>
 - `configs/merge/merge_weighted_scalar.yaml`
 - `configs/merge/merge_weighted_per_layer.yaml`
 - `configs/merge/merge_weighted_bayes_optimizer.yaml`
-- `configs/merge/merge_ties_scaffold.yaml`
+- `configs/merge/merge_ties.yaml` (or `merge_ties_scaffold.yaml` if you keep the old filename)
 
 ## Notes
 
 - `weighted_delta` is **not saveable** (in‑memory only).
-- `ties` is currently a scaffold method and raises a clear `NotImplementedError`.
+- `ties` is runnable and uses paper-core TIES in task-vector space:
+  - `method_params.k` (percent in `[0,100]`, default `20`)
+  - `method_params.lambda` (final scaling factor, default `1.0`)
+- `ties` is **not saveable** (in‑memory only), but works with `evaluate-merged` and `merge-sweep`.
 - Params are stored under `metadata["params"]` and indexed in `eval/index.json`.
 - Extended metadata also includes `method_params`, `lambda_policy`, `transforms`, and `optimizer`.
 - Use `resolve_merge_eval_dir` and `update_results_index` for consistent outputs.

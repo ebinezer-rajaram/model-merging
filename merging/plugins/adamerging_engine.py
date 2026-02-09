@@ -17,6 +17,12 @@ from core.evaluation.eval_utils import load_model_and_processor
 from experiments.evaluate_task import _get_model_path, _prepare_dataset_cache
 from experiments.extract_vector import extract_task_vector_from_lora
 from merging.config.specs import MergeSpec
+from merging.plugins.adamerging_streaming import (
+    StreamingDeltaEntry,
+    TaskCoefficientProvider,
+    register_streaming_parametrizations,
+    unregister_streaming_parametrizations,
+)
 from merging.plugins.optimizers import OptimizerContext, OptimizerResult
 from merging.policies.lambda_policy import extract_layer_index
 from merging.runtime.utils import get_task_module, PACKAGE_ROOT
@@ -333,6 +339,17 @@ def _next_batch(loader: DataLoader, iterator: Optional[Iterator[Any]]) -> Tuple[
         return batch, iterator
 
 
+def _to_streaming_entries(delta_entries: List[_DeltaEntry]) -> List[StreamingDeltaEntry]:
+    return [
+        StreamingDeltaEntry(
+            param_key=entry.param_key,
+            layer_idx=entry.layer_idx,
+            deltas=entry.deltas,
+        )
+        for entry in delta_entries
+    ]
+
+
 def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
     params = dict(spec.optimizer.params if spec.optimizer is not None else {})
     variant = str(params.get("variant", "task_wise")).strip().lower()
@@ -362,6 +379,9 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     use_autocast = bool(params.get("use_autocast", True))
     gradient_checkpointing = bool(params.get("gradient_checkpointing", True))
     force_cpu = bool(params.get("force_cpu", False))
+    merge_impl = str(params.get("merge_impl", "streaming_parametrize")).strip().lower()
+    delta_residency = str(params.get("delta_residency", "cpu_stream")).strip().lower()
+    dtype_compute = str(params.get("dtype_compute", "auto")).strip().lower()
     task_vector_dtype = str(params.get("task_vector_dtype", "auto")).strip().lower()
     empty_cache_interval = int(params.get("empty_cache_interval", 0))
     eval_subset = params.get("eval_subset")
@@ -374,6 +394,16 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         raise ValueError("optimizer.params.batch_size must be > 0.")
     if empty_cache_interval < 0:
         raise ValueError("optimizer.params.empty_cache_interval must be >= 0.")
+    if merge_impl not in {"streaming_parametrize", "functional_clone_legacy"}:
+        raise ValueError(
+            "optimizer.params.merge_impl must be one of: streaming_parametrize|functional_clone_legacy."
+        )
+    if delta_residency not in {"cpu_stream", "gpu_cache"}:
+        raise ValueError("optimizer.params.delta_residency must be one of: cpu_stream|gpu_cache.")
+    if dtype_compute not in {"auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
+        raise ValueError(
+            "optimizer.params.dtype_compute must be one of: auto|bf16|bfloat16|fp16|float16|fp32|float32."
+        )
     if task_vector_dtype not in {"auto", "none", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
         raise ValueError(
             "optimizer.params.task_vector_dtype must be one of: "
@@ -391,17 +421,20 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     first_artifacts = first_task_module.get_artifact_directories(PACKAGE_ROOT)
     first_config = _prepare_dataset_cache(first_config, first_artifacts)
     model_path = _get_model_path(first_config, tasks[0])
-    model, processor = load_model_and_processor(model_path, adapter_path=None, delta_weights=None)
+    if force_cpu:
+        model, processor = load_model_and_processor(
+            model_path,
+            adapter_path=None,
+            delta_weights=None,
+            device_map_override={"": "cpu"},
+            torch_dtype_override=torch.float32,
+        )
+    else:
+        model, processor = load_model_and_processor(model_path, adapter_path=None, delta_weights=None)
     if hasattr(model, "config"):
         try:
             model.config.use_cache = False
         except Exception:
-            pass
-    if force_cpu:
-        try:
-            model = model.to("cpu")
-        except Exception:
-            # If accelerate/device_map wrappers block `.to`, continue with inferred device.
             pass
     if gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         try:
@@ -465,63 +498,93 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     task_iters: Dict[str, Optional[Iterator[Any]]] = {task: None for task in tasks}
     initial_entropy: Optional[float] = None
     final_entropy: Optional[float] = None
+    streaming_handles = []
+    coefficient_provider = TaskCoefficientProvider()
+    if merge_impl == "streaming_parametrize":
+        streaming_handles = register_streaming_parametrizations(
+            model=model,
+            entries=_to_streaming_entries(delta_entries),
+            coefficient_provider=coefficient_provider,
+            delta_residency=delta_residency,
+            dtype_compute=dtype_compute,
+        )
+    try:
+        for step in range(steps):
+            optimizer.zero_grad(set_to_none=True)
 
-    for step in range(steps):
-        optimizer.zero_grad(set_to_none=True)
+            num_tasks = len(tasks)
+            if num_tasks == 0:
+                raise RuntimeError("AdaMerging optimization has no tasks to optimize.")
 
-        num_tasks = len(tasks)
-        if num_tasks == 0:
-            raise RuntimeError("AdaMerging optimization has no tasks to optimize.")
+            entropy_sum = 0.0
+            active_task = "<none>"
+            try:
+                # Keep per-task backward to release each task graph immediately.
+                for task in tasks:
+                    active_task = task
+                    task_coeffs, default_coeffs, layer_coeffs = _merge_coeffs(
+                        alpha_task=alpha_task,
+                        alpha_default=alpha_default,
+                        alpha_layer=alpha_layer,
+                        layer_indices=layer_indices,
+                        normalize_coefficients=normalize_coefficients,
+                    )
+                    if merge_impl == "functional_clone_legacy":
+                        func_params = _build_functional_params(
+                            base_params=base_params,
+                            delta_entries=delta_entries,
+                            task_coeffs=task_coeffs,
+                            default_coeffs=default_coeffs,
+                            layer_coeffs=layer_coeffs,
+                        )
+                    else:
+                        coefficient_provider.set_coefficients(
+                            task_coeffs=task_coeffs,
+                            default_coeffs=default_coeffs,
+                            layer_coeffs=layer_coeffs,
+                        )
+                        func_params = None
+                    batch, task_iters[task] = _next_batch(loaders[task], task_iters[task])
+                    batch = _to_device(batch, device)
+                    with torch.autocast(
+                        device_type="cuda",
+                        dtype=torch.bfloat16,
+                        enabled=(use_autocast and device.type == "cuda"),
+                    ):
+                        outputs = (
+                            _functional_forward(model, func_params, batch)
+                            if func_params is not None
+                            else model(**batch)
+                        )
+                        logits = _extract_logits(outputs)
+                        labels = batch.get("labels") if isinstance(batch, Mapping) else None
+                        task_loss = _compute_entropy_loss(logits, labels)
+                    entropy_sum += float(task_loss.detach().item())
+                    (task_loss / float(num_tasks)).backward()
+                    del func_params, batch, outputs, logits, labels, task_loss
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower():
+                    raise RuntimeError(
+                        "AdaMerging OOM during entropy optimization "
+                        f"(step={step}, task='{active_task}', merge_impl='{merge_impl}', "
+                        f"delta_residency='{delta_residency}', batch_size={batch_size}, force_cpu={force_cpu}). "
+                        "Try smaller optimizer.params.batch_size (e.g., 1-2), "
+                        "fewer optimizer.params.tasks, and/or optimizer.params.eval_subset.max_samples. "
+                        "Set optimizer.params.merge_impl='streaming_parametrize' and "
+                        "optimizer.params.delta_residency='cpu_stream' for lower VRAM."
+                    ) from exc
+                raise
 
-        entropy_sum = 0.0
-        try:
-            # Rebuild merged functional params per task so each backward pass can
-            # free its graph immediately (prevents VRAM growth with many tasks).
-            for task in tasks:
-                task_coeffs, default_coeffs, layer_coeffs = _merge_coeffs(
-                    alpha_task=alpha_task,
-                    alpha_default=alpha_default,
-                    alpha_layer=alpha_layer,
-                    layer_indices=layer_indices,
-                    normalize_coefficients=normalize_coefficients,
-                )
-                func_params = _build_functional_params(
-                    base_params=base_params,
-                    delta_entries=delta_entries,
-                    task_coeffs=task_coeffs,
-                    default_coeffs=default_coeffs,
-                    layer_coeffs=layer_coeffs,
-                )
-                batch, task_iters[task] = _next_batch(loaders[task], task_iters[task])
-                batch = _to_device(batch, device)
-                with torch.autocast(
-                    device_type="cuda",
-                    dtype=torch.bfloat16,
-                    enabled=(use_autocast and device.type == "cuda"),
-                ):
-                    outputs = _functional_forward(model, func_params, batch)
-                    logits = _extract_logits(outputs)
-                    labels = batch.get("labels") if isinstance(batch, Mapping) else None
-                    task_loss = _compute_entropy_loss(logits, labels)
-                entropy_sum += float(task_loss.detach().item())
-                (task_loss / float(num_tasks)).backward()
-                del func_params, batch, outputs, logits, labels, task_loss
-        except RuntimeError as exc:
-            if "out of memory" in str(exc).lower():
-                raise RuntimeError(
-                    "AdaMerging OOM during entropy optimization. "
-                    "Try smaller optimizer.params.batch_size (e.g., 1-2), "
-                    "fewer optimizer.params.tasks, and/or optimizer.params.eval_subset.max_samples."
-                ) from exc
-            raise
-
-        avg_entropy = entropy_sum / float(num_tasks)
-        if initial_entropy is None:
-            initial_entropy = avg_entropy
-        optimizer.step()
-        if empty_cache_interval > 0 and device.type == "cuda" and ((step + 1) % empty_cache_interval == 0):
-            torch.cuda.empty_cache()
-        final_entropy = avg_entropy
+            avg_entropy = entropy_sum / float(num_tasks)
+            if initial_entropy is None:
+                initial_entropy = avg_entropy
+            optimizer.step()
+            if empty_cache_interval > 0 and device.type == "cuda" and ((step + 1) % empty_cache_interval == 0):
+                torch.cuda.empty_cache()
+            final_entropy = avg_entropy
+    finally:
+        if streaming_handles:
+            unregister_streaming_parametrizations(streaming_handles)
 
     task_out, default_out, layer_out = _merge_coeffs(
         alpha_task=alpha_task,
@@ -561,6 +624,10 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "normalize_coefficients": normalize_coefficients,
         "gradient_checkpointing": gradient_checkpointing,
         "force_cpu": force_cpu,
+        "merge_impl": merge_impl,
+        "delta_residency": delta_residency,
+        "dtype_compute": dtype_compute,
+        "actual_device_mode": "cpu" if device.type == "cpu" else "gpu",
         "task_vector_dtype": task_vector_dtype,
         "empty_cache_interval": empty_cache_interval,
         "objective": "entropy_minimization",
