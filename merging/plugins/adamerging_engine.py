@@ -21,6 +21,7 @@ from merging.plugins.adamerging_streaming import (
     unregister_streaming_parametrizations,
 )
 from merging.plugins.gradient_common import (
+    _apply_ties_consensus_preprocess,
     _build_delta_entries,
     _build_functional_params,
     _build_task_loader,
@@ -120,9 +121,11 @@ def _compute_entropy_loss(
 def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
     params = dict(spec.optimizer.params if spec.optimizer is not None else {})
     variant = str(params.get("variant", "task_wise")).strip().lower()
-    plus_plus = bool(params.get("plus_plus", False))
-    if plus_plus or variant in _PLUS_PLUS_VARIANTS:
-        raise NotImplementedError("AdaMerging++ requires TIES implementation; currently scaffold-only.")
+    plus_plus = bool(params.get("plus_plus", False) or (variant in _PLUS_PLUS_VARIANTS))
+    if variant in {"task_wise_plus_plus", "plusplus", "plus_plus"}:
+        variant = "task_wise"
+    elif variant == "layer_wise_plus_plus":
+        variant = "layer_wise"
     if variant not in {"task_wise", "layer_wise"}:
         raise ValueError(f"Unsupported optimizer.params.variant='{variant}'.")
     if context.method != "weighted_delta_n":
@@ -243,7 +246,23 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         )
 
     tasks = _resolve_eval_tasks(context, params)
-    task_vectors = [extract_task_vector_from_lora(path) for path in context.adapter_paths]
+    from merging.plugins.transforms import apply_transforms
+    task_vectors = [
+        apply_transforms(extract_task_vector_from_lora(path), spec.transforms)
+        for path in context.adapter_paths
+    ]
+    plus_plus_k = float(params.get("plus_plus_k", params.get("ties_k", 20.0)))
+    plus_plus_lambda = float(params.get("plus_plus_lambda", params.get("ties_lambda", 1.0)))
+    plus_plus_stats: Optional[Dict[str, Any]] = None
+    if plus_plus:
+        if not 0.0 <= plus_plus_k <= 100.0:
+            raise ValueError("optimizer.params.plus_plus_k must be in [0, 100].")
+        task_vectors, plus_plus_stats = _apply_ties_consensus_preprocess(
+            task_vectors,
+            merge_mode=merge_mode,
+            k_percent=plus_plus_k,
+            lambda_scale=plus_plus_lambda,
+        )
     num_adapters = len(task_vectors)
 
     t0 = time.time()
@@ -755,6 +774,10 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_threshold": early_stopping_threshold,
         "objective": "entropy_minimization",
+        "plus_plus": plus_plus,
+        "plus_plus_k": plus_plus_k,
+        "plus_plus_lambda": plus_plus_lambda,
+        "plus_plus_stats": plus_plus_stats,
         "initial_entropy": initial_entropy,
         "final_entropy": final_entropy,
         "best_entropy": best_entropy,

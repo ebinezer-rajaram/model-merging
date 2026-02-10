@@ -385,6 +385,144 @@ def _to_streaming_entries(delta_entries: List[_DeltaEntry]) -> List[StreamingDel
     ]
 
 
+def _global_topk_threshold(abs_values: torch.Tensor, k_percent: float) -> torch.Tensor:
+    if abs_values.numel() == 0 or k_percent <= 0.0:
+        return torch.tensor(float("inf"), dtype=torch.float32, device=abs_values.device)
+    if k_percent >= 100.0:
+        return torch.tensor(0.0, dtype=torch.float32, device=abs_values.device)
+
+    keep_count = int(math.ceil(abs_values.numel() * (k_percent / 100.0)))
+    keep_count = max(1, min(keep_count, abs_values.numel()))
+    topk_values = torch.topk(abs_values, k=keep_count, largest=True, sorted=False).values
+    return torch.min(topk_values)
+
+
+def _trim_task_vector_global(task_vector: Dict[str, torch.Tensor], k_percent: float) -> Dict[str, torch.Tensor]:
+    if not task_vector:
+        return {}
+    if k_percent <= 0.0:
+        return {key: torch.zeros_like(tensor, dtype=torch.float32) for key, tensor in task_vector.items()}
+    if k_percent >= 100.0:
+        return {key: tensor.detach().to(dtype=torch.float32).clone() for key, tensor in task_vector.items()}
+
+    flat = [tensor.detach().to(dtype=torch.float32).abs().reshape(-1) for tensor in task_vector.values()]
+    abs_values = torch.cat(flat) if flat else torch.empty(0, dtype=torch.float32)
+    threshold = _global_topk_threshold(abs_values, k_percent)
+
+    trimmed: Dict[str, torch.Tensor] = {}
+    for key, tensor in task_vector.items():
+        tensor_f32 = tensor.detach().to(dtype=torch.float32)
+        keep_mask = tensor_f32.abs() >= threshold
+        trimmed[key] = torch.where(keep_mask, tensor_f32, torch.zeros_like(tensor_f32))
+    return trimmed
+
+
+def _resolve_keys_to_merge(task_vectors: List[Dict[str, torch.Tensor]], merge_mode: str) -> Tuple[List[str], int]:
+    if merge_mode not in {"common", "strict"}:
+        raise ValueError(f"Unsupported merge_mode='{merge_mode}'.")
+    key_sets = [set(tv.keys()) for tv in task_vectors]
+    if merge_mode == "strict":
+        reference = key_sets[0]
+        for i, keys in enumerate(key_sets[1:], start=1):
+            if keys != reference:
+                raise ValueError(
+                    f"Task vectors have different parameters in strict mode. "
+                    f"Mismatch at adapter index {i}."
+                )
+        return sorted(reference), 0
+    common_keys = set.intersection(*key_sets) if key_sets else set()
+    all_keys = set.union(*key_sets) if key_sets else set()
+    missing_count = len(all_keys - common_keys)
+    return sorted(common_keys), missing_count
+
+
+def _apply_ties_consensus_preprocess(
+    task_vectors: List[Dict[str, torch.Tensor]],
+    *,
+    merge_mode: str,
+    k_percent: float,
+    lambda_scale: float,
+) -> Tuple[List[Dict[str, torch.Tensor]], Dict[str, Any]]:
+    if not task_vectors:
+        return [], {
+            "enabled": True,
+            "k": float(k_percent),
+            "lambda": float(lambda_scale),
+            "trim_density": 0.0,
+            "sign_conflict_rate": 0.0,
+            "merged_nonzero_entries": 0,
+            "skipped_missing_key_count": 0,
+            "skipped_shape_mismatch_count": 0,
+            "keys_to_merge": 0,
+        }
+    keys_to_merge, missing_key_count = _resolve_keys_to_merge(task_vectors, merge_mode)
+    shape_mismatch_count = 0
+    for key in list(keys_to_merge):
+        shapes = [tuple(tv[key].shape) for tv in task_vectors]
+        if len(set(shapes)) != 1:
+            if merge_mode == "strict":
+                raise ValueError(f"Shape mismatch for key '{key}' in strict mode: {shapes}")
+            keys_to_merge.remove(key)
+            shape_mismatch_count += 1
+    mergeable_vectors = [{key: tv[key] for key in keys_to_merge} for tv in task_vectors]
+    trimmed_vectors = [_trim_task_vector_global(tv, k_percent) for tv in mergeable_vectors]
+
+    elected_sign_map: Dict[str, torch.Tensor] = {}
+    for key in keys_to_merge:
+        stacked = torch.stack([tv[key] for tv in trimmed_vectors], dim=0)
+        elected_sign_map[key] = torch.sign(stacked.sum(dim=0))
+
+    processed_vectors: List[Dict[str, torch.Tensor]] = []
+    merged_nonzero_entries = 0
+    active_sign_positions = 0
+    conflict_positions = 0
+    total_entries = 0
+    kept_entries = 0
+    for i, tv in enumerate(task_vectors):
+        out_i: Dict[str, torch.Tensor] = {}
+        for key in keys_to_merge:
+            original = tv[key]
+            trimmed = trimmed_vectors[i][key]
+            elected_sign = elected_sign_map[key]
+            aligned_mask = (
+                (torch.sign(trimmed) == elected_sign)
+                & (elected_sign != 0.0)
+                & (trimmed != 0.0)
+            )
+            filtered = torch.where(aligned_mask, trimmed * float(lambda_scale), torch.zeros_like(trimmed))
+            out_i[key] = filtered.to(dtype=original.dtype)
+            merged_nonzero_entries += int((filtered != 0.0).sum().item())
+            total_entries += int(filtered.numel())
+            kept_entries += int((filtered != 0.0).sum().item())
+        processed_vectors.append(out_i)
+
+    for key in keys_to_merge:
+        stacked = torch.stack([tv[key] for tv in trimmed_vectors], dim=0)
+        active = (stacked != 0.0).any(dim=0)
+        pos_present = (stacked > 0.0).any(dim=0)
+        neg_present = (stacked < 0.0).any(dim=0)
+        conflict = pos_present & neg_present
+        active_sign_positions += int(active.sum().item())
+        conflict_positions += int((conflict & active).sum().item())
+
+    trim_density = float(kept_entries) / float(total_entries) if total_entries > 0 else 0.0
+    sign_conflict_rate = (
+        float(conflict_positions) / float(active_sign_positions) if active_sign_positions > 0 else 0.0
+    )
+    stats: Dict[str, Any] = {
+        "enabled": True,
+        "k": float(k_percent),
+        "lambda": float(lambda_scale),
+        "trim_density": trim_density,
+        "sign_conflict_rate": sign_conflict_rate,
+        "merged_nonzero_entries": int(merged_nonzero_entries),
+        "skipped_missing_key_count": int(missing_key_count),
+        "skipped_shape_mismatch_count": int(shape_mismatch_count),
+        "keys_to_merge": int(len(keys_to_merge)),
+    }
+    return processed_vectors, stats
+
+
 __all__ = [
     "_CLASSIFICATION_TASKS",
     "_DTYPE_ALIASES",
@@ -403,6 +541,7 @@ __all__ = [
     "_resolve_delta_param_name",
     "_resolve_dtype",
     "_resolve_eval_tasks",
+    "_apply_ties_consensus_preprocess",
     "_to_device",
     "_to_streaming_entries",
 ]
