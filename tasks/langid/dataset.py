@@ -10,6 +10,7 @@ import torch
 from datasets import Dataset, DatasetDict
 
 from core import resolve_num_proc
+from core.tasks.collator import build_strict_label_mask
 from core.tasks.dataset import (
     _extract_label_names,
     _normalize_target_count,
@@ -343,6 +344,7 @@ class LanguageIdentificationCollator:
     processor: Any
     sampling_rate: int
     label_names: Sequence[str]
+    warn_on_label_mask_fallback: bool = True
 
     def _label_to_text(self, value: Any) -> str:
         """Convert label value to text."""
@@ -433,22 +435,18 @@ class LanguageIdentificationCollator:
         for i, label in enumerate(label_strings):
             label_tokens = tokenizer.encode(label, add_special_tokens=False)
             input_ids = inputs["input_ids"][i]
-            label_length = len(label_tokens)
-
-            # Search for the label tokens in the sequence
-            found = False
-            for j in range(len(input_ids) - label_length + 1):
-                if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
-                    labels[i, :j] = -100
-                    found = True
-                    break
-
-            # Fallback: mask based on sequence structure
-            if not found:
-                non_masked = (labels[i] != -100).nonzero(as_tuple=False)
-                if len(non_masked) > label_length:
-                    mask_until = non_masked[-label_length].item()
-                    labels[i, :mask_until] = -100
+            mask_stats = build_strict_label_mask(
+                input_ids=input_ids,
+                labels=labels[i],
+                label_tokens=label_tokens,
+                ignore_index=-100,
+            )
+            if self.warn_on_label_mask_fallback and bool(mask_stats.get("used_fallback", False)):
+                reason = str(mask_stats.get("fallback_reason"))
+                print(
+                    "[langid-collator] label mask fallback used "
+                    f"(reason={reason}, label='{label}', kept={mask_stats.get('kept_token_count', 0)})"
+                )
 
         inputs["labels"] = labels
         return inputs

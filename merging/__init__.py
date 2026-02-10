@@ -5,6 +5,7 @@ Each merging method is implemented in its own module for extensibility.
 
 Available Methods:
     - uniform: Simple averaging of adapter weights
+    - uniform_delta: Simple averaging in task-vector (delta) space (in-memory only)
     - weighted: Weighted averaging with configurable lambda parameter
     - task_vector: Merge in full weight space via task vectors
     - weighted_delta: Weighted merge in task-vector (delta) space

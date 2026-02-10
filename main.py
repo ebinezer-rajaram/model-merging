@@ -177,7 +177,7 @@ def parse_args() -> argparse.Namespace:
     eval_merged_parser.set_defaults(confusion_matrix=True, save_results=True)
 
     sweep_parser = subparsers.add_parser("merge-sweep", help="Run a merge hyperparameter sweep.")
-    sweep_parser.add_argument("--config", default=None, help="Path to sweep YAML config.")
+    sweep_parser.add_argument("--config", default=None, help="Path to unified merge YAML config.")
     sweep_parser.add_argument(
         "--adapters",
         nargs="+",
@@ -351,18 +351,44 @@ def _parse_grid_args(grid_args: list[str] | None) -> dict:
 
 
 def dispatch_merge_sweep(args: argparse.Namespace) -> None:
-    from merging.evaluation.sweep import load_sweep_config, run_sweep, SweepConfig
+    from merging.config.unified import load_merge_config, normalize_merge_config
+    from merging.evaluation.sweep import run_sweep
 
     if args.config:
-        config = load_sweep_config(Path(args.config))
-        config_dict = config.__dict__.copy()
+        config = load_merge_config(Path(args.config))
+        config_dict = {
+            "adapters": list(config.adapters),
+            "method": config.method,
+            "merge_mode": config.merge_mode,
+            "method_params": dict(config.method_params),
+            "search": (dict(config.search) if config.search is not None else None),
+            "eval_tasks": (list(config.eval_tasks) if config.eval_tasks is not None else None),
+            "split": config.split,
+            "save_merged": config.save_merged,
+            "constraint_nonnegative": config.constraint_nonnegative,
+            "eval_subset": (dict(config.eval_subset) if config.eval_subset is not None else None),
+            "output_dir": str(config.output_dir) if config.output_dir is not None else None,
+            "compute_missing_interference_baselines": config.compute_missing_interference_baselines,
+        }
+        if config.lambda_policy is not None:
+            config_dict["lambda_policy"] = {
+                "type": config.lambda_policy.type,
+                "value": config.lambda_policy.value,
+                "default": config.lambda_policy.default,
+                "overrides": dict(config.lambda_policy.overrides),
+            }
+        if config.optimizer is not None:
+            config_dict["optimizer"] = {
+                "type": config.optimizer.type,
+                "params": dict(config.optimizer.params),
+            }
     else:
         if not args.adapters or not args.method:
             raise ValueError("Provide --config or both --adapters and --method.")
         config_dict = {
             "adapters": args.adapters,
             "method": args.method,
-            "grid": _parse_grid_args(args.grid),
+            "search": {"type": "grid", "grid": _parse_grid_args(args.grid)},
         }
 
     # Overrides
@@ -371,9 +397,9 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
     if args.method:
         config_dict["method"] = args.method
     if args.grid:
-        config_dict["grid"] = _parse_grid_args(args.grid)
+        grid = _parse_grid_args(args.grid)
         search = config_dict.get("search", {"type": "grid"})
-        search["grid"] = config_dict["grid"]
+        search["grid"] = grid
         config_dict["search"] = search
     if args.search_type:
         search = config_dict.get("search") or {}
@@ -392,10 +418,9 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
     if args.allow_negative:
         config_dict["constraint_nonnegative"] = False
     if args.output_dir:
-        config_dict["output_dir"] = Path(args.output_dir)
+        config_dict["output_dir"] = args.output_dir
 
-    config = SweepConfig(**config_dict)
-    run_sweep(config)
+    run_sweep(normalize_merge_config(config_dict))
 
 
 def main() -> None:

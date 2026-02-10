@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from merging.plugins.optimizers import apply_optimizer_overrides, OptimizerContext, optimize_lambda_policy
 from merging.engine.registry import get_merge_method, normalize_params
@@ -35,6 +35,46 @@ TASK_METRICS = {
     "speaker_id": ("accuracy", True),
     "speaker_ver": ("accuracy", True),
 }
+
+
+def _get_optimizer_bool_param(
+    params: Optional[Dict[str, object]],
+    key: str,
+    default: bool = False,
+) -> bool:
+    if not isinstance(params, Mapping):
+        return default
+    optimizer = params.get("optimizer")
+    if not isinstance(optimizer, Mapping):
+        return default
+    opt_params = optimizer.get("params")
+    if not isinstance(opt_params, Mapping):
+        return default
+    if key not in opt_params:
+        return default
+    return bool(opt_params.get(key))
+
+
+def _print_pre_eval_coefficients(metadata: Dict[str, Any], source_tasks: List[str]) -> None:
+    params = metadata.get("params")
+    if not isinstance(params, Mapping):
+        return
+    optimizer = params.get("optimizer")
+    if not isinstance(optimizer, Mapping):
+        return
+    provenance = optimizer.get("provenance")
+    if not isinstance(provenance, Mapping):
+        return
+    coeffs = provenance.get("final_task_coefficients")
+    if not isinstance(coeffs, list) or not coeffs:
+        return
+    task_labels = source_tasks if len(source_tasks) == len(coeffs) else [f"task_{i}" for i in range(len(coeffs))]
+    print("\n[AdaMerging] Final task coefficients (pre-eval):")
+    for task, coeff in zip(task_labels, coeffs):
+        try:
+            print(f"  - {task}: {float(coeff):.6f}")
+        except Exception:
+            print(f"  - {task}: {coeff}")
 
 
 def evaluate_merged_adapter(
@@ -97,6 +137,27 @@ def evaluate_merged_adapter(
             raise ValueError("No evaluation tasks provided for merged adapter.")
 
         merge_tag = build_merge_tag(metadata, source_tasks or None)
+        method_name = metadata.get("merge_method", "merged")
+        run_output_path: Optional[Path] = None
+        if (
+            _get_optimizer_bool_param(effective_params, "save_metadata_pre_eval", default=False)
+            or _get_optimizer_bool_param(effective_params, "print_coefficients_pre_eval", default=False)
+        ):
+            run_output_path = create_merge_output_path(
+                method_name,
+                source_tasks or task_names or [],
+                {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,
+            )
+        if _get_optimizer_bool_param(effective_params, "save_metadata_pre_eval", default=False):
+            if run_output_path is None:
+                raise RuntimeError("Failed to resolve run output path for pre-eval metadata save.")
+            merge_metadata_path = run_output_path / "merge_metadata.json"
+            with merge_metadata_path.open("w") as handle:
+                json.dump(metadata, handle, indent=2)
+            if show_summary:
+                print(f"\n💾 Pre-eval merge metadata saved to {merge_metadata_path}")
+        if _get_optimizer_bool_param(effective_params, "print_coefficients_pre_eval", default=False):
+            _print_pre_eval_coefficients(metadata, source_tasks)
 
         if compute_missing_interference_baselines:
             _maybe_compute_interference_baselines(
@@ -223,7 +284,6 @@ def evaluate_merged_adapter(
                 summary["eval_subset"] = eval_subset
             if eval_tag is not None:
                 summary["eval_tag"] = eval_tag
-            method_name = metadata.get("merge_method", "merged")
             eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
             eval_dir.mkdir(parents=True, exist_ok=True)
             suffix = f"__{eval_tag}" if eval_tag else ""
@@ -234,7 +294,7 @@ def evaluate_merged_adapter(
                 print(f"\n💾 Evaluation results saved to {results_path}")
 
             # Also write a run bundle for in-memory merges.
-            output_path = create_merge_output_path(
+            output_path = run_output_path if run_output_path is not None else create_merge_output_path(
                 method_name,
                 source_tasks or task_names or [],
                 {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,

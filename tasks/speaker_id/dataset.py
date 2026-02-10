@@ -41,6 +41,17 @@ MANIFEST_FIELDS: Tuple[str, ...] = (
 )
 
 
+def _duration_key(min_duration: Optional[float], max_duration: Optional[float]) -> str:
+    if min_duration is None and max_duration is None:
+        return "all"
+    parts: List[str] = []
+    if min_duration is not None:
+        parts.append(f"min{min_duration:g}")
+    if max_duration is not None:
+        parts.append(f"max{max_duration:g}")
+    return "_".join(parts).replace(".", "p")
+
+
 def _select_speakers(
     dataset: DatasetDict,
     *,
@@ -230,9 +241,11 @@ def load_voxceleb_speaker_dataset(
     config_key = dataset_config or "default"
     speakers_key = "all" if max_speakers is None else str(max_speakers).zfill(4)
     per_speaker_key = "all" if max_samples_per_speaker is None else str(max_samples_per_speaker).zfill(4)
+    duration_key = _duration_key(min_duration, max_duration)
     cache_name = (
         f"{dataset_key}_{config_key}"
         f"_speakers_{speakers_key}_per_{per_speaker_key}"
+        f"_dur_{duration_key}"
         f"_train_{_samples_key(max_train_samples)}"
         f"_val_{_samples_key(max_validation_samples)}"
         f"_test_{_samples_key(max_test_samples)}"

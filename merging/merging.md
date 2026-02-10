@@ -75,7 +75,7 @@ Merge and sweep now share one schema and one loader:
 Direct merge fields:
 
 - `adapters`: list of task names or adapter paths
-- `method`: `uniform | weighted | task_vector | weighted_delta | ties`
+- `method`: `uniform | uniform_delta | weighted | task_vector | weighted_delta | ties`
 - `merge_mode`: `common | strict`
 - `method_params`: method-specific params (`lambda`, etc.)
 - `transforms`: pre-merge transform pipeline (`identity` available by default)
@@ -120,7 +120,17 @@ Optimizers are registry plugins that can set/adjust lambda policy.
 - `adamerging`: entropy-minimization optimizer for classification tasks with low-VRAM defaults
   - `optimizer.params.merge_impl`: `streaming_parametrize` (default) or `functional_clone_legacy`
   - `optimizer.params.delta_residency`: `cpu_stream` (default) or `gpu_cache`
+  - `optimizer.params.model_dtype`: model load dtype for optimization (`auto` default; use `bf16`/`fp16` to reduce VRAM)
   - `optimizer.params.dtype_compute`: `auto` (default), `bf16`, `fp16`, `fp32`
+  - `optimizer.params.progress_bar`: show tqdm progress bar during optimization (`true` by default when tqdm is installed)
+  - `optimizer.params.logging_steps`: print optimization metrics every N optimizer update steps (`0` disables periodic logs)
+  - `optimizer.params.dataloader_num_workers`: DataLoader worker count (`0` default; increase to improve throughput)
+  - `optimizer.params.dataloader_pin_memory`: pin host memory for faster H2D transfers (`true` default)
+  - `optimizer.params.non_blocking_transfer`: use non-blocking tensor transfer to GPU (`true` default)
+  - `optimizer.params.gradient_accumulation_steps`: gradient accumulation factor for larger effective batch (`1` default)
+  - `optimizer.params.early_stopping_patience`: stop after N non-improving steps (`0` disables)
+  - `optimizer.params.early_stopping_threshold`: minimum entropy improvement to reset patience (`0.0` default)
+  - Backward-compatible aliases: `log_every`, `grad_accum_steps`, `early_stopping_min_delta`
   - `optimizer.params.force_cpu=true` now loads directly on CPU (`device_map={"": "cpu"}`, `torch_dtype=float32`)
 
 ## Evaluation
@@ -258,6 +268,7 @@ python main.py merge-sweep --config <path>
 
 ## Notes
 
+- `uniform_delta` is **not saveable** (in‑memory only).
 - `weighted_delta` is **not saveable** (in‑memory only).
 - `ties` is runnable and uses paper-core TIES in task-vector space:
   - `method_params.k` (percent in `[0,100]`, default `20`)

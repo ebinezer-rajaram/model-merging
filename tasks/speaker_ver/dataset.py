@@ -353,7 +353,93 @@ def load_speaker_ver_dataset(
     max_test_samples = _normalize_target_count("max_test_samples", max_test_samples)
     total_pairs = int(total_pairs)
 
-    # Load and prepare base dataset
+    effective_num_proc = resolve_num_proc(num_proc)
+    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
+
+    # Fast path: reuse cached pairs and skip base dataset loading entirely.
+    train_pairs = val_pairs = test_pairs = None
+    if cache_splits and not force_rebuild:
+        required_meta = {
+            "dataset": dataset_name,
+            "config": dataset_config,
+            "total_pairs": total_pairs,
+            "max_duration": max_duration,
+            "min_duration": min_duration,
+            "split_by_speakers": split_by_speakers,
+            "split_percentages": split_percentages,
+            "seed": seed,
+        }
+        pairs_cache_dir = _find_cached_pairs_dir(cache_root, required_meta)
+        if pairs_cache_dir is not None:
+            print("✓ Found cached speaker verification pairs; skipping base dataset loading.")
+            train_pairs = _load_cached_pairs(pairs_cache_dir, "train")
+            val_pairs = _load_cached_pairs(pairs_cache_dir, "validation")
+            test_pairs = _load_cached_pairs(pairs_cache_dir, "test")
+            if any(pair is not None for pair in (train_pairs, val_pairs, test_pairs)):
+                # Build cache path
+                dataset_key = dataset_name.replace("/", "_")
+                config_key = dataset_config or "default"
+                pairs_key = str(total_pairs).zfill(6)
+
+                cache_name = (
+                    f"{dataset_key}_{config_key}"
+                    f"_pairs_total_{pairs_key}"
+                    f"_train_{_samples_key(max_train_samples)}"
+                    f"_val_{_samples_key(max_validation_samples)}"
+                    f"_test_{_samples_key(max_test_samples)}"
+                    f"_seed_{int(seed)}.json"
+                )
+                cache_path = cache_root / cache_name
+
+                # Label names for binary classification
+                label_names = ["no", "yes"]
+
+                # Create DatasetDict for caching
+                dataset_dict = DatasetDict()
+                if train_pairs is not None:
+                    dataset_dict["train"] = train_pairs
+                if val_pairs is not None:
+                    dataset_dict["validation"] = val_pairs
+                if test_pairs is not None:
+                    dataset_dict["test"] = test_pairs
+
+                # Cache and sample splits
+                train_subset, validation_subset, test_subset, splits_metadata, payload_seed = cache_and_sample_splits(
+                    dataset_dict,
+                    cache_path=cache_path,
+                    max_train_samples=max_train_samples,
+                    max_validation_samples=max_validation_samples,
+                    max_test_samples=max_test_samples,
+                    seed=seed,
+                    manifest_fields=MANIFEST_FIELDS,
+                    audio_column=None,  # We have two audio columns
+                    cache_splits=cache_splits,
+                    force_rebuild=force_rebuild,
+                    additional_metadata={
+                        "dataset": dataset_name,
+                        "config": dataset_config,
+                        "label_names": label_names,
+                        "total_pairs": total_pairs,
+                    },
+                )
+
+                # Print summary
+                print_dataset_summary(
+                    task_emoji="🔍",
+                    task_name="Speaker verification dataset",
+                    train_subset=train_subset,
+                    validation_subset=validation_subset,
+                    test_subset=test_subset,
+                    splits_metadata=splits_metadata,
+                    label_names=label_names,
+                    seed=payload_seed,
+                    num_proc=effective_num_proc,
+                    extra_info=f"{total_pairs} total pairs (50/50)",
+                )
+
+                return train_subset, validation_subset, test_subset, label_names
+
+    # Load and prepare base dataset only when pairs cache isn't reusable.
     dataset, audio_column_name = load_and_prepare_dataset(
         dataset_name=dataset_name,
         dataset_config=dataset_config,
@@ -381,96 +467,6 @@ def load_speaker_ver_dataset(
     # Use only the train split for generating pairs
     # VoxCeleb2 typically only has a train split
     base_dataset = dataset.get("train") or next(iter(dataset.values()))
-
-    effective_num_proc = resolve_num_proc(num_proc)
-    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
-
-    # Fast path: reuse cached pairs to skip duration filtering and pair generation
-    pairs_loaded_from_cache = False
-    train_pairs = val_pairs = test_pairs = None
-    if cache_splits and not force_rebuild:
-        required_meta = {
-            "dataset": dataset_name,
-            "config": dataset_config,
-            "total_pairs": total_pairs,
-            "max_duration": max_duration,
-            "min_duration": min_duration,
-            "split_by_speakers": split_by_speakers,
-            "split_percentages": split_percentages,
-            "seed": seed,
-        }
-        pairs_cache_dir = _find_cached_pairs_dir(cache_root, required_meta)
-        if pairs_cache_dir is not None:
-            print("✓ Found cached speaker verification pairs; skipping duration filtering.")
-            train_pairs = _load_cached_pairs(pairs_cache_dir, "train")
-            val_pairs = _load_cached_pairs(pairs_cache_dir, "validation")
-            test_pairs = _load_cached_pairs(pairs_cache_dir, "test")
-            if any(pair is not None for pair in (train_pairs, val_pairs, test_pairs)):
-                pairs_loaded_from_cache = True
-
-    if pairs_loaded_from_cache:
-        # Build cache path
-        dataset_key = dataset_name.replace("/", "_")
-        config_key = dataset_config or "default"
-        pairs_key = str(total_pairs).zfill(6)
-
-        cache_name = (
-            f"{dataset_key}_{config_key}"
-            f"_pairs_total_{pairs_key}"
-            f"_train_{_samples_key(max_train_samples)}"
-            f"_val_{_samples_key(max_validation_samples)}"
-            f"_test_{_samples_key(max_test_samples)}"
-            f"_seed_{int(seed)}.json"
-        )
-        cache_path = cache_root / cache_name
-
-        # Label names for binary classification
-        label_names = ["no", "yes"]
-
-        # Create DatasetDict for caching
-        dataset_dict = DatasetDict()
-        if train_pairs is not None:
-            dataset_dict["train"] = train_pairs
-        if val_pairs is not None:
-            dataset_dict["validation"] = val_pairs
-        if test_pairs is not None:
-            dataset_dict["test"] = test_pairs
-
-        # Cache and sample splits
-        train_subset, validation_subset, test_subset, splits_metadata, payload_seed = cache_and_sample_splits(
-            dataset_dict,
-            cache_path=cache_path,
-            max_train_samples=max_train_samples,
-            max_validation_samples=max_validation_samples,
-            max_test_samples=max_test_samples,
-            seed=seed,
-            manifest_fields=MANIFEST_FIELDS,
-            audio_column=None,  # We have two audio columns
-            cache_splits=cache_splits,
-            force_rebuild=force_rebuild,
-            additional_metadata={
-                "dataset": dataset_name,
-                "config": dataset_config,
-                "label_names": label_names,
-                "total_pairs": total_pairs,
-            },
-        )
-
-        # Print summary
-        print_dataset_summary(
-            task_emoji="🔍",
-            task_name="Speaker verification dataset",
-            train_subset=train_subset,
-            validation_subset=validation_subset,
-            test_subset=test_subset,
-            splits_metadata=splits_metadata,
-            label_names=label_names,
-            seed=payload_seed,
-            num_proc=effective_num_proc,
-            extra_info=f"{total_pairs} total pairs (50/50)",
-        )
-
-        return train_subset, validation_subset, test_subset, label_names
 
     # Add duration information to base dataset before filtering
     from core.tasks.dataset import add_duration_to_dataset, filter_by_duration

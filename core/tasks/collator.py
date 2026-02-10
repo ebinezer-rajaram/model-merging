@@ -4,9 +4,75 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
+
+
+def build_strict_label_mask(
+    *,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    label_tokens: Sequence[int],
+    ignore_index: int = -100,
+) -> Dict[str, Any]:
+    """Mask all tokens except the final assistant label span.
+
+    The rightmost exact token match is used to avoid matching class labels
+    that appear earlier in prompt instructions (e.g., "Choose from: ...").
+    If no exact match is found, falls back to keeping the final non-masked
+    `len(label_tokens)` token positions.
+    """
+    label_token_list = [int(tok) for tok in label_tokens]
+    label_len = len(label_token_list)
+    result: Dict[str, Any] = {
+        "matched": False,
+        "used_fallback": False,
+        "fallback_reason": None,
+        "label_token_count": label_len,
+        "kept_token_count": 0,
+    }
+
+    if label_len <= 0:
+        labels.fill_(ignore_index)
+        result["used_fallback"] = True
+        result["fallback_reason"] = "empty_label_tokens"
+        return result
+
+    # Find rightmost exact label span.
+    rightmost_start: Optional[int] = None
+    for start in range(int(input_ids.shape[0]) - label_len, -1, -1):
+        if torch.equal(
+            input_ids[start : start + label_len],
+            torch.tensor(label_token_list, device=input_ids.device, dtype=input_ids.dtype),
+        ):
+            rightmost_start = int(start)
+            break
+
+    if rightmost_start is not None:
+        labels[:rightmost_start] = ignore_index
+        labels[rightmost_start + label_len :] = ignore_index
+        valid = int((labels != ignore_index).sum().item())
+        result["matched"] = True
+        result["kept_token_count"] = valid
+        return result
+
+    # Deterministic fallback: keep the last non-masked tokens only.
+    non_masked = (labels != ignore_index).nonzero(as_tuple=False).squeeze(-1)
+    if non_masked.numel() <= 0:
+        labels.fill_(ignore_index)
+        result["used_fallback"] = True
+        result["fallback_reason"] = "no_non_masked_tokens"
+        return result
+
+    keep_count = min(label_len, int(non_masked.numel()))
+    keep_positions = non_masked[-keep_count:]
+    labels.fill_(ignore_index)
+    labels[keep_positions] = input_ids[keep_positions]
+    result["used_fallback"] = True
+    result["fallback_reason"] = "rightmost_match_not_found"
+    result["kept_token_count"] = keep_count
+    return result
 
 
 @dataclass
@@ -27,6 +93,7 @@ class BaseAudioTextCollator(ABC):
     processor: Any
     sampling_rate: int
     include_transcript: bool = True
+    warn_on_label_mask_fallback: bool = True
 
     def _build_instruction(self, feature: Dict[str, Any]) -> str:
         """Build the instruction text for the user message.
@@ -161,28 +228,20 @@ class BaseAudioTextCollator(ABC):
 
         # Mask everything except the assistant's response
         for i, label in enumerate(label_texts):
-            # Tokenize the ground truth label to identify it in the full sequence
             label_tokens = tokenizer.encode(label, add_special_tokens=False)
-
-            # Find where the label appears in the input_ids
             input_ids = inputs["input_ids"][i]
-            label_length = len(label_tokens)
-
-            # Search for the label tokens in the sequence
-            found = False
-            for j in range(len(input_ids) - label_length + 1):
-                if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
-                    # Mask everything before the label
-                    labels[i, :j] = -100
-                    found = True
-                    break
-
-            # Fallback: mask based on sequence structure
-            if not found:
-                non_masked = (labels[i] != -100).nonzero(as_tuple=False)
-                if len(non_masked) > label_length:
-                    mask_until = non_masked[-label_length].item()
-                    labels[i, :mask_until] = -100
+            mask_stats = build_strict_label_mask(
+                input_ids=input_ids,
+                labels=labels[i],
+                label_tokens=label_tokens,
+                ignore_index=-100,
+            )
+            if self.warn_on_label_mask_fallback and bool(mask_stats.get("used_fallback", False)):
+                reason = str(mask_stats.get("fallback_reason"))
+                print(
+                    "[collator] label mask fallback used "
+                    f"(reason={reason}, label='{label}', kept={mask_stats.get('kept_token_count', 0)})"
+                )
 
         return labels
 
@@ -235,6 +294,7 @@ class BaseGenerationCollator(BaseAudioTextCollator):
 
 
 __all__ = [
+    "build_strict_label_mask",
     "BaseAudioTextCollator",
     "BaseClassificationCollator",
     "BaseGenerationCollator",
