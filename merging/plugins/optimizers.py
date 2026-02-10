@@ -285,6 +285,15 @@ class AdaMergingOptimizer(BaseOptimizer):
         return run_adamerging_optimizer(spec=spec, context=context)
 
 
+class GradientOptimizer(BaseOptimizer):
+    name = "gradient"
+
+    def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
+        from merging.plugins.gradient_engine import run_gradient_optimizer
+
+        return run_gradient_optimizer(spec=spec, context=context)
+
+
 def resolve_optimizer(spec: Optional[OptimizerSpec]) -> BaseOptimizer:
     if spec is None:
         return get_optimizer("none")
@@ -312,6 +321,8 @@ def register_builtin_optimizers() -> None:
         register_optimizer(BayesOptimizerAdapter())
     if "adamerging" not in _OPTIMIZERS:
         register_optimizer(AdaMergingOptimizer())
+    if "gradient" not in _OPTIMIZERS:
+        register_optimizer(GradientOptimizer())
 
 
 register_builtin_optimizers()
