@@ -143,10 +143,15 @@ def evaluate_merged_adapter(
             _get_optimizer_bool_param(effective_params, "save_metadata_pre_eval", default=False)
             or _get_optimizer_bool_param(effective_params, "print_coefficients_pre_eval", default=False)
         ):
+            extra_params = {}
+            if metadata.get("lambda") is not None:
+                extra_params["lambda"] = metadata.get("lambda")
+            if isinstance(metadata.get("optimizer"), Mapping):
+                extra_params["optimizer"] = metadata.get("optimizer")
             run_output_path = create_merge_output_path(
                 method_name,
                 source_tasks or task_names or [],
-                {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,
+                extra_params if extra_params else None,
             )
         if _get_optimizer_bool_param(effective_params, "save_metadata_pre_eval", default=False):
             if run_output_path is None:
@@ -294,10 +299,15 @@ def evaluate_merged_adapter(
                 print(f"\n💾 Evaluation results saved to {results_path}")
 
             # Also write a run bundle for in-memory merges.
+            extra_params = {}
+            if metadata.get("lambda") is not None:
+                extra_params["lambda"] = metadata.get("lambda")
+            if isinstance(metadata.get("optimizer"), Mapping):
+                extra_params["optimizer"] = metadata.get("optimizer")
             output_path = run_output_path if run_output_path is not None else create_merge_output_path(
                 method_name,
                 source_tasks or task_names or [],
-                {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,
+                extra_params if extra_params else None,
             )
             merge_metadata_path = output_path / "merge_metadata.json"
             with merge_metadata_path.open("w") as handle:
@@ -695,7 +705,14 @@ def _save_merged_adapter(
     output_path = create_merge_output_path(
         method,
         task_names,
-        {"lambda": metadata.get("lambda")} if metadata.get("lambda") is not None else None,
+        {
+            k: v
+            for k, v in {
+                "lambda": metadata.get("lambda"),
+                "optimizer": metadata.get("optimizer") if isinstance(metadata.get("optimizer"), Mapping) else None,
+            }.items()
+            if v is not None
+        } or None,
     )
 
     if method_impl.save_fn is not None:

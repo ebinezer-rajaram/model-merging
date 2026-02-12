@@ -294,6 +294,24 @@ class GradientOptimizer(BaseOptimizer):
         return run_gradient_optimizer(spec=spec, context=context)
 
 
+class SuperMergeOptimizer(BaseOptimizer):
+    name = "supermerge"
+
+    def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
+        from merging.plugins.supermerge_engine import run_supermerge_optimizer
+
+        return run_supermerge_optimizer(spec=spec, context=context)
+
+
+class RegretSmoothMaxOptimizer(BaseOptimizer):
+    name = "regret_smoothmax"
+
+    def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
+        from merging.plugins.regret_smoothmax_engine import run_regret_smoothmax_optimizer
+
+        return run_regret_smoothmax_optimizer(spec=spec, context=context)
+
+
 def resolve_optimizer(spec: Optional[OptimizerSpec]) -> BaseOptimizer:
     if spec is None:
         return get_optimizer("none")
@@ -323,6 +341,10 @@ def register_builtin_optimizers() -> None:
         register_optimizer(AdaMergingOptimizer())
     if "gradient" not in _OPTIMIZERS:
         register_optimizer(GradientOptimizer())
+    if "supermerge" not in _OPTIMIZERS:
+        register_optimizer(SuperMergeOptimizer())
+    if "regret_smoothmax" not in _OPTIMIZERS:
+        register_optimizer(RegretSmoothMaxOptimizer())
 
 
 register_builtin_optimizers()

@@ -10,6 +10,7 @@ This module provides common functionality used across all merging methods:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,49 @@ TASK_REGISTRY = {
 def _format_lambda(value: float) -> str:
     """Format lambda values consistently for path tags."""
     return f"{value:g}"
+
+
+def _sanitize_run_token(value: object) -> str:
+    token = re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower())
+    token = token.strip("_")
+    return token
+
+
+def _optimizer_run_tag(extra_params: Optional[Dict]) -> Optional[str]:
+    if not isinstance(extra_params, dict):
+        return None
+    optimizer = extra_params.get("optimizer")
+    if not isinstance(optimizer, dict):
+        return None
+    optimizer_type = _sanitize_run_token(optimizer.get("type", ""))
+    if not optimizer_type or optimizer_type == "none":
+        return None
+
+    provenance = optimizer.get("provenance")
+    params = optimizer.get("params")
+    variant_raw = None
+    plus_plus = False
+    if isinstance(provenance, dict):
+        variant_raw = provenance.get("variant")
+        plus_plus = bool(provenance.get("plus_plus", False))
+    if variant_raw is None and isinstance(params, dict):
+        variant_raw = params.get("variant")
+        plus_plus = plus_plus or bool(params.get("plus_plus", False))
+
+    variant = _sanitize_run_token(variant_raw) if variant_raw else ""
+    if variant.endswith("_plus_plus"):
+        plus_plus = True
+        variant = variant.replace("_plus_plus", "")
+    elif variant in {"plus_plus", "plusplus"}:
+        plus_plus = True
+        variant = "task_wise"
+
+    parts = [p for p in [optimizer_type, variant] if p]
+    if plus_plus:
+        parts.append("plusplus")
+    if not parts:
+        return None
+    return "_".join(parts)
 
 
 def _is_run_dir(path: Path) -> bool:
@@ -595,7 +639,7 @@ def create_merge_output_path(
         method: Merge method name (e.g., "uniform", "weighted")
         task_names: List of task names being merged
         extra_params: Optional dict with extra parameters (e.g., {"lambda": 0.7}).
-            Note: params are stored in metadata and do not affect directory layout.
+            When optimizer metadata is present, optimizer type/variant are encoded in run folder name.
         base_dir: Optional base directory (defaults to PACKAGE_ROOT/artifacts/merged)
 
     Returns:
@@ -612,12 +656,10 @@ def create_merge_output_path(
     # Create task combination name
     task_combo = "_".join(sorted(task_names))
 
-    # NOTE: extra_params are intentionally not encoded into the directory name.
-    # We rely on per-run metadata (`merge_metadata.json`) and tags to distinguish runs.
-
     # Create full path: merged/{method}/{task_combo}/runs/run_{timestamp}
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"run_{timestamp}"
+    run_tag = _optimizer_run_tag(extra_params)
+    run_id = f"run_{run_tag}_{timestamp}" if run_tag else f"run_{timestamp}"
 
     output_path = base_dir / method / task_combo / "runs" / run_id
     output_path.mkdir(parents=True, exist_ok=True)

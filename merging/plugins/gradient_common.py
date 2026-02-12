@@ -35,6 +35,8 @@ _DTYPE_ALIASES = {
     "float32": torch.float32,
 }
 
+_SAMPLING_STRATEGIES = {"uniform", "none", "inverse", "sqrt_inverse", "balanced"}
+
 
 @dataclass(frozen=True)
 class _DeltaEntry:
@@ -218,6 +220,7 @@ def _build_task_loader(
     split: str,
     batch_size: int,
     eval_subset: Optional[Mapping[str, Any]],
+    sampling: Optional[Mapping[str, Any]],
     num_workers: int,
     pin_memory: bool,
 ) -> DataLoader:
@@ -228,19 +231,81 @@ def _build_task_loader(
     config = _prepare_dataset_cache(config, artifact_dirs)
     setup = prepare_task_for_evaluation(task, processor, split=split, config=config)
     setup.dataset = _maybe_subset_dataset(setup.dataset, task=task, eval_subset=eval_subset)
+    resolved_sampling = _resolve_sampling_for_task(task=task, sampling=sampling)
     loader_kwargs: Dict[str, Any] = {
         "dataset": setup.dataset,
         "batch_size": batch_size,
-        "shuffle": True,
         "drop_last": False,
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "collate_fn": setup.data_collator,
     }
+    if resolved_sampling["enabled"]:
+        from core.training.samplers import WeightedClassSampler
+
+        loader_kwargs["sampler"] = WeightedClassSampler(
+            setup.dataset,
+            num_samples=len(setup.dataset),
+            replacement=True,
+            method=resolved_sampling["strategy"],
+        )
+        loader_kwargs["shuffle"] = False
+    else:
+        loader_kwargs["shuffle"] = True
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = True
     loader = DataLoader(**loader_kwargs)
     return loader
+
+
+def _resolve_sampling_for_task(
+    *,
+    task: str,
+    sampling: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Resolve sampling policy for a task using default + per-task overrides.
+
+    Schema:
+      sampling:
+        default:
+          enabled: bool
+          strategy: uniform|inverse|sqrt_inverse|balanced|none
+        per_task:
+          <task_name>:
+            enabled: bool
+            strategy: ...
+    """
+    default_enabled = False
+    default_strategy = "uniform"
+    per_task_cfg: Optional[Mapping[str, Any]] = None
+    if isinstance(sampling, Mapping):
+        default_cfg = sampling.get("default")
+        if isinstance(default_cfg, Mapping):
+            if "enabled" in default_cfg:
+                default_enabled = bool(default_cfg.get("enabled"))
+            if "strategy" in default_cfg and default_cfg.get("strategy") is not None:
+                default_strategy = str(default_cfg.get("strategy")).strip().lower()
+        per_task_raw = sampling.get("per_task")
+        if isinstance(per_task_raw, Mapping):
+            cfg = per_task_raw.get(task)
+            if isinstance(cfg, Mapping):
+                per_task_cfg = cfg
+    enabled = default_enabled
+    strategy = default_strategy
+    if per_task_cfg is not None:
+        if "enabled" in per_task_cfg:
+            enabled = bool(per_task_cfg.get("enabled"))
+        if "strategy" in per_task_cfg and per_task_cfg.get("strategy") is not None:
+            strategy = str(per_task_cfg.get("strategy")).strip().lower()
+    if strategy not in _SAMPLING_STRATEGIES:
+        raise ValueError(
+            "optimizer.params.sampling strategy must be one of: "
+            + "|".join(sorted(_SAMPLING_STRATEGIES))
+            + f". Got '{strategy}' for task '{task}'."
+        )
+    if strategy in {"uniform", "none"}:
+        enabled = False
+    return {"enabled": bool(enabled), "strategy": strategy}
 
 
 def _extract_logits(outputs: Any) -> torch.Tensor:
@@ -265,18 +330,24 @@ def _merge_coeffs(
     if coefficient_parameterization == "sigmoid_alpha":
         task = torch.sigmoid(alpha_task)
         default = torch.sigmoid(alpha_default) if alpha_default is not None else None
+    elif coefficient_parameterization == "tanh_alpha":
+        task = torch.tanh(alpha_task)
+        default = torch.tanh(alpha_default) if alpha_default is not None else None
     elif coefficient_parameterization == "projected_lambda":
         task = alpha_task
         default = alpha_default
     else:
         raise ValueError(
-            "coefficient_parameterization must be one of: sigmoid_alpha|projected_lambda."
+            "coefficient_parameterization must be one of: "
+            "sigmoid_alpha|tanh_alpha|projected_lambda."
         )
     layer_map: Dict[int, torch.Tensor] = {}
     if alpha_layer is not None:
         for i, layer in enumerate(layer_indices):
             if coefficient_parameterization == "sigmoid_alpha":
                 layer_map[int(layer)] = torch.sigmoid(alpha_layer[i])
+            elif coefficient_parameterization == "tanh_alpha":
+                layer_map[int(layer)] = torch.tanh(alpha_layer[i])
             else:
                 layer_map[int(layer)] = alpha_layer[i]
 
@@ -541,6 +612,7 @@ __all__ = [
     "_resolve_delta_param_name",
     "_resolve_dtype",
     "_resolve_eval_tasks",
+    "_resolve_sampling_for_task",
     "_apply_ties_consensus_preprocess",
     "_to_device",
     "_to_streaming_entries",

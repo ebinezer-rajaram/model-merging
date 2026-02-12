@@ -11,6 +11,7 @@ from merging.methods.task_vector import merge_uniform_via_task_vectors
 from merging.engine.registry import MergeMethod, MergeOutput, build_merge_metadata, register_merge_method
 from merging.config.specs import merge_spec_from_legacy_args
 from merging.plugins.transforms import apply_transforms
+from merging.methods.dare import merge_dare, _validate_dare_params
 from merging.methods.ties import merge_ties, _validate_ties_params
 from merging.methods.uniform import merge_adapters_uniform
 from merging.runtime.utils import compute_delta_from_lora_weights, load_adapter_weights
@@ -226,6 +227,7 @@ def _weighted_delta_n_in_memory(
     normalize_coefficients = bool(spec.method_params.get("normalize_coefficients", True))
     layer_task_coefficients = spec.method_params.get("layer_task_coefficients")
     default_task_coefficients = spec.method_params.get("default_task_coefficients")
+    allow_negative_coefficients = bool(spec.method_params.get("allow_negative_coefficients", False))
     merged_delta = merge_task_vectors_weighted_n(
         task_vectors,
         merge_mode=merge_mode,
@@ -233,6 +235,7 @@ def _weighted_delta_n_in_memory(
         normalize_coefficients=normalize_coefficients,
         layer_task_coefficients=layer_task_coefficients,
         default_task_coefficients=default_task_coefficients,
+        allow_negative_coefficients=allow_negative_coefficients,
     )
     policy_type = "layer_task_coefficients" if layer_task_coefficients else "task_coefficients"
     metadata = build_merge_metadata(
@@ -250,6 +253,7 @@ def _weighted_delta_n_in_memory(
     metadata["coefficient_policy"] = {
         "type": policy_type,
         "normalize_coefficients": normalize_coefficients,
+        "allow_negative_coefficients": allow_negative_coefficients,
         "task_coefficients": task_coefficients,
         "default_task_coefficients": default_task_coefficients,
         "layer_task_coefficients": layer_task_coefficients,
@@ -354,6 +358,18 @@ def register_builtin_methods() -> None:
             max_adapters=None,
             saveable=False,
             merge_in_memory=_weighted_delta_n_in_memory,
+        )
+    )
+    register_merge_method(
+        MergeMethod(
+            name="dare",
+            required_params=(),
+            params_defaults={"drop_rate": 0.9, "seed": 42},
+            params_validator=_validate_dare_params,
+            min_adapters=2,
+            max_adapters=None,
+            saveable=False,
+            merge_in_memory=merge_dare,
         )
     )
     register_merge_method(

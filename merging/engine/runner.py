@@ -144,6 +144,8 @@ def run_merge(
             extra_params = {}
             if effective_params.get("lambda") is not None:
                 extra_params["lambda"] = effective_params["lambda"]
+            if isinstance(effective_params.get("optimizer"), dict):
+                extra_params["optimizer"] = effective_params["optimizer"]
             output_path = create_merge_output_path(
                 method=method,
                 task_names=task_names,

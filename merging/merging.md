@@ -75,12 +75,12 @@ Merge and sweep now share one schema and one loader:
 Direct merge fields:
 
 - `adapters`: list of task names or adapter paths
-- `method`: `uniform | uniform_delta | weighted | task_vector | weighted_delta | ties`
+- `method`: `uniform | uniform_delta | weighted | task_vector | weighted_delta | weighted_delta_n | dare | ties`
 - `merge_mode`: `common | strict`
 - `method_params`: method-specific params (`lambda`, etc.)
 - `transforms`: pre-merge transform pipeline (`identity` available by default)
 - `lambda_policy`: `scalar` or `per_layer`
-- `optimizer`: `none | bayes | adamerging`
+- `optimizer`: `none | bayes | adamerging | gradient | supermerge | regret_smoothmax`
 
 Optional sweep fields:
 
@@ -132,6 +132,30 @@ Optimizers are registry plugins that can set/adjust lambda policy.
   - `optimizer.params.early_stopping_threshold`: minimum entropy improvement to reset patience (`0.0` default)
   - Backward-compatible aliases: `log_every`, `grad_accum_steps`, `early_stopping_min_delta`
   - `optimizer.params.force_cpu=true` now loads directly on CPU (`device_map={"": "cpu"}`, `torch_dtype=float32`)
+- `gradient`: supervised CE optimizer for `weighted_delta_n` (classification scope)
+  - `optimizer.params.ce_task_weighting`: `baseline_normalized` (default), `equal`, or `manual`
+  - `optimizer.params.ce_baseline_source`: `single_task_eval` (default)
+  - `optimizer.params.ce_baseline_floor`: denominator floor for baseline-normalized CE (`1e-6` default)
+  - `optimizer.params.ce_baseline_batches`: batches per task for baseline CE estimation (`32` default)
+  - `optimizer.params.ce_manual_task_weights`: mapping used when `ce_task_weighting=manual`
+  - `optimizer.params.min_optimizer_steps_before_early_stop`: minimum optimizer updates before early stop can trigger (`20` default)
+  - `optimizer.params.early_stopping_warmup_steps`: warmup optimizer updates before patience tracking (`20` default)
+  - `optimizer.params.restore_best_checkpoint`: restore minibatch-selected best coefficients at the end (`false` default)
+  - `optimizer.params.enforce_validation_only_selection`: require `optimizer.params.split=validation` (`true` default)
+- `supermerge`: exact SuperMerge-style supervised optimizer for `weighted_delta_n`
+  - Defaults: `optimizer.params.coefficient_parameterization=tanh_alpha`, `optimizer.params.split=validation`, `optimizer.params.normalize_coefficients=false`
+  - Emits signed coefficients in `(-1, 1)` and injects `method_params.allow_negative_coefficients=true`
+  - Uses model-provided supervised `loss` when available, with CE fallback from logits/labels
+  - Supports `variant=task_wise|layer_wise` (layer-wise mirrors the paper's per-layer formulation)
+  - `optimizer.params.restore_best_checkpoint`: restore minibatch-selected best coefficients at the end (`false` default)
+  - Hierarchical keys under `optimizer.params.hierarchical.*` are accepted as config stubs, but `hierarchical.enabled=true` is not implemented yet
+- `regret_smoothmax`: supervised label-token CE optimizer for `weighted_delta_n` that learns global static coefficients using softmax logits and smooth-max regret objective
+  - Key params: `optimizer.params.tau`, `optimizer.params.regret_eps`, `optimizer.params.baseline_batches`
+  - Uses token-normalized CE on `labels != -100`
+  - Default/global sampling can be set for all tasks with:
+    - `optimizer.params.sampling.default.enabled`
+    - `optimizer.params.sampling.default.strategy` (`uniform|inverse|sqrt_inverse|balanced|none`)
+    - optional overrides under `optimizer.params.sampling.per_task.<task>`
 
 ## Evaluation
 
@@ -250,6 +274,7 @@ python main.py merge-sweep --config <path>
 
 - `configs/merge/merge_weighted_scalar.yaml`
 - `configs/merge/merge_weighted_per_layer.yaml`
+- `configs/merge/merge_dare.yaml`
 - `configs/merge/merge_ties.yaml`
 - `configs/merge/merge_weighted_delta_sweep_bayes.yaml`
 
@@ -270,6 +295,12 @@ python main.py merge-sweep --config <path>
 
 - `uniform_delta` is **not saveable** (in‑memory only).
 - `weighted_delta` is **not saveable** (in‑memory only).
+- `weighted_delta_n` is **not saveable** (in‑memory only).
+- `dare` is runnable in task-vector space with deterministic random masking:
+  - `method_params.drop_rate` in `[0,1)` (default `0.9`)
+  - `method_params.seed` integer seed (default `42`)
+  - operation: random drop + rescale by `1/(1-drop_rate)`, then uniform fusion
+- `dare` is **not saveable** (in‑memory only), but works with `evaluate-merged` and `merge-sweep`.
 - `ties` is runnable and uses paper-core TIES in task-vector space:
   - `method_params.k` (percent in `[0,100]`, default `20`)
   - `method_params.lambda` (final scaling factor, default `1.0`)

@@ -1,7 +1,8 @@
-"""Supervised gradient optimizer engine (cross-entropy objective)."""
+"""Exact SuperMerge optimizer engine (supervised, tanh-signed coefficients)."""
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
@@ -27,12 +28,10 @@ from merging.plugins.gradient_common import (
     _extract_logits,
     _functional_forward,
     _infer_input_device,
-    _logit,
     _merge_coeffs,
     _next_batch,
     _project_coefficients_inplace,
     _resolve_dtype,
-    _resolve_eval_tasks,
     _to_device,
     _to_streaming_entries,
 )
@@ -132,6 +131,52 @@ def _validate_selection_split(split: str, enforce_validation_only_selection: boo
         raise ValueError(
             "optimizer.params.enforce_validation_only_selection=true requires "
             "optimizer.params.split='validation'."
+        )
+
+
+def _atanh_stable(x: float) -> float:
+    clipped = float(min(1.0 - 1e-6, max(-1.0 + 1e-6, x)))
+    return 0.5 * math.log((1.0 + clipped) / (1.0 - clipped))
+
+
+def _resolve_supermerge_tasks(context: OptimizerContext, params: Mapping[str, Any]) -> List[str]:
+    explicit = params.get("tasks")
+    if explicit is not None:
+        if not isinstance(explicit, list):
+            raise ValueError("optimizer.params.tasks must be a list when provided.")
+        tasks = [str(t).strip().lower() for t in explicit if str(t).strip()]
+    else:
+        tasks = []
+        for meta in context.source_metadata:
+            task_name = meta.get("task")
+            if task_name:
+                tasks.append(str(task_name).strip().lower())
+    deduped: List[str] = []
+    seen = set()
+    for task_name in tasks:
+        if task_name in seen:
+            continue
+        seen.add(task_name)
+        deduped.append(task_name)
+    if not deduped:
+        raise ValueError(
+            "SuperMerge requires at least one task in optimizer.params.tasks "
+            "or source adapter metadata."
+        )
+    return deduped
+
+
+def _validate_hierarchical_stub(params: Mapping[str, Any]) -> None:
+    hierarchical = params.get("hierarchical")
+    if hierarchical is None:
+        return
+    if not isinstance(hierarchical, Mapping):
+        raise ValueError("optimizer.params.hierarchical must be a mapping when provided.")
+    enabled = bool(hierarchical.get("enabled", False))
+    if enabled:
+        raise ValueError(
+            "optimizer.params.hierarchical.enabled=true is not implemented yet. "
+            "Hierarchy config keys are accepted as a stub for future support."
         )
 
 
@@ -305,8 +350,9 @@ def _compute_single_task_ce_baselines(
     return baselines
 
 
-def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
+def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
     params = dict(spec.optimizer.params if spec.optimizer is not None else {})
+    _validate_hierarchical_stub(params)
     variant = str(params.get("variant", "task_wise")).strip().lower()
     plus_plus = bool(params.get("plus_plus", False) or (variant in _PLUS_PLUS_VARIANTS))
     if variant in {"task_wise_plus_plus", "plusplus", "plus_plus"}:
@@ -316,11 +362,8 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
     if variant not in {"task_wise", "layer_wise"}:
         raise ValueError(f"Unsupported optimizer.params.variant='{variant}'.")
     if context.method != "weighted_delta_n":
-        raise ValueError("gradient optimizer only supports method='weighted_delta_n'.")
-
-    task_scope = str(params.get("task_scope", "classification")).strip().lower()
-    if task_scope != "classification":
-        raise ValueError("gradient optimizer supports only optimizer.params.task_scope='classification'.")
+        raise ValueError("supermerge optimizer only supports method='weighted_delta_n'.")
+    task_scope = str(params.get("task_scope", "all")).strip().lower()
 
     steps = int(params.get("steps", 500))
     lr = float(params.get("lr", 1e-3))
@@ -330,12 +373,12 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
     betas = (float(betas[0]), float(betas[1]))
     batch_size = int(params.get("batch_size", 2))
     init_lambda = float(params.get("init_lambda", 0.3))
-    split = str(params.get("split", "test"))
+    split = str(params.get("split", "validation"))
     merge_mode = context.merge_mode
     normalize_coefficients = bool(params.get("normalize_coefficients", False))
     if normalize_coefficients:
         print(
-            "[gradient] normalize_coefficients=true applies cross-task sum-to-1 normalization. "
+            "[supermerge] normalize_coefficients=true applies cross-task sum-to-1 normalization. "
             "This may force near-uniform coefficients."
         )
     use_autocast = bool(params.get("use_autocast", True))
@@ -353,10 +396,10 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
     log_alpha_grad_stats = bool(params.get("log_alpha_grad_stats", True))
     log_label_token_stats = bool(params.get("log_label_token_stats", True))
     coefficient_parameterization = str(
-        params.get("coefficient_parameterization", "projected_lambda")
+        params.get("coefficient_parameterization", "tanh_alpha")
     ).strip().lower()
     project_coefficients = bool(params.get("project_coefficients", True))
-    coefficient_min = float(params.get("coefficient_min", 0.0))
+    coefficient_min = float(params.get("coefficient_min", -1.0))
     coefficient_max = float(params.get("coefficient_max", 1.0))
     progress_bar = bool(params.get("progress_bar", True))
     log_coefficients_during_training = bool(params.get("log_coefficients_during_training", True))
@@ -385,7 +428,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
     ce_label_smoothing = float(params.get("ce_label_smoothing", 0.0))
     ce_reduction = str(params.get("ce_reduction", "mean")).strip().lower()
     ce_use_model_loss = bool(params.get("ce_use_model_loss", True))
-    ce_task_weighting = str(params.get("ce_task_weighting", "baseline_normalized")).strip().lower()
+    ce_task_weighting = str(params.get("ce_task_weighting", "equal")).strip().lower()
     ce_baseline_source = str(params.get("ce_baseline_source", "single_task_eval")).strip().lower()
     ce_baseline_floor = float(params.get("ce_baseline_floor", 1e-6))
     ce_baseline_batches = int(params.get("ce_baseline_batches", 32))
@@ -421,7 +464,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
     ]
     if ignored_entropy_keys:
         print(
-            "[gradient] ignoring entropy-only optimizer params: "
+            "[supermerge] ignoring entropy-only optimizer params: "
             + ", ".join(sorted(ignored_entropy_keys))
         )
 
@@ -447,10 +490,10 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
         raise ValueError("optimizer.params.min_optimizer_steps_before_early_stop must be >= 0.")
     if early_stopping_warmup_steps < 0:
         raise ValueError("optimizer.params.early_stopping_warmup_steps must be >= 0.")
-    if coefficient_parameterization not in {"sigmoid_alpha", "projected_lambda"}:
+    if coefficient_parameterization != "tanh_alpha":
         raise ValueError(
-            "optimizer.params.coefficient_parameterization must be one of: "
-            "sigmoid_alpha|projected_lambda."
+            "supermerge exact mode requires "
+            "optimizer.params.coefficient_parameterization='tanh_alpha'."
         )
     if coefficient_min > coefficient_max:
         raise ValueError("optimizer.params.coefficient_min must be <= optimizer.params.coefficient_max.")
@@ -475,7 +518,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
             "optimizer.params.model_dtype must be one of: auto|bf16|bfloat16|fp16|float16|fp32|float32."
         )
 
-    tasks = _resolve_eval_tasks(context, params)
+    tasks = _resolve_supermerge_tasks(context, params)
     _validate_selection_split(split=split, enforce_validation_only_selection=enforce_validation_only_selection)
     from merging.plugins.transforms import apply_transforms
     task_vectors = [
@@ -576,9 +619,9 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
 
     layer_indices = sorted({entry.layer_idx for entry in delta_entries if entry.layer_idx is not None})
     if variant == "layer_wise" and not layer_indices:
-        raise ValueError("Layer-wise gradient optimizer requested but no `.layers.<idx>.` keys were detected.")
+        raise ValueError("Layer-wise supermerge optimizer requested but no `.layers.<idx>.` keys were detected.")
 
-    init_value = _logit(init_lambda) if coefficient_parameterization == "sigmoid_alpha" else init_lambda
+    init_value = _atanh_stable(init_lambda) if coefficient_parameterization == "tanh_alpha" else init_lambda
     alpha_default: Optional[torch.nn.Parameter] = None
     alpha_layer: Optional[torch.nn.Parameter] = None
     if variant == "layer_wise":
@@ -693,7 +736,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
                 ce_baseline_batches=ce_baseline_batches,
             )
             print(
-                "[gradient] CE baselines (single_task_eval): "
+                "[supermerge] CE baselines (single_task_eval): "
                 + ", ".join(f"{k}={v:.6f}" for k, v in ce_baselines.items())
             )
         ce_multipliers = _compute_task_ce_multipliers(
@@ -706,14 +749,14 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
         )
         step_iter: Iterable[int]
         if progress_bar and tqdm is not None:
-            step_iter = tqdm(range(steps), desc="gradient", total=steps)
+            step_iter = tqdm(range(steps), desc="supermerge", total=steps)
         else:
             step_iter = range(steps)
         optimizer.zero_grad(set_to_none=True)
         for step in step_iter:
             num_tasks = len(tasks)
             if num_tasks == 0:
-                raise RuntimeError("gradient optimization has no tasks to optimize.")
+                raise RuntimeError("supermerge optimization has no tasks to optimize.")
 
             ce_sum = 0.0
             normalized_ce_sum = 0.0
@@ -815,12 +858,12 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
                     del func_params, batch, outputs, logits, labels, task_loss
             except ValueError as exc:
                 raise ValueError(
-                    f"gradient CE objective failed at step={step}, task='{active_task}': {exc}"
+                    f"supermerge supervised objective failed at step={step}, task='{active_task}': {exc}"
                 ) from exc
             except RuntimeError as exc:
                 if "out of memory" in str(exc).lower():
                     raise RuntimeError(
-                        "gradient optimizer OOM during CE optimization "
+                        "supermerge optimizer OOM during CE optimization "
                         f"(step={step}, task='{active_task}', merge_impl='{merge_impl}', "
                         f"delta_residency='{delta_residency}', batch_size={batch_size}, force_cpu={force_cpu}). "
                         "Try smaller optimizer.params.batch_size (e.g., 1-2), "
@@ -927,25 +970,25 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
                         for task in tasks
                     }
                     print(
-                        f"[gradient] step {step + 1}/{steps} "
+                        f"[supermerge] step {step + 1}/{steps} "
                         f"update_step={optimizer_steps_completed} "
                         f"avg_ce={update_raw_ce:.6f} "
                         f"avg_normalized_ce={update_normalized_ce:.6f} "
                         f"rolling_ce_{rolling_window}={rolling_ce:.6f}"
                     )
                     print(
-                        "[gradient][ce] "
+                        "[supermerge][ce] "
                         f"raw_by_task={raw_ce_by_task} normalized_by_task={normalized_ce_by_task}"
                     )
                     if log_alpha_grad_stats and grad_norm_value is not None:
                         print(
-                            "[gradient][grad] "
+                            "[supermerge][grad] "
                             f"alpha_task_grad_norm={grad_norm_value:.6e} "
                             f"alpha_task_grad={grad_dim_values}"
                         )
                     if log_label_token_stats and label_tokens_avg is not None:
                         print(
-                            "[gradient][label_tokens] "
+                            "[supermerge][label_tokens] "
                             f"avg_valid_tokens={label_tokens_avg:.3f} "
                             f"per_task={{{', '.join(f'{k}: {v:.3f}' for k, v in label_tokens_by_task_avg.items())}}}"
                         )
@@ -959,12 +1002,12 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
                             normalize_coefficients=normalize_coefficients,
                         )
                         print(
-                            "[gradient][lambda] "
+                            "[supermerge][lambda] "
                             f"task={ [float(x) for x in coeff_task.detach().cpu().tolist()] }"
                         )
                         if coeff_default is not None:
                             print(
-                                "[gradient][lambda] "
+                                "[supermerge][lambda] "
                                 f"default={ [float(x) for x in coeff_default.detach().cpu().tolist()] }"
                             )
                         if coeff_layers:
@@ -973,17 +1016,17 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
                                     int(layer): [float(x) for x in vec.detach().cpu().tolist()]
                                     for layer, vec in coeff_layers.items()
                                 }
-                                print(f"[gradient][lambda] layer={layer_payload}")
+                                print(f"[supermerge][lambda] layer={layer_payload}")
                             else:
                                 print(
-                                    "[gradient][lambda] "
+                                    "[supermerge][lambda] "
                                     f"num_layer_overrides={len(coeff_layers)} "
                                     "(set optimizer.params.log_layer_coefficients_full=true to print all)"
                                 )
                 if early_stopping_patience > 0 and no_improve_steps >= early_stopping_patience:
                     if optimizer_steps_completed >= min_optimizer_steps_before_early_stop:
                         print(
-                            f"[gradient] early stopping at step {step + 1}/{steps} "
+                            f"[supermerge] early stopping at step {step + 1}/{steps} "
                             f"(update_step={optimizer_steps_completed}, monitor={early_stopping_monitor}, "
                             f"best_ce={best_ce:.6f}, "
                             f"patience={early_stopping_patience}, threshold={early_stopping_threshold:.2e}, "
@@ -1056,6 +1099,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
 
     method_params_overrides: Dict[str, Any] = {
         "normalize_coefficients": normalize_coefficients,
+        "allow_negative_coefficients": True,
     }
     if variant == "task_wise":
         method_params_overrides["task_coefficients"] = task_coefficients
@@ -1070,7 +1114,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
         }
 
     provenance = {
-        "optimizer": "gradient",
+        "optimizer": "supermerge",
         "status": "optimized",
         "variant": variant,
         "task_scope": task_scope,
@@ -1115,6 +1159,7 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
         "restore_best_checkpoint": restore_best_checkpoint,
         "restored_best_checkpoint": restored_best_checkpoint,
         "objective": "supervised_cross_entropy",
+        "exact_mode": True,
         "plus_plus": plus_plus,
         "plus_plus_k": plus_plus_k,
         "plus_plus_lambda": plus_plus_lambda,
@@ -1171,8 +1216,9 @@ def run_gradient_optimizer(spec: MergeSpec, context: OptimizerContext) -> Optimi
 
 
 __all__ = [
-    "run_gradient_optimizer",
+    "run_supermerge_optimizer",
     "_compute_supervised_ce_loss",
     "_compute_task_ce_multipliers",
     "_validate_selection_split",
+    "_validate_hierarchical_stub",
 ]

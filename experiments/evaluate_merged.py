@@ -5,17 +5,19 @@ from __future__ import annotations
 import argparse
 from typing import List, Optional
 
+from merging.engine.registry import list_merge_methods
 from merging.evaluation.evaluate import evaluate_merged_adapter
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
+    merge_methods = tuple(list_merge_methods())
     parser = argparse.ArgumentParser(description="Evaluate merged adapters on one or more tasks.")
     parser.add_argument("--adapter-path", default=None, help="Path to merged adapter run or base directory.")
     parser.add_argument(
         "--method",
         default=None,
-        choices=("uniform", "weighted", "task_vector", "weighted_delta", "weighted_delta_n"),
+        choices=merge_methods,
         help="Merge method used (for resolving adapter path).",
     )
     parser.add_argument(

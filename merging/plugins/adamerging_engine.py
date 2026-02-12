@@ -179,6 +179,8 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         params.get("entropy_debug_steps", logging_steps if logging_steps > 0 else 0)
     )
     progress_bar = bool(params.get("progress_bar", True))
+    log_coefficients_during_training = bool(params.get("log_coefficients_during_training", True))
+    log_layer_coefficients_full = bool(params.get("log_layer_coefficients_full", False))
     dataloader_num_workers = int(params.get("dataloader_num_workers", 0))
     dataloader_pin_memory = bool(params.get("dataloader_pin_memory", True))
     non_blocking_transfer = bool(params.get("non_blocking_transfer", True))
@@ -192,6 +194,9 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     eval_subset = params.get("eval_subset")
     if eval_subset is not None and not isinstance(eval_subset, Mapping):
         raise ValueError("optimizer.params.eval_subset must be a mapping when provided.")
+    sampling = params.get("sampling")
+    if sampling is not None and not isinstance(sampling, Mapping):
+        raise ValueError("optimizer.params.sampling must be a mapping when provided.")
 
     if steps <= 0:
         raise ValueError("optimizer.params.steps must be > 0.")
@@ -312,6 +317,7 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             split=split,
             batch_size=batch_size,
             eval_subset=eval_subset if isinstance(eval_subset, Mapping) else None,
+            sampling=sampling if isinstance(sampling, Mapping) else None,
             num_workers=dataloader_num_workers,
             pin_memory=dataloader_pin_memory,
         )
@@ -348,16 +354,20 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         raise ValueError("Layer-wise AdaMerging requested but no `.layers.<idx>.` keys were detected.")
 
     init_value = _logit(init_lambda) if coefficient_parameterization == "sigmoid_alpha" else init_lambda
-    alpha_task = torch.nn.Parameter(torch.full((num_adapters,), init_value, device=device))
     alpha_default: Optional[torch.nn.Parameter] = None
     alpha_layer: Optional[torch.nn.Parameter] = None
-    optim_params: List[torch.nn.Parameter] = [alpha_task]
     if variant == "layer_wise":
+        # In layer-wise mode, task coefficients act as the global default anchor.
+        # Share storage so task/default remain consistent and gradients are observable.
         alpha_default = torch.nn.Parameter(torch.full((num_adapters,), init_value, device=device))
+        alpha_task = alpha_default
         alpha_layer = torch.nn.Parameter(
             torch.full((len(layer_indices), num_adapters), init_value, device=device)
         )
-        optim_params.extend([alpha_default, alpha_layer])
+        optim_params: List[torch.nn.Parameter] = [alpha_default, alpha_layer]
+    else:
+        alpha_task = torch.nn.Parameter(torch.full((num_adapters,), init_value, device=device))
+        optim_params = [alpha_task]
 
     optimizer = torch.optim.Adam(optim_params, lr=lr, betas=betas)
     task_iters: Dict[str, Optional[Iterator[Any]]] = {task: None for task in tasks}
@@ -647,6 +657,37 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                             f"avg_valid_tokens={label_tokens_avg:.3f} "
                             f"per_task={{{', '.join(f'{k}: {v:.3f}' for k, v in label_tokens_by_task_avg.items())}}}"
                         )
+                    if log_coefficients_during_training:
+                        coeff_task, coeff_default, coeff_layers = _merge_coeffs(
+                            alpha_task=alpha_task,
+                            alpha_default=alpha_default,
+                            alpha_layer=alpha_layer,
+                            layer_indices=layer_indices,
+                            coefficient_parameterization=coefficient_parameterization,
+                            normalize_coefficients=normalize_coefficients,
+                        )
+                        print(
+                            "[AdaMerging][lambda] "
+                            f"task={ [float(x) for x in coeff_task.detach().cpu().tolist()] }"
+                        )
+                        if coeff_default is not None:
+                            print(
+                                "[AdaMerging][lambda] "
+                                f"default={ [float(x) for x in coeff_default.detach().cpu().tolist()] }"
+                            )
+                        if coeff_layers:
+                            if log_layer_coefficients_full:
+                                layer_payload = {
+                                    int(layer): [float(x) for x in vec.detach().cpu().tolist()]
+                                    for layer, vec in coeff_layers.items()
+                                }
+                                print(f"[AdaMerging][lambda] layer={layer_payload}")
+                            else:
+                                print(
+                                    "[AdaMerging][lambda] "
+                                    f"num_layer_overrides={len(coeff_layers)} "
+                                    "(set optimizer.params.log_layer_coefficients_full=true to print all)"
+                                )
                 if (
                     entropy_debug_stats
                     and entropy_debug_steps > 0
@@ -767,6 +808,8 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "coefficient_min": coefficient_min,
         "coefficient_max": coefficient_max,
         "progress_bar": progress_bar,
+        "log_coefficients_during_training": log_coefficients_during_training,
+        "log_layer_coefficients_full": log_layer_coefficients_full,
         "dataloader_num_workers": dataloader_num_workers,
         "dataloader_pin_memory": dataloader_pin_memory,
         "non_blocking_transfer": non_blocking_transfer,
