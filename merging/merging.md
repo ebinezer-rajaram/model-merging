@@ -118,7 +118,8 @@ Optimizers are registry plugins that can set/adjust lambda policy.
 - `none`: no-op
 - `bayes`: adapter scaffold for direct merge; active Bayesian optimization remains in `merge-sweep`
 - `adamerging`: entropy-minimization optimizer for classification tasks with low-VRAM defaults
-  - `optimizer.params.merge_impl`: `streaming_parametrize` (default) or `functional_clone_legacy`
+  - `optimizer.params.merge_impl`: `streaming_parametrize` (default), `functional_clone_legacy`, `fused_linear`, or `fused_lora_linear`
+    - `fused_lora_linear` applies LoRA factors directly at runtime (`xA^T` then `·B^T`) for `nn.Linear` targets and enforces strict LoRA coverage (no dense fallback)
   - `optimizer.params.delta_residency`: `cpu_stream` (default) or `gpu_cache`
   - `optimizer.params.model_dtype`: model load dtype for optimization (`auto` default; use `bf16`/`fp16` to reduce VRAM)
   - `optimizer.params.dtype_compute`: `auto` (default), `bf16`, `fp16`, `fp32`

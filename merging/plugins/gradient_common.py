@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 
 import torch
+from safetensors import safe_open
+from torch import nn
 from torch.utils.data import DataLoader
 
 from core import load_config, prepare_task_for_evaluation
 from experiments.evaluate_task import _prepare_dataset_cache
-from merging.plugins.adamerging_streaming import StreamingDeltaEntry
+from merging.plugins.adamerging_streaming import StreamingDeltaEntry, StreamingLoraEntry
 from merging.plugins.optimizers import OptimizerContext
 from merging.policies.lambda_policy import extract_layer_index
 from merging.runtime.utils import PACKAGE_ROOT, get_task_module
@@ -46,6 +50,16 @@ class _DeltaEntry:
     deltas: List[torch.Tensor]
 
 
+@dataclass(frozen=True)
+class _LoraEntry:
+    task_key: str
+    param_key: str
+    layer_idx: Optional[int]
+    a_factors: List[torch.Tensor]
+    b_factors: List[torch.Tensor]
+    scales: List[float]
+
+
 def _logit(p: float) -> float:
     p = float(min(1.0 - 1e-6, max(1e-6, p)))
     return math.log(p / (1.0 - p))
@@ -75,6 +89,53 @@ def _to_device(batch: Any, device: torch.device, *, non_blocking: bool = False) 
     if isinstance(batch, tuple):
         return tuple(_to_device(x, device, non_blocking=non_blocking) for x in batch)
     return batch
+
+
+def _force_zero_dropout(model: nn.Module) -> Dict[str, int]:
+    """Set dropout probabilities to zero to remove stochasticity and save activation memory."""
+    dropout_modules = (
+        nn.Dropout,
+        nn.Dropout1d,
+        nn.Dropout2d,
+        nn.Dropout3d,
+        nn.AlphaDropout,
+        nn.FeatureAlphaDropout,
+    )
+    module_updates = 0
+    module_seen = 0
+    for module in model.modules():
+        if isinstance(module, dropout_modules):
+            module_seen += 1
+            if float(getattr(module, "p", 0.0)) != 0.0:
+                module.p = 0.0
+                module_updates += 1
+
+    config_updates = 0
+    cfg = getattr(model, "config", None)
+    if cfg is not None:
+        for name in (
+            "dropout",
+            "attention_dropout",
+            "activation_dropout",
+            "classifier_dropout",
+            "hidden_dropout",
+            "hidden_dropout_prob",
+            "attention_probs_dropout_prob",
+            "embd_pdrop",
+            "resid_pdrop",
+            "attn_pdrop",
+            "summary_first_dropout",
+        ):
+            value = getattr(cfg, name, None)
+            if isinstance(value, (float, int)) and float(value) != 0.0:
+                setattr(cfg, name, 0.0)
+                config_updates += 1
+
+    return {
+        "dropout_modules_seen": int(module_seen),
+        "dropout_modules_updated": int(module_updates),
+        "dropout_config_fields_updated": int(config_updates),
+    }
 
 
 def _maybe_subset_dataset(
@@ -210,6 +271,130 @@ def _build_delta_entries(
         )
     if not entries:
         raise ValueError("AdaMerging could not map any task-vector deltas to model parameters.")
+    return entries
+
+
+def _resolve_lora_pattern_value(pattern: Mapping[str, Any], key: str, default: float) -> float:
+    if not pattern:
+        return default
+    if key in pattern:
+        return float(pattern[key])
+    matches = [k for k in pattern.keys() if key.endswith(str(k))]
+    if not matches:
+        return default
+    best = max(matches, key=len)
+    return float(pattern[best])
+
+
+def _extract_lora_factors_from_adapter(adapter_path: Path) -> Dict[str, Tuple[torch.Tensor, torch.Tensor, float]]:
+    config_path = adapter_path / "adapter_config.json"
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    default_rank = float(config["r"])
+    default_alpha = float(config["lora_alpha"])
+    rank_pattern = config.get("rank_pattern")
+    alpha_pattern = config.get("alpha_pattern")
+    if rank_pattern is not None and not isinstance(rank_pattern, Mapping):
+        raise ValueError(f"Adapter {adapter_path}: rank_pattern must be a mapping when provided.")
+    if alpha_pattern is not None and not isinstance(alpha_pattern, Mapping):
+        raise ValueError(f"Adapter {adapter_path}: alpha_pattern must be a mapping when provided.")
+    rank_pattern = rank_pattern if isinstance(rank_pattern, Mapping) else {}
+    alpha_pattern = alpha_pattern if isinstance(alpha_pattern, Mapping) else {}
+
+    safetensors_path = adapter_path / "adapter_model.safetensors"
+    lora_pairs: Dict[str, Dict[str, torch.Tensor]] = {}
+    with safe_open(safetensors_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            if ".lora_A." in key:
+                base_key = key.replace(".lora_A.weight", "")
+                lora_pairs.setdefault(base_key, {})["A"] = f.get_tensor(key).clone()
+            elif ".lora_B." in key:
+                base_key = key.replace(".lora_B.weight", "")
+                lora_pairs.setdefault(base_key, {})["B"] = f.get_tensor(key).clone()
+
+    incomplete = [k for k, pair in lora_pairs.items() if "A" not in pair or "B" not in pair]
+    if incomplete:
+        sample = ", ".join(sorted(incomplete)[:8])
+        extra = " ..." if len(incomplete) > 8 else ""
+        raise ValueError(
+            f"Adapter {adapter_path}: missing A/B LoRA pair(s) for {len(incomplete)} module(s): {sample}{extra}"
+        )
+
+    out: Dict[str, Tuple[torch.Tensor, torch.Tensor, float]] = {}
+    for base_key, pair in lora_pairs.items():
+        rank = _resolve_lora_pattern_value(rank_pattern, base_key, default_rank)
+        alpha = _resolve_lora_pattern_value(alpha_pattern, base_key, default_alpha)
+        if rank <= 0:
+            raise ValueError(f"Adapter {adapter_path}: non-positive rank for '{base_key}' (rank={rank}).")
+        out[base_key] = (pair["A"], pair["B"], float(alpha / rank))
+    return out
+
+
+def _build_lora_entries(
+    adapter_paths: List[Path],
+    *,
+    parameter_keys: List[str],
+    merge_mode: str,
+) -> List[_LoraEntry]:
+    per_adapter = [_extract_lora_factors_from_adapter(path) for path in adapter_paths]
+    key_sets = [set(x.keys()) for x in per_adapter]
+    if merge_mode == "strict":
+        reference = key_sets[0]
+        for i, keys in enumerate(key_sets[1:], start=1):
+            if keys != reference:
+                raise ValueError(
+                    "fused_lora_linear strict mode requires identical LoRA module keys across adapters; "
+                    f"mismatch at adapter {i}."
+                )
+        keys_to_merge = reference
+    else:
+        keys_to_merge = set.intersection(*key_sets)
+
+    if not keys_to_merge:
+        raise ValueError("fused_lora_linear found no common LoRA modules across adapters.")
+
+    entries: List[_LoraEntry] = []
+    unmapped: List[str] = []
+    shape_mismatch: List[str] = []
+    for key in sorted(keys_to_merge):
+        param_key = _resolve_delta_param_name(key, parameter_keys)
+        if param_key is None:
+            unmapped.append(key)
+            continue
+        factors = [adapter[key] for adapter in per_adapter]
+        a_shapes = [tuple(item[0].shape) for item in factors]
+        b_shapes = [tuple(item[1].shape) for item in factors]
+        if len(set(a_shapes)) != 1 or len(set(b_shapes)) != 1:
+            shape_mismatch.append(f"{key}: A={a_shapes} B={b_shapes}")
+            continue
+        entries.append(
+            _LoraEntry(
+                task_key=key,
+                param_key=param_key,
+                layer_idx=extract_layer_index(key),
+                a_factors=[item[0] for item in factors],
+                b_factors=[item[1] for item in factors],
+                scales=[float(item[2]) for item in factors],
+            )
+        )
+
+    if shape_mismatch:
+        sample = "; ".join(shape_mismatch[:8])
+        extra = " ..." if len(shape_mismatch) > 8 else ""
+        raise ValueError(
+            "fused_lora_linear detected LoRA shape/rank mismatches across adapters: "
+            f"{sample}{extra}"
+        )
+    if unmapped:
+        sample = ", ".join(unmapped[:8])
+        extra = " ..." if len(unmapped) > 8 else ""
+        raise ValueError(
+            "fused_lora_linear could not map LoRA modules to model parameters "
+            f"for {len(unmapped)} key(s): {sample}{extra}"
+        )
+    if not entries:
+        raise ValueError("fused_lora_linear could not build any LoRA entries for model parameters.")
     return entries
 
 
@@ -456,6 +641,19 @@ def _to_streaming_entries(delta_entries: List[_DeltaEntry]) -> List[StreamingDel
     ]
 
 
+def _to_streaming_lora_entries(lora_entries: List[_LoraEntry]) -> List[StreamingLoraEntry]:
+    return [
+        StreamingLoraEntry(
+            param_key=entry.param_key,
+            layer_idx=entry.layer_idx,
+            a_factors=entry.a_factors,
+            b_factors=entry.b_factors,
+            scales=entry.scales,
+        )
+        for entry in lora_entries
+    ]
+
+
 def _global_topk_threshold(abs_values: torch.Tensor, k_percent: float) -> torch.Tensor:
     if abs_values.numel() == 0 or k_percent <= 0.0:
         return torch.tensor(float("inf"), dtype=torch.float32, device=abs_values.device)
@@ -598,7 +796,9 @@ __all__ = [
     "_CLASSIFICATION_TASKS",
     "_DTYPE_ALIASES",
     "_DeltaEntry",
+    "_LoraEntry",
     "_build_delta_entries",
+    "_build_lora_entries",
     "_build_functional_params",
     "_build_task_loader",
     "_extract_logits",
@@ -615,5 +815,7 @@ __all__ = [
     "_resolve_sampling_for_task",
     "_apply_ties_consensus_preprocess",
     "_to_device",
+    "_force_zero_dropout",
+    "_to_streaming_lora_entries",
     "_to_streaming_entries",
 ]

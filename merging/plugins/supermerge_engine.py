@@ -16,16 +16,20 @@ from merging.config.specs import MergeSpec
 from merging.plugins.adamerging_streaming import (
     TaskCoefficientProvider,
     register_fused_linear_modules,
+    register_fused_lora_linear_modules,
     register_streaming_parametrizations,
     unregister_fused_linear_modules,
+    unregister_fused_lora_linear_modules,
     unregister_streaming_parametrizations,
 )
 from merging.plugins.gradient_common import (
     _apply_ties_consensus_preprocess,
     _build_delta_entries,
+    _build_lora_entries,
     _build_functional_params,
     _build_task_loader,
     _extract_logits,
+    _force_zero_dropout,
     _functional_forward,
     _infer_input_device,
     _merge_coeffs,
@@ -33,6 +37,7 @@ from merging.plugins.gradient_common import (
     _project_coefficients_inplace,
     _resolve_dtype,
     _to_device,
+    _to_streaming_lora_entries,
     _to_streaming_entries,
 )
 from merging.plugins.optimizers import OptimizerContext, OptimizerResult
@@ -383,6 +388,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         )
     use_autocast = bool(params.get("use_autocast", True))
     gradient_checkpointing = bool(params.get("gradient_checkpointing", True))
+    zero_dropout = bool(params.get("zero_dropout", True))
     allow_tf32 = bool(params.get("allow_tf32", True))
     force_cpu = bool(params.get("force_cpu", False))
     merge_impl = str(params.get("merge_impl", "streaming_parametrize")).strip().lower()
@@ -497,10 +503,10 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         )
     if coefficient_min > coefficient_max:
         raise ValueError("optimizer.params.coefficient_min must be <= optimizer.params.coefficient_max.")
-    if merge_impl not in {"streaming_parametrize", "functional_clone_legacy", "fused_linear"}:
+    if merge_impl not in {"streaming_parametrize", "functional_clone_legacy", "fused_linear", "fused_lora_linear"}:
         raise ValueError(
             "optimizer.params.merge_impl must be one of: "
-            "streaming_parametrize|functional_clone_legacy|fused_linear."
+            "streaming_parametrize|functional_clone_legacy|fused_linear|fused_lora_linear."
         )
     if delta_residency not in {"cpu_stream", "gpu_cache"}:
         raise ValueError("optimizer.params.delta_residency must be one of: cpu_stream|gpu_cache.")
@@ -521,10 +527,15 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     tasks = _resolve_supermerge_tasks(context, params)
     _validate_selection_split(split=split, enforce_validation_only_selection=enforce_validation_only_selection)
     from merging.plugins.transforms import apply_transforms
-    task_vectors = [
-        apply_transforms(extract_task_vector_from_lora(path), spec.transforms)
-        for path in context.adapter_paths
-    ]
+    if merge_impl == "fused_lora_linear":
+        if plus_plus:
+            raise ValueError("optimizer.params.plus_plus is not supported with merge_impl='fused_lora_linear'.")
+        task_vectors = []
+    else:
+        task_vectors = [
+            apply_transforms(extract_task_vector_from_lora(path), spec.transforms)
+            for path in context.adapter_paths
+        ]
     plus_plus_k = float(params.get("plus_plus_k", params.get("ties_k", 20.0)))
     plus_plus_lambda = float(params.get("plus_plus_lambda", params.get("ties_lambda", 1.0)))
     plus_plus_stats: Optional[Dict[str, Any]] = None
@@ -537,7 +548,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             k_percent=plus_plus_k,
             lambda_scale=plus_plus_lambda,
         )
-    num_adapters = len(task_vectors)
+    num_adapters = len(context.adapter_paths)
 
     t0 = time.time()
     first_task_module = get_task_module(tasks[0])
@@ -595,29 +606,46 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
 
     for p in model.parameters():
         p.requires_grad_(False)
-    model.eval()
+    if gradient_checkpointing:
+        model.train()
+    else:
+        model.eval()
+    dropout_stats = _force_zero_dropout(model) if zero_dropout else None
+    if dropout_stats is not None:
+        print(
+            "[supermerge] zero_dropout enabled: "
+            f"modules_updated={dropout_stats['dropout_modules_updated']}/"
+            f"{dropout_stats['dropout_modules_seen']}, "
+            f"config_fields_updated={dropout_stats['dropout_config_fields_updated']}"
+        )
 
     device = _infer_input_device(model)
     parameter_keys = [name for name, _ in model.named_parameters()]
     base_params = {name: p for name, p in model.named_parameters()}
-    delta_entries = _build_delta_entries(task_vectors, parameter_keys=parameter_keys, merge_mode=merge_mode)
+    delta_entries = []
+    lora_entries = []
+    if merge_impl == "fused_lora_linear":
+        lora_entries = _build_lora_entries(context.adapter_paths, parameter_keys=parameter_keys, merge_mode=merge_mode)
+    else:
+        delta_entries = _build_delta_entries(task_vectors, parameter_keys=parameter_keys, merge_mode=merge_mode)
 
-    if task_vector_dtype in {"auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
-        cast_dtype: Optional[torch.dtype] = None
-        if task_vector_dtype == "auto":
-            cast_dtype = torch.bfloat16 if device.type == "cuda" else None
-        elif task_vector_dtype in {"bf16", "bfloat16"}:
-            cast_dtype = torch.bfloat16
-        elif task_vector_dtype in {"fp16", "float16"}:
-            cast_dtype = torch.float16
-        elif task_vector_dtype in {"fp32", "float32"}:
-            cast_dtype = torch.float32
-        if cast_dtype is not None:
-            for entry in delta_entries:
-                for i, delta in enumerate(entry.deltas):
-                    entry.deltas[i] = delta.to(dtype=cast_dtype, copy=False)
+        if task_vector_dtype in {"auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
+            cast_dtype: Optional[torch.dtype] = None
+            if task_vector_dtype == "auto":
+                cast_dtype = torch.bfloat16 if device.type == "cuda" else None
+            elif task_vector_dtype in {"bf16", "bfloat16"}:
+                cast_dtype = torch.bfloat16
+            elif task_vector_dtype in {"fp16", "float16"}:
+                cast_dtype = torch.float16
+            elif task_vector_dtype in {"fp32", "float32"}:
+                cast_dtype = torch.float32
+            if cast_dtype is not None:
+                for entry in delta_entries:
+                    for i, delta in enumerate(entry.deltas):
+                        entry.deltas[i] = delta.to(dtype=cast_dtype, copy=False)
 
-    layer_indices = sorted({entry.layer_idx for entry in delta_entries if entry.layer_idx is not None})
+    active_entries = lora_entries if merge_impl == "fused_lora_linear" else delta_entries
+    layer_indices = sorted({entry.layer_idx for entry in active_entries if entry.layer_idx is not None})
     if variant == "layer_wise" and not layer_indices:
         raise ValueError("Layer-wise supermerge optimizer requested but no `.layers.<idx>.` keys were detected.")
 
@@ -674,6 +702,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     early_stopping_monitor = f"rolling_ce_{rolling_window}" if rolling_window > 1 else "avg_ce_update"
     streaming_handles = []
     fused_linear_handles = []
+    fused_lora_handles = []
     coefficient_provider = TaskCoefficientProvider()
     init_task_coeffs, init_default_coeffs, init_layer_coeffs = _merge_coeffs(
         alpha_task=alpha_task,
@@ -700,6 +729,14 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         fused_linear_handles = register_fused_linear_modules(
             model=model,
             entries=_to_streaming_entries(delta_entries),
+            coefficient_provider=coefficient_provider,
+            delta_residency=delta_residency,
+            dtype_compute=dtype_compute,
+        )
+    elif merge_impl == "fused_lora_linear":
+        fused_lora_handles = register_fused_lora_linear_modules(
+            model=model,
+            entries=_to_streaming_lora_entries(lora_entries),
             coefficient_provider=coefficient_provider,
             delta_residency=delta_residency,
             dtype_compute=dtype_compute,
@@ -1049,6 +1086,8 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             unregister_streaming_parametrizations(streaming_handles)
         if fused_linear_handles:
             unregister_fused_linear_modules(fused_linear_handles)
+        if fused_lora_handles:
+            unregister_fused_lora_linear_modules(fused_lora_handles)
 
     last_task, last_default, last_layer = _merge_coeffs(
         alpha_task=alpha_task,
@@ -1127,6 +1166,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "init_lambda": init_lambda,
         "normalize_coefficients": normalize_coefficients,
         "gradient_checkpointing": gradient_checkpointing,
+        "zero_dropout": zero_dropout,
         "allow_tf32": allow_tf32,
         "force_cpu": force_cpu,
         "merge_impl": merge_impl,
@@ -1191,6 +1231,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "elapsed_sec": time.time() - t0,
         "num_adapters": num_adapters,
         "num_delta_entries": len(delta_entries),
+        "num_lora_entries": len(lora_entries),
         "initial_task_coefficients": [float(init_lambda)] * num_adapters,
         "final_task_coefficients": task_coefficients,
         "last_step_task_coefficients": last_task_coefficients,

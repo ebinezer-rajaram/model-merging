@@ -16,21 +16,26 @@ from merging.config.specs import MergeSpec
 from merging.plugins.adamerging_streaming import (
     TaskCoefficientProvider,
     register_fused_linear_modules,
+    register_fused_lora_linear_modules,
     register_streaming_parametrizations,
     unregister_fused_linear_modules,
+    unregister_fused_lora_linear_modules,
     unregister_streaming_parametrizations,
 )
 from merging.plugins.gradient_common import (
     _build_delta_entries,
+    _build_lora_entries,
     _build_functional_params,
     _build_task_loader,
     _extract_logits,
+    _force_zero_dropout,
     _functional_forward,
     _infer_input_device,
     _next_batch,
     _resolve_dtype,
     _resolve_eval_tasks,
     _to_device,
+    _to_streaming_lora_entries,
     _to_streaming_entries,
 )
 from merging.plugins.optimizers import OptimizerContext, OptimizerResult
@@ -200,6 +205,7 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
     force_cpu = bool(params.get("force_cpu", False))
     use_autocast = bool(params.get("use_autocast", True))
     gradient_checkpointing = bool(params.get("gradient_checkpointing", True))
+    zero_dropout = bool(params.get("zero_dropout", True))
     allow_tf32 = bool(params.get("allow_tf32", True))
     merge_impl = str(params.get("merge_impl", "fused_linear")).strip().lower()
     delta_residency = str(params.get("delta_residency", "gpu_cache")).strip().lower()
@@ -237,21 +243,24 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         raise ValueError("optimizer.params.tau must be > 0.")
     if regret_eps <= 0.0:
         raise ValueError("optimizer.params.regret_eps must be > 0.")
-    if merge_impl not in {"streaming_parametrize", "functional_clone_legacy", "fused_linear"}:
+    if merge_impl not in {"streaming_parametrize", "functional_clone_legacy", "fused_linear", "fused_lora_linear"}:
         raise ValueError(
             "optimizer.params.merge_impl must be one of: "
-            "streaming_parametrize|functional_clone_legacy|fused_linear."
+            "streaming_parametrize|functional_clone_legacy|fused_linear|fused_lora_linear."
         )
     if delta_residency not in {"cpu_stream", "gpu_cache"}:
         raise ValueError("optimizer.params.delta_residency must be one of: cpu_stream|gpu_cache.")
 
     from merging.plugins.transforms import apply_transforms
 
-    task_vectors = [
-        apply_transforms(extract_task_vector_from_lora(path), spec.transforms)
-        for path in context.adapter_paths
-    ]
-    num_adapters = len(task_vectors)
+    if merge_impl == "fused_lora_linear":
+        task_vectors = []
+    else:
+        task_vectors = [
+            apply_transforms(extract_task_vector_from_lora(path), spec.transforms)
+            for path in context.adapter_paths
+        ]
+    num_adapters = len(context.adapter_paths)
     if len(tasks) != num_adapters:
         raise ValueError(
             "regret_smoothmax currently requires optimizer.params.tasks length to match number of adapters "
@@ -316,31 +325,52 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
 
     for p in model.parameters():
         p.requires_grad_(False)
-    model.eval()
+    if gradient_checkpointing:
+        model.train()
+    else:
+        model.eval()
+    dropout_stats = _force_zero_dropout(model) if zero_dropout else None
+    if dropout_stats is not None:
+        print(
+            "[regret_smoothmax] zero_dropout enabled: "
+            f"modules_updated={dropout_stats['dropout_modules_updated']}/"
+            f"{dropout_stats['dropout_modules_seen']}, "
+            f"config_fields_updated={dropout_stats['dropout_config_fields_updated']}"
+        )
 
     device = _infer_input_device(model)
     parameter_keys = [name for name, _ in model.named_parameters()]
     base_params = {name: p for name, p in model.named_parameters()}
-    delta_entries = _build_delta_entries(task_vectors, parameter_keys=parameter_keys, merge_mode=context.merge_mode)
+    delta_entries = []
+    lora_entries = []
+    if merge_impl == "fused_lora_linear":
+        lora_entries = _build_lora_entries(
+            context.adapter_paths,
+            parameter_keys=parameter_keys,
+            merge_mode=context.merge_mode,
+        )
+    else:
+        delta_entries = _build_delta_entries(task_vectors, parameter_keys=parameter_keys, merge_mode=context.merge_mode)
 
-    if task_vector_dtype in {"auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
-        cast_dtype: Optional[torch.dtype] = None
-        if task_vector_dtype == "auto":
-            cast_dtype = torch.bfloat16 if device.type == "cuda" else None
-        elif task_vector_dtype in {"bf16", "bfloat16"}:
-            cast_dtype = torch.bfloat16
-        elif task_vector_dtype in {"fp16", "float16"}:
-            cast_dtype = torch.float16
-        elif task_vector_dtype in {"fp32", "float32"}:
-            cast_dtype = torch.float32
-        if cast_dtype is not None:
-            for entry in delta_entries:
-                for i, delta in enumerate(entry.deltas):
-                    entry.deltas[i] = delta.to(dtype=cast_dtype, copy=False)
+        if task_vector_dtype in {"auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"}:
+            cast_dtype: Optional[torch.dtype] = None
+            if task_vector_dtype == "auto":
+                cast_dtype = torch.bfloat16 if device.type == "cuda" else None
+            elif task_vector_dtype in {"bf16", "bfloat16"}:
+                cast_dtype = torch.bfloat16
+            elif task_vector_dtype in {"fp16", "float16"}:
+                cast_dtype = torch.float16
+            elif task_vector_dtype in {"fp32", "float32"}:
+                cast_dtype = torch.float32
+            if cast_dtype is not None:
+                for entry in delta_entries:
+                    for i, delta in enumerate(entry.deltas):
+                        entry.deltas[i] = delta.to(dtype=cast_dtype, copy=False)
 
     coefficient_provider = TaskCoefficientProvider()
     streaming_handles = []
     fused_linear_handles = []
+    fused_lora_handles = []
     if merge_impl == "streaming_parametrize":
         streaming_handles = register_streaming_parametrizations(
             model=model,
@@ -353,6 +383,14 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         fused_linear_handles = register_fused_linear_modules(
             model=model,
             entries=_to_streaming_entries(delta_entries),
+            coefficient_provider=coefficient_provider,
+            delta_residency=delta_residency,
+            dtype_compute=dtype_compute,
+        )
+    elif merge_impl == "fused_lora_linear":
+        fused_lora_handles = register_fused_lora_linear_modules(
+            model=model,
+            entries=_to_streaming_lora_entries(lora_entries),
             coefficient_provider=coefficient_provider,
             delta_residency=delta_residency,
             dtype_compute=dtype_compute,
@@ -545,6 +583,8 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
             unregister_streaming_parametrizations(streaming_handles)
         if fused_linear_handles:
             unregister_fused_linear_modules(fused_linear_handles)
+        if fused_lora_handles:
+            unregister_fused_lora_linear_modules(fused_lora_handles)
 
     with torch.no_grad():
         u.copy_(best_u)
@@ -578,6 +618,7 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         "allow_tf32": allow_tf32,
         "use_autocast": use_autocast,
         "gradient_checkpointing": gradient_checkpointing,
+        "zero_dropout": zero_dropout,
         "dataloader_num_workers": dataloader_num_workers,
         "dataloader_pin_memory": dataloader_pin_memory,
         "non_blocking_transfer": non_blocking_transfer,
@@ -594,6 +635,7 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         "final_logits_u": final_u,
         "num_adapters": num_adapters,
         "num_delta_entries": len(delta_entries),
+        "num_lora_entries": len(lora_entries),
         "eval_subset": dict(eval_subset) if isinstance(eval_subset, Mapping) else None,
         "elapsed_sec": time.time() - t0,
         "objective": "tau_logsumexp_headroom_normalized_regret",
