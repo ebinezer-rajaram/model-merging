@@ -75,7 +75,7 @@ Merge and sweep now share one schema and one loader:
 Direct merge fields:
 
 - `adapters`: list of task names or adapter paths
-- `method`: `uniform | uniform_delta | weighted | task_vector | weighted_delta | weighted_delta_n | dare | ties`
+- `method`: `uniform | uniform_delta | uniform_scalar_delta | weighted | task_vector | weighted_delta | weighted_delta_n | dare | ties`
 - `merge_mode`: `common | strict`
 - `method_params`: method-specific params (`lambda`, etc.)
 - `transforms`: pre-merge transform pipeline (`identity` available by default)
@@ -182,6 +182,38 @@ Sweep configs can now also include:
 - `optimizer`
 
 Ranking uses **max‑min interference delta** across evaluated tasks.
+
+### Single-scalar uniform-delta search
+
+`uniform_scalar_delta` applies one global scalar on top of the summed task vectors:
+
+`delta_merged = scale * (delta_1 + ... + delta_n)`
+
+Example (grid):
+```yaml
+adapters: [emotion, intent, kws, langid]
+method: uniform_scalar_delta
+merge_mode: common
+eval_tasks: [emotion, intent, kws, langid]
+split: test
+search:
+  type: grid
+  grid:
+    scale: [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5]
+```
+
+Example (bayes):
+```yaml
+search:
+  type: bayes
+  budget: 20
+  init_points: 6
+  space:
+    scale:
+      type: float
+      min: 0.0
+      max: 2.0
+```
 
 ### Bayesian optimization config
 

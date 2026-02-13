@@ -17,6 +17,7 @@ from merging.methods.uniform import merge_adapters_uniform
 from merging.runtime.utils import compute_delta_from_lora_weights, load_adapter_weights
 from merging.methods.weighted import merge_adapters_weighted, merge_task_vectors_weighted
 from merging.methods.weighted_delta_n import merge_task_vectors_weighted_n
+from merging.methods.uniform_scalar_delta import merge_task_vectors_uniform_scalar
 
 
 def _uniform_in_memory(
@@ -261,6 +262,45 @@ def _weighted_delta_n_in_memory(
     return MergeOutput(merged_delta=merged_delta, merged_weights=None, metadata=metadata)
 
 
+def _uniform_scalar_delta_in_memory(
+    *,
+    adapter_paths: List[Path],
+    source_metadata: List[Dict],
+    merge_mode: str,
+    params: Optional[Dict[str, object]],
+) -> MergeOutput:
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="uniform_scalar_delta",
+        merge_mode=merge_mode,
+        lambda_weight=None,
+        params=params,
+    )
+    task_vectors = []
+    for adapter_path in adapter_paths:
+        transformed = apply_transforms(load_adapter_weights(adapter_path), spec.transforms)
+        task_vectors.append(compute_delta_from_lora_weights(transformed, adapter_path))
+    scale = float(spec.method_params.get("scale", 1.0))
+    merged_delta = merge_task_vectors_uniform_scalar(
+        task_vectors,
+        scale=scale,
+        merge_mode=merge_mode,
+    )
+    metadata = build_merge_metadata(
+        method="uniform_scalar_delta",
+        merge_mode=merge_mode,
+        num_adapters=len(adapter_paths),
+        source_metadata=source_metadata,
+        num_parameters=len(merged_delta),
+        params={"scale": scale},
+        method_params=spec.method_params,
+        lambda_policy=spec.method_params.get("lambda_policy"),
+        transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],
+        optimizer=spec.method_params.get("optimizer"),
+    )
+    return MergeOutput(merged_delta=merged_delta, merged_weights=None, metadata=metadata)
+
+
 def _task_vector_save(
     *,
     adapter_paths: List[Path],
@@ -358,6 +398,18 @@ def register_builtin_methods() -> None:
             max_adapters=None,
             saveable=False,
             merge_in_memory=_weighted_delta_n_in_memory,
+        )
+    )
+    register_merge_method(
+        MergeMethod(
+            name="uniform_scalar_delta",
+            required_params=(),
+            params_defaults={"scale": 1.0},
+            params_validator=None,
+            min_adapters=2,
+            max_adapters=None,
+            saveable=False,
+            merge_in_memory=_uniform_scalar_delta_in_memory,
         )
     )
     register_merge_method(
