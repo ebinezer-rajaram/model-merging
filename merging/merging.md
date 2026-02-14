@@ -23,8 +23,11 @@ The canonical CLI entrypoint is `main.py`. Legacy CLI is `experiments/merge_vect
 - `merging/runtime/`  
   Metadata helpers, output paths, logging
 
-- `merging/config/`, `merging/policies/`, `merging/plugins/`  
-  Merge spec model, lambda policies, transforms/optimizers
+- `merging/config/`, `merging/policies/`  
+  Merge spec model and lambda policies
+
+- `merging/transforms/`, `merging/optimizers/`  
+  Canonical transform and optimizer registries/engines
 
 - `merging/evaluation/`  
   Evaluation + sweeps (grid now, bayes scaffold)
@@ -107,6 +110,7 @@ Weighted merge accepts per-key lambda resolution while preserving scalar behavio
 ## Transforms
 
 Transforms are pre-merge plugins run on each source adapter weight dict before method composition.
+Canonical module: `merging.transforms.registry`.
 
 - Built-in: `identity`
 - Built-in: `layer_l2_normalize`
@@ -122,6 +126,7 @@ Transforms are pre-merge plugins run on each source adapter weight dict before m
 ## Optimizers
 
 Optimizers are registry plugins that can set/adjust lambda policy.
+Canonical module: `merging.optimizers.registry`.
 
 - `none`: no-op
 - `bayes`: adapter scaffold for direct merge; active Bayesian optimization remains in `merge-sweep`

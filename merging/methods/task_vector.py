@@ -10,7 +10,7 @@ import torch
 
 from experiments.extract_vector import extract_task_vector_from_lora
 from merging.config.specs import TransformSpec
-from merging.plugins.transforms import apply_transforms
+from merging.transforms.registry import apply_transforms
 from merging.runtime.utils import save_merged_adapter
 
 

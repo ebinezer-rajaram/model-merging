@@ -10,7 +10,7 @@ import torch
 from experiments.extract_vector import extract_task_vector_from_lora
 from merging.config.specs import merge_spec_from_legacy_args
 from merging.engine.registry import MergeOutput, build_merge_metadata
-from merging.plugins.transforms import apply_transforms
+from merging.transforms.registry import apply_transforms
 
 
 TensorDict = Dict[str, torch.Tensor]

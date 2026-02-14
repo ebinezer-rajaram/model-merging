@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from merging.plugins.optimizers import apply_optimizer_overrides, OptimizerContext, optimize_lambda_policy
+from merging.optimizers.registry import apply_optimizer_overrides, OptimizerContext, optimize_lambda_policy
 from merging.engine.registry import get_merge_method, normalize_params
 from merging.engine.runner import resolve_adapter_specs
 from merging.config.specs import merge_spec_from_legacy_args

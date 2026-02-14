@@ -10,7 +10,7 @@ from merging.policies.lambda_policy import build_lambda_policy
 from merging.methods.task_vector import merge_uniform_via_task_vectors
 from merging.engine.registry import MergeMethod, MergeOutput, build_merge_metadata, register_merge_method
 from merging.config.specs import merge_spec_from_legacy_args
-from merging.plugins.transforms import apply_transforms
+from merging.transforms.registry import apply_transforms
 from merging.methods.dare import merge_dare, _validate_dare_params
 from merging.methods.ties import merge_ties, _validate_ties_params
 from merging.methods.uniform import merge_adapters_uniform

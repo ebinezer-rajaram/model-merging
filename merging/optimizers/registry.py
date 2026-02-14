@@ -280,7 +280,7 @@ class AdaMergingOptimizer(BaseOptimizer):
     name = "adamerging"
 
     def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
-        from merging.plugins.adamerging_engine import run_adamerging_optimizer
+        from merging.optimizers.adamerging import run_adamerging_optimizer
 
         return run_adamerging_optimizer(spec=spec, context=context)
 
@@ -289,7 +289,7 @@ class GradientOptimizer(BaseOptimizer):
     name = "gradient"
 
     def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
-        from merging.plugins.gradient_engine import run_gradient_optimizer
+        from merging.optimizers.gradient import run_gradient_optimizer
 
         return run_gradient_optimizer(spec=spec, context=context)
 
@@ -298,7 +298,7 @@ class SuperMergeOptimizer(BaseOptimizer):
     name = "supermerge"
 
     def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
-        from merging.plugins.supermerge_engine import run_supermerge_optimizer
+        from merging.optimizers.supermerge import run_supermerge_optimizer
 
         return run_supermerge_optimizer(spec=spec, context=context)
 
@@ -307,7 +307,7 @@ class RegretSmoothMaxOptimizer(BaseOptimizer):
     name = "regret_smoothmax"
 
     def optimize(self, spec: MergeSpec, context: OptimizerContext) -> OptimizerResult:
-        from merging.plugins.regret_smoothmax_engine import run_regret_smoothmax_optimizer
+        from merging.optimizers.regret_smoothmax import run_regret_smoothmax_optimizer
 
         return run_regret_smoothmax_optimizer(spec=spec, context=context)
 

@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader
 
 from core import load_config, prepare_task_for_evaluation
 from experiments.evaluate_task import _prepare_dataset_cache
-from merging.plugins.adamerging_streaming import StreamingDeltaEntry, StreamingLoraEntry
-from merging.plugins.optimizers import OptimizerContext
+from merging.optimizers.core.streaming import StreamingDeltaEntry, StreamingLoraEntry
+from merging.optimizers.registry import OptimizerContext
 from merging.policies.lambda_policy import extract_layer_index
 from merging.runtime.utils import PACKAGE_ROOT, get_task_module
 

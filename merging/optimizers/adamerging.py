@@ -13,7 +13,7 @@ from core.evaluation.eval_utils import load_model_and_processor
 from experiments.evaluate_task import _get_model_path, _prepare_dataset_cache
 from experiments.extract_vector import extract_task_vector_from_lora
 from merging.config.specs import MergeSpec
-from merging.plugins.adamerging_streaming import (
+from merging.optimizers.core.streaming import (
     TaskCoefficientProvider,
     register_fused_linear_modules,
     register_fused_lora_linear_modules,
@@ -22,7 +22,7 @@ from merging.plugins.adamerging_streaming import (
     unregister_fused_lora_linear_modules,
     unregister_streaming_parametrizations,
 )
-from merging.plugins.gradient_common import (
+from merging.optimizers.core.common import (
     _apply_ties_consensus_preprocess,
     _build_delta_entries,
     _build_lora_entries,
@@ -42,7 +42,7 @@ from merging.plugins.gradient_common import (
     _to_streaming_lora_entries,
     _to_streaming_entries,
 )
-from merging.plugins.optimizers import OptimizerContext, OptimizerResult
+from merging.optimizers.registry import OptimizerContext, OptimizerResult
 from merging.runtime.utils import get_task_module, PACKAGE_ROOT
 
 try:
@@ -257,7 +257,7 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         )
 
     tasks = _resolve_eval_tasks(context, params)
-    from merging.plugins.transforms import apply_transforms
+    from merging.transforms.registry import apply_transforms
     if merge_impl == "fused_lora_linear":
         if plus_plus:
             raise ValueError("optimizer.params.plus_plus is not supported with merge_impl='fused_lora_linear'.")
