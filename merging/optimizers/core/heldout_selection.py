@@ -277,8 +277,8 @@ class PeriodicHeldoutEvaluator:
         if criterion == "l2_shortfall":
             if not vector:
                 return float("-inf")
-            # S(Δ) = -sqrt(mean_t (1 - Δ_t)^2); maximize S <=> minimize RMS shortfall.
-            sq = [(1.0 - float(v)) ** 2 for v in vector]
+            # S(Δ) = -sqrt(mean_t max(0, 1 - Δ_t)^2); maximize S <=> minimize RMS shortfall.
+            sq = [(max(0.0, 1.0 - float(v))) ** 2 for v in vector]
             return float(-(sum(sq) / float(len(sq))) ** 0.5)
         raise ValueError(f"Unsupported held-out selection criterion '{criterion}'.")
 
@@ -298,6 +298,14 @@ class PeriodicHeldoutEvaluator:
             )
             setups[task] = setup
         return setups
+
+    @staticmethod
+    def _sanitize_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+        for key, value in metrics.items():
+            if isinstance(value, (int, float, bool, str)):
+                sanitized[str(key)] = value
+        return sanitized
 
     def _insert_frontier_point(self, vector: List[float]) -> bool:
         eps = float(self.config.pareto.dominance_epsilon)
@@ -333,7 +341,13 @@ class PeriodicHeldoutEvaluator:
         self.model.eval()
         try:
             per_task_metrics: Dict[str, Dict[str, Any]] = {}
-            for task in self.tasks:
+            for idx, task in enumerate(self.tasks, start=1):
+                if self.show_summary:
+                    print(
+                        "[heldout] "
+                        f"evaluating task {idx}/{len(self.tasks)}: {task} "
+                        f"(split={self.config.split}, update_step={update_step})"
+                    )
                 metrics = run_evaluation(
                     self.model,
                     self.setups[task],
@@ -348,7 +362,16 @@ class PeriodicHeldoutEvaluator:
                     False,
                     eval_tag=self.eval_tag,
                 )
-                per_task_metrics[task] = metrics
+                safe_metrics = self._sanitize_metrics(metrics)
+                per_task_metrics[task] = safe_metrics
+                if self.show_summary:
+                    numeric_items = [
+                        f"{k}={float(v):.4f}"
+                        for k, v in safe_metrics.items()
+                        if isinstance(v, (int, float))
+                    ]
+                    if numeric_items:
+                        print(f"[heldout] {task}: {', '.join(numeric_items)}")
         finally:
             if was_training:
                 self.model.train()
@@ -370,7 +393,7 @@ class PeriodicHeldoutEvaluator:
         score_delta = selection_score - self.best_score if self.best_score != float("-inf") else selection_score
         best_single_metric = float(max(vector)) if vector else None
         l2_shortfall_score = (
-            float(-(sum((1.0 - float(v)) ** 2 for v in vector) / float(len(vector))) ** 0.5)
+            float(-(sum((max(0.0, 1.0 - float(v))) ** 2 for v in vector) / float(len(vector))) ** 0.5)
             if vector
             else None
         )
@@ -388,6 +411,7 @@ class PeriodicHeldoutEvaluator:
         eval_entry = {
             "update_step": int(update_step),
             "interference_by_task": {task: float(vector[i]) for i, task in enumerate(self.tasks)},
+            "per_task_metrics": per_task_metrics,
             "is_nondominated": bool(is_nondominated),
             "frontier_size": int(len(self.frontier)),
             "hypervolume": float(hv),

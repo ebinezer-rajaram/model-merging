@@ -177,7 +177,7 @@ All iterative optimizers (`adamerging`, `gradient`, `supermerge`, `regret_smooth
 - `optimizer.params.heldout_eval.split`: held-out split name (default `test`; must differ from optimizer `split`)
 - `optimizer.params.heldout_eval.frequency_updates`: run held-out eval every N optimizer updates (default `100`)
 - `optimizer.params.heldout_eval.batch_size`: eval batch size override (default optimizer `batch_size`)
-- `optimizer.params.heldout_eval.subset`: optional deterministic held-out subset mapping (`enabled|max_samples|shuffle|seed|per_task`)
+- `optimizer.params.heldout_eval.subset`: optional deterministic held-out subset mapping (`enabled|max_samples|stratified|stratify_by|shuffle|seed|per_task`)
 - `optimizer.params.heldout_eval.compute_missing_interference_baselines`: auto-compute missing `base_model` and `best_<task>_adapter` baselines on the held-out subset (default `true`)
 - `optimizer.params.heldout_eval.pareto.patience_evals`: stop after N held-out evals without enough hypervolume gain (default maps from optimizer patience)
 - `optimizer.params.heldout_eval.pareto.min_evals_before_stop`: minimum held-out eval count before stopping is allowed (default `1`)
@@ -187,14 +187,20 @@ All iterative optimizers (`adamerging`, `gradient`, `supermerge`, `regret_smooth
 - `optimizer.params.heldout_eval.pareto.dominance_epsilon`: epsilon for Pareto dominance checks (default `0.0`)
 - `optimizer.params.heldout_eval.pareto.reference_point`: hypervolume reference point per task (default zero vector)
 - `optimizer.params.heldout_eval.restore_best_checkpoint`: restore held-out-selected best coefficients at end (defaults to optimizer restore behavior)
+- `optimizer.params.seed`: optional global random seed for optimizer runs (sets NumPy/PyTorch RNG and deterministic dataloader sampling order)
 
 `l2_shortfall` uses:
 
-`S(Δ) = -sqrt((1/T) * Σ_t (1 - Δ_t)^2)`
+`S(Δ) = -sqrt((1/T) * Σ_t max(0, 1 - Δ_t)^2)`
 
-Maximizing `S` is equivalent to minimizing RMS shortfall to `1`.
+Maximizing `S` is equivalent to minimizing clipped RMS shortfall to `1` (values above `1` are not penalized).
 
 When `heldout_eval.enabled=true`, `early_stopping_monitor` is `heldout_<selection_criterion>` and early stopping is driven by the selected held-out score instead of the in-loop training objective.
+
+Recommended split policy:
+- keep `split=test` for final reporting only
+- optimize on `split=train`
+- use `heldout_eval.split=validation` for periodic model selection
 
 ## Evaluation
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 
+import numpy as np
 import torch
 from safetensors import safe_open
 from torch import nn
@@ -40,6 +41,14 @@ _DTYPE_ALIASES = {
 }
 
 _SAMPLING_STRATEGIES = {"uniform", "none", "inverse", "sqrt_inverse", "balanced"}
+
+
+def _seed_dataloader_worker(worker_id: int) -> None:
+    """Seed Python/NumPy RNGs from the PyTorch worker seed for reproducible loading."""
+    del worker_id
+    worker_seed = int(torch.initial_seed()) % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 @dataclass(frozen=True)
@@ -147,12 +156,18 @@ def _maybe_subset_dataset(
     if not eval_subset or not bool(eval_subset.get("enabled", True)):
         return dataset
     max_samples = eval_subset.get("max_samples")
+    stratified = bool(eval_subset.get("stratified", False))
+    stratify_by = eval_subset.get("stratify_by", "label")
     per_task = eval_subset.get("per_task")
     if isinstance(per_task, Mapping) and task in per_task:
         task_cfg = per_task[task]
         if isinstance(task_cfg, Mapping):
             if task_cfg.get("max_samples") is not None:
                 max_samples = task_cfg.get("max_samples")
+            if "stratified" in task_cfg:
+                stratified = bool(task_cfg.get("stratified"))
+            if task_cfg.get("stratify_by") is not None:
+                stratify_by = task_cfg.get("stratify_by")
         elif isinstance(task_cfg, (int, float)):
             max_samples = task_cfg
     if max_samples is None:
@@ -165,6 +180,70 @@ def _maybe_subset_dataset(
         return dataset
     shuffle = bool(eval_subset.get("shuffle", False))
     seed = int(eval_subset.get("seed", 0) or 0)
+    if stratified:
+        column = str(stratify_by or "label")
+        columns = list(getattr(dataset, "column_names", []) or [])
+        if column in columns:
+            groups: Dict[Any, List[int]] = {}
+            values = dataset[column]
+            for idx, value in enumerate(values):
+                groups.setdefault(value, []).append(idx)
+            if groups:
+                rng = random.Random(seed)
+                if shuffle:
+                    for idxs in groups.values():
+                        rng.shuffle(idxs)
+                total = float(size)
+                keys = list(groups.keys())
+                exact_alloc = {
+                    k: (float(len(groups[k])) / total) * float(max_samples)
+                    for k in keys
+                }
+                alloc = {k: int(exact_alloc[k]) for k in keys}
+                for k in keys:
+                    if len(groups[k]) > 0 and alloc[k] == 0 and max_samples >= len(keys):
+                        alloc[k] = 1
+                used = sum(alloc.values())
+                if used > max_samples:
+                    ranked = sorted(
+                        keys,
+                        key=lambda k: (exact_alloc[k] - float(alloc[k]), float(alloc[k])),
+                    )
+                    for k in ranked:
+                        if used <= max_samples:
+                            break
+                        if alloc[k] > 0:
+                            alloc[k] -= 1
+                            used -= 1
+                if used < max_samples:
+                    ranked = sorted(
+                        keys,
+                        key=lambda k: (exact_alloc[k] - float(alloc[k])),
+                        reverse=True,
+                    )
+                    ptr = 0
+                    while used < max_samples and ranked:
+                        k = ranked[ptr % len(ranked)]
+                        if alloc[k] < len(groups[k]):
+                            alloc[k] += 1
+                            used += 1
+                        ptr += 1
+                        if ptr > (10 * max_samples + 10):
+                            break
+                selected: List[int] = []
+                for k in keys:
+                    take = min(int(alloc[k]), len(groups[k]))
+                    if take > 0:
+                        selected.extend(groups[k][:take])
+                if shuffle:
+                    rng.shuffle(selected)
+                return dataset.select(selected[:max_samples])
+            print(f"[subset] stratified requested for task='{task}' but no groups found; falling back to random.")
+        else:
+            print(
+                f"[subset] stratified requested for task='{task}' but column '{column}' is missing; "
+                "falling back to random."
+            )
     indices = list(range(size))
     if shuffle:
         random.Random(seed).shuffle(indices)
@@ -408,6 +487,7 @@ def _build_task_loader(
     sampling: Optional[Mapping[str, Any]],
     num_workers: int,
     pin_memory: bool,
+    seed: Optional[int] = None,
 ) -> DataLoader:
     task_module = get_task_module(task)
     config_path = task_module.get_config_path(PACKAGE_ROOT, None)
@@ -437,6 +517,11 @@ def _build_task_loader(
         loader_kwargs["shuffle"] = False
     else:
         loader_kwargs["shuffle"] = True
+    if seed is not None:
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(int(seed))
+        loader_kwargs["generator"] = loader_generator
+        loader_kwargs["worker_init_fn"] = _seed_dataloader_worker
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = True
     loader = DataLoader(**loader_kwargs)

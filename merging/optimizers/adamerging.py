@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 import torch
 
-from core import load_config
+from core import load_config, set_global_seed
 from core.evaluation.eval_utils import load_model_and_processor
 from experiments.evaluate_task import _get_model_path, _prepare_dataset_cache
 from experiments.extract_vector import extract_task_vector_from_lora
@@ -197,6 +197,8 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     gradient_accumulation_steps = int(
         params.get("gradient_accumulation_steps", params.get("grad_accum_steps", 1))
     )
+    seed_raw = params.get("seed")
+    seed: Optional[int] = None if seed_raw is None else int(seed_raw)
     early_stopping_patience = int(params.get("early_stopping_patience", 0))
     early_stopping_threshold = float(
         params.get("early_stopping_threshold", params.get("early_stopping_min_delta", 0.0))
@@ -228,6 +230,8 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         raise ValueError("optimizer.params.dataloader_num_workers must be >= 0.")
     if gradient_accumulation_steps <= 0:
         raise ValueError("optimizer.params.gradient_accumulation_steps must be > 0.")
+    if seed is not None and seed < 0:
+        raise ValueError("optimizer.params.seed must be >= 0 when provided.")
     if early_stopping_patience < 0:
         raise ValueError("optimizer.params.early_stopping_patience must be >= 0.")
     if early_stopping_threshold < 0.0:
@@ -274,6 +278,7 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     restore_best_checkpoint_effective = bool(
         heldout_eval_cfg.restore_best_checkpoint if heldout_eval_cfg is not None else False
     )
+    set_global_seed(seed)
     if heldout_enabled and merge_impl == "functional_clone_legacy":
         raise ValueError(
             "optimizer.params.heldout_eval.enabled=true does not support "
@@ -353,8 +358,9 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             sampling=sampling if isinstance(sampling, Mapping) else None,
             num_workers=dataloader_num_workers,
             pin_memory=dataloader_pin_memory,
+            seed=(None if seed is None else int(seed) + int(task_idx)),
         )
-        for task in tasks
+        for task_idx, task in enumerate(tasks)
     }
 
     # Load only one base model (source tasks share the same base checkpoint in this pipeline).
@@ -956,6 +962,7 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "dataloader_pin_memory": dataloader_pin_memory,
         "non_blocking_transfer": non_blocking_transfer,
         "gradient_accumulation_steps": gradient_accumulation_steps,
+        "seed": seed,
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_threshold": early_stopping_threshold,
         "restore_best_checkpoint_effective": restore_best_checkpoint_effective,

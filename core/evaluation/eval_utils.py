@@ -676,6 +676,14 @@ def _classification_post_load_hook(dataset: Any, dataset_cfg: Dict[str, Any], sp
 
     This ensures evaluation uses the same duration filtering as training.
     """
+    # Classification dataset loaders already apply `filter_by_duration(...)` with
+    # disk caching. Re-running `dataset.filter(...)` here duplicates work and
+    # causes expensive progress bars during optimizer loops.
+    #
+    # Set `dataset.skip_post_load_duration_filter=false` to force this hook.
+    if bool(dataset_cfg.get("skip_post_load_duration_filter", True)):
+        return dataset
+
     max_duration = dataset_cfg.get("max_duration")
     min_duration = dataset_cfg.get("min_duration")
 

@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 import torch
 
-from core import load_config
+from core import load_config, set_global_seed
 from core.evaluation.eval_utils import load_model_and_processor
 from experiments.evaluate_task import _get_model_path, _prepare_dataset_cache
 from experiments.extract_vector import extract_task_vector_from_lora
@@ -221,6 +221,8 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
     non_blocking_transfer = bool(params.get("non_blocking_transfer", True))
     dataloader_num_workers = int(params.get("dataloader_num_workers", 0))
     dataloader_pin_memory = bool(params.get("dataloader_pin_memory", True))
+    seed_raw = params.get("seed")
+    seed: Optional[int] = None if seed_raw is None else int(seed_raw)
     eval_subset = params.get("eval_subset")
     if eval_subset is not None and not isinstance(eval_subset, Mapping):
         raise ValueError("optimizer.params.eval_subset must be a mapping when provided.")
@@ -243,6 +245,8 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         raise ValueError("optimizer.params.steps must be > 0.")
     if batch_size <= 0:
         raise ValueError("optimizer.params.batch_size must be > 0.")
+    if seed is not None and seed < 0:
+        raise ValueError("optimizer.params.seed must be >= 0 when provided.")
     if tau <= 0.0:
         raise ValueError("optimizer.params.tau must be > 0.")
     if regret_eps <= 0.0:
@@ -267,6 +271,7 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
     restore_best_checkpoint_effective = bool(
         heldout_eval_cfg.restore_best_checkpoint if heldout_eval_cfg is not None else True
     )
+    set_global_seed(seed)
     if heldout_enabled and merge_impl == "functional_clone_legacy":
         raise ValueError(
             "optimizer.params.heldout_eval.enabled=true does not support "
@@ -346,8 +351,9 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
             sampling=sampling if isinstance(sampling, Mapping) else None,
             num_workers=dataloader_num_workers,
             pin_memory=dataloader_pin_memory,
+            seed=(None if seed is None else int(seed) + int(task_idx)),
         )
-        for task in tasks
+        for task_idx, task in enumerate(tasks)
     }
 
     for p in model.parameters():
@@ -704,6 +710,7 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         "dataloader_num_workers": dataloader_num_workers,
         "dataloader_pin_memory": dataloader_pin_memory,
         "non_blocking_transfer": non_blocking_transfer,
+        "seed": seed,
         "sampling": dict(sampling) if isinstance(sampling, Mapping) else None,
         "ce_ignore_index": ignore_index,
         "init_mode": init_mode,
