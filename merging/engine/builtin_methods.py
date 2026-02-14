@@ -229,6 +229,7 @@ def _weighted_delta_n_in_memory(
     layer_task_coefficients = spec.method_params.get("layer_task_coefficients")
     default_task_coefficients = spec.method_params.get("default_task_coefficients")
     allow_negative_coefficients = bool(spec.method_params.get("allow_negative_coefficients", False))
+    allow_unbounded_coefficients = bool(spec.method_params.get("allow_unbounded_coefficients", False))
     merged_delta = merge_task_vectors_weighted_n(
         task_vectors,
         merge_mode=merge_mode,
@@ -237,6 +238,7 @@ def _weighted_delta_n_in_memory(
         layer_task_coefficients=layer_task_coefficients,
         default_task_coefficients=default_task_coefficients,
         allow_negative_coefficients=allow_negative_coefficients,
+        allow_unbounded_coefficients=allow_unbounded_coefficients,
     )
     policy_type = "layer_task_coefficients" if layer_task_coefficients else "task_coefficients"
     metadata = build_merge_metadata(
@@ -255,6 +257,7 @@ def _weighted_delta_n_in_memory(
         "type": policy_type,
         "normalize_coefficients": normalize_coefficients,
         "allow_negative_coefficients": allow_negative_coefficients,
+        "allow_unbounded_coefficients": allow_unbounded_coefficients,
         "task_coefficients": task_coefficients,
         "default_task_coefficients": default_task_coefficients,
         "layer_task_coefficients": layer_task_coefficients,

@@ -511,6 +511,9 @@ def _merge_coeffs(
     layer_indices: List[int],
     coefficient_parameterization: str,
     normalize_coefficients: bool,
+    magnitude_task: Optional[torch.Tensor] = None,
+    magnitude_default: Optional[torch.Tensor] = None,
+    magnitude_layer: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[int, torch.Tensor]]:
     if coefficient_parameterization == "sigmoid_alpha":
         task = torch.sigmoid(alpha_task)
@@ -521,10 +524,13 @@ def _merge_coeffs(
     elif coefficient_parameterization == "projected_lambda":
         task = alpha_task
         default = alpha_default
+    elif coefficient_parameterization == "simplex_softmax_scaled":
+        task = torch.softmax(alpha_task, dim=-1)
+        default = torch.softmax(alpha_default, dim=-1) if alpha_default is not None else None
     else:
         raise ValueError(
             "coefficient_parameterization must be one of: "
-            "sigmoid_alpha|tanh_alpha|projected_lambda."
+            "sigmoid_alpha|tanh_alpha|projected_lambda|simplex_softmax_scaled."
         )
     layer_map: Dict[int, torch.Tensor] = {}
     if alpha_layer is not None:
@@ -533,11 +539,42 @@ def _merge_coeffs(
                 layer_map[int(layer)] = torch.sigmoid(alpha_layer[i])
             elif coefficient_parameterization == "tanh_alpha":
                 layer_map[int(layer)] = torch.tanh(alpha_layer[i])
+            elif coefficient_parameterization == "simplex_softmax_scaled":
+                layer_map[int(layer)] = torch.softmax(alpha_layer[i], dim=-1)
             else:
                 layer_map[int(layer)] = alpha_layer[i]
 
+    def _scale(x: torch.Tensor, magnitude: Optional[torch.Tensor]) -> torch.Tensor:
+        if coefficient_parameterization != "simplex_softmax_scaled":
+            return x
+        if magnitude is None:
+            return x
+        return x * magnitude
+
+    task = _scale(task, magnitude_task)
+    if default is not None:
+        default = _scale(default, magnitude_default)
+    if layer_map:
+        scaled_layers: Dict[int, torch.Tensor] = {}
+        for i, layer in enumerate(layer_indices):
+            coeffs = layer_map.get(int(layer))
+            if coeffs is None:
+                continue
+            layer_mag: Optional[torch.Tensor] = None
+            if magnitude_layer is not None:
+                layer_mag = magnitude_layer[i]
+            elif magnitude_default is not None:
+                layer_mag = magnitude_default
+            elif magnitude_task is not None:
+                layer_mag = magnitude_task
+            scaled_layers[int(layer)] = _scale(coeffs, layer_mag)
+        layer_map = scaled_layers
+
     def _norm(x: torch.Tensor) -> torch.Tensor:
         if not normalize_coefficients:
+            return x
+        if coefficient_parameterization == "simplex_softmax_scaled":
+            # Coefficients are already simplex-normalized pre-scale; keep learned magnitude intact.
             return x
         denom = x.sum().clamp_min(1e-8)
         return x / denom

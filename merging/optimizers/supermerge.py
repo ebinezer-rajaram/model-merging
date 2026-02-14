@@ -154,6 +154,14 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     coefficient_parameterization = str(
         params.get("coefficient_parameterization", "tanh_alpha")
     ).strip().lower()
+    magnitude_scope = str(params.get("magnitude_scope", "per_layer")).strip().lower()
+    magnitude_parameterization = str(params.get("magnitude_parameterization", "linear")).strip().lower()
+    magnitude_init = float(params.get("magnitude_init", 1.0))
+    if normalize_coefficients and coefficient_parameterization == "simplex_softmax_scaled":
+        print(
+            "[supermerge] coefficient_parameterization='simplex_softmax_scaled' ignores "
+            "normalize_coefficients to preserve learned magnitudes."
+        )
     project_coefficients = bool(params.get("project_coefficients", True))
     coefficient_min = float(params.get("coefficient_min", -1.0))
     coefficient_max = float(params.get("coefficient_max", 1.0))
@@ -246,11 +254,23 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         raise ValueError("optimizer.params.min_optimizer_steps_before_early_stop must be >= 0.")
     if early_stopping_warmup_steps < 0:
         raise ValueError("optimizer.params.early_stopping_warmup_steps must be >= 0.")
-    if coefficient_parameterization != "tanh_alpha":
+    if coefficient_parameterization not in {"tanh_alpha", "simplex_softmax_scaled"}:
         raise ValueError(
             "supermerge exact mode requires "
-            "optimizer.params.coefficient_parameterization='tanh_alpha'."
+            "optimizer.params.coefficient_parameterization in "
+            "{'tanh_alpha', 'simplex_softmax_scaled'}."
         )
+    if coefficient_parameterization == "simplex_softmax_scaled":
+        if magnitude_parameterization != "linear":
+            raise ValueError(
+                "optimizer.params.magnitude_parameterization must be 'linear' "
+                "when optimizer.params.coefficient_parameterization='simplex_softmax_scaled'."
+            )
+        if magnitude_scope not in {"per_layer", "global", "per_task"}:
+            raise ValueError(
+                "optimizer.params.magnitude_scope must be one of: per_layer|global|per_task "
+                "when optimizer.params.coefficient_parameterization='simplex_softmax_scaled'."
+            )
     if coefficient_min > coefficient_max:
         raise ValueError("optimizer.params.coefficient_min must be <= optimizer.params.coefficient_max.")
     if merge_impl not in {"streaming_parametrize", "functional_clone_legacy", "fused_linear", "fused_lora_linear"}:
@@ -399,9 +419,18 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     if variant == "layer_wise" and not layer_indices:
         raise ValueError("Layer-wise supermerge optimizer requested but no `.layers.<idx>.` keys were detected.")
 
-    init_value = _atanh_stable(init_lambda) if coefficient_parameterization == "tanh_alpha" else init_lambda
+    if coefficient_parameterization == "tanh_alpha":
+        init_value = _atanh_stable(init_lambda)
+    elif coefficient_parameterization == "simplex_softmax_scaled":
+        # Start from uniform simplex logits.
+        init_value = 0.0
+    else:
+        init_value = init_lambda
     alpha_default: Optional[torch.nn.Parameter] = None
     alpha_layer: Optional[torch.nn.Parameter] = None
+    magnitude_task: Optional[torch.nn.Parameter] = None
+    magnitude_default: Optional[torch.nn.Parameter] = None
+    magnitude_layer: Optional[torch.nn.Parameter] = None
     if variant == "layer_wise":
         # In layer-wise mode, task coefficients act as the global default anchor.
         # Share storage so task/default remain consistent and gradients are observable.
@@ -414,6 +443,36 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     else:
         alpha_task = torch.nn.Parameter(torch.full((num_adapters,), init_value, device=device))
         optim_params = [alpha_task]
+
+    if coefficient_parameterization == "simplex_softmax_scaled":
+        if variant == "layer_wise":
+            if magnitude_scope == "per_task":
+                magnitude_default = torch.nn.Parameter(
+                    torch.full((num_adapters,), magnitude_init, device=device)
+                )
+                magnitude_layer = torch.nn.Parameter(
+                    torch.full((len(layer_indices), num_adapters), magnitude_init, device=device)
+                )
+            elif magnitude_scope == "global":
+                magnitude_default = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+                magnitude_layer = None
+            else:
+                # per_layer: one scalar per layer plus a scalar default fallback.
+                magnitude_default = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+                magnitude_layer = torch.nn.Parameter(
+                    torch.full((len(layer_indices), 1), magnitude_init, device=device)
+                )
+            magnitude_task = magnitude_default
+            if magnitude_default is not None:
+                optim_params.append(magnitude_default)
+            if magnitude_layer is not None:
+                optim_params.append(magnitude_layer)
+        else:
+            if magnitude_scope == "per_task":
+                magnitude_task = torch.nn.Parameter(torch.full((num_adapters,), magnitude_init, device=device))
+            else:
+                magnitude_task = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+            optim_params.append(magnitude_task)
 
     optimizer = torch.optim.Adam(optim_params, lr=lr, betas=betas)
     task_iters: Dict[str, Optional[Iterator[Any]]] = {task: None for task in tasks}
@@ -449,6 +508,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     best_alpha_task: Optional[torch.Tensor] = None
     best_alpha_default: Optional[torch.Tensor] = None
     best_alpha_layer: Optional[torch.Tensor] = None
+    best_magnitude_task: Optional[torch.Tensor] = None
+    best_magnitude_default: Optional[torch.Tensor] = None
+    best_magnitude_layer: Optional[torch.Tensor] = None
     early_stopping_monitor = f"rolling_ce_{rolling_window}" if rolling_window > 1 else "avg_ce_update"
     streaming_handles = []
     fused_linear_handles = []
@@ -458,6 +520,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         alpha_task=alpha_task,
         alpha_default=alpha_default,
         alpha_layer=alpha_layer,
+        magnitude_task=magnitude_task,
+        magnitude_default=magnitude_default,
+        magnitude_layer=magnitude_layer,
         layer_indices=layer_indices,
         coefficient_parameterization=coefficient_parameterization,
         normalize_coefficients=normalize_coefficients,
@@ -505,6 +570,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                 alpha_task=alpha_task,
                 alpha_default=alpha_default,
                 alpha_layer=alpha_layer,
+                magnitude_task=magnitude_task,
+                magnitude_default=magnitude_default,
+                magnitude_layer=magnitude_layer,
                 layer_indices=layer_indices,
                 coefficient_parameterization=coefficient_parameterization,
                 normalize_coefficients=normalize_coefficients,
@@ -557,6 +625,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                         alpha_task=alpha_task,
                         alpha_default=alpha_default,
                         alpha_layer=alpha_layer,
+                        magnitude_task=magnitude_task,
+                        magnitude_default=magnitude_default,
+                        magnitude_layer=magnitude_layer,
                         layer_indices=layer_indices,
                         coefficient_parameterization=coefficient_parameterization,
                         normalize_coefficients=normalize_coefficients,
@@ -719,6 +790,12 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                             best_alpha_default = alpha_default.detach().clone()
                         if alpha_layer is not None:
                             best_alpha_layer = alpha_layer.detach().clone()
+                        if magnitude_task is not None:
+                            best_magnitude_task = magnitude_task.detach().clone()
+                        if magnitude_default is not None:
+                            best_magnitude_default = magnitude_default.detach().clone()
+                        if magnitude_layer is not None:
+                            best_magnitude_layer = magnitude_layer.detach().clone()
                     if not in_warmup:
                         no_improve_steps = 0
                 elif not in_warmup:
@@ -784,6 +861,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                             alpha_task=alpha_task,
                             alpha_default=alpha_default,
                             alpha_layer=alpha_layer,
+                            magnitude_task=magnitude_task,
+                            magnitude_default=magnitude_default,
+                            magnitude_layer=magnitude_layer,
                             layer_indices=layer_indices,
                             coefficient_parameterization=coefficient_parameterization,
                             normalize_coefficients=normalize_coefficients,
@@ -843,6 +923,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         alpha_task=alpha_task,
         alpha_default=alpha_default,
         alpha_layer=alpha_layer,
+        magnitude_task=magnitude_task,
+        magnitude_default=magnitude_default,
+        magnitude_layer=magnitude_layer,
         layer_indices=layer_indices,
         coefficient_parameterization=coefficient_parameterization,
         normalize_coefficients=normalize_coefficients,
@@ -856,17 +939,31 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                 alpha_default.copy_(best_alpha_default)
             if alpha_layer is not None and best_alpha_layer is not None:
                 alpha_layer.copy_(best_alpha_layer)
+            if magnitude_task is not None and best_magnitude_task is not None:
+                magnitude_task.copy_(best_magnitude_task)
+            if magnitude_default is not None and best_magnitude_default is not None:
+                magnitude_default.copy_(best_magnitude_default)
+            if magnitude_layer is not None and best_magnitude_layer is not None:
+                magnitude_layer.copy_(best_magnitude_layer)
         restored_best_checkpoint = True
 
     task_out, default_out, layer_out = _merge_coeffs(
         alpha_task=alpha_task,
         alpha_default=alpha_default,
         alpha_layer=alpha_layer,
+        magnitude_task=magnitude_task,
+        magnitude_default=magnitude_default,
+        magnitude_layer=magnitude_layer,
         layer_indices=layer_indices,
         coefficient_parameterization=coefficient_parameterization,
         normalize_coefficients=normalize_coefficients,
     )
-    task_coefficients = [float(x) for x in task_out.detach().cpu().tolist()]
+    def _to_floats_checked(name: str, tensor: torch.Tensor) -> List[float]:
+        if not bool(torch.isfinite(tensor).all().item()):
+            raise ValueError(f"supermerge produced non-finite coefficients in '{name}'.")
+        return [float(x) for x in tensor.detach().cpu().tolist()]
+
+    task_coefficients = _to_floats_checked("task_coefficients", task_out)
     alpha_task_grad_norm_mean = (
         alpha_task_grad_norm_sum / float(alpha_task_grad_norm_count)
         if alpha_task_grad_norm_count > 0
@@ -890,15 +987,17 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "normalize_coefficients": normalize_coefficients,
         "allow_negative_coefficients": True,
     }
+    if coefficient_parameterization == "simplex_softmax_scaled" and magnitude_parameterization == "linear":
+        method_params_overrides["allow_unbounded_coefficients"] = True
     if variant == "task_wise":
         method_params_overrides["task_coefficients"] = task_coefficients
     else:
         method_params_overrides["task_coefficients"] = task_coefficients
         method_params_overrides["default_task_coefficients"] = [
-            float(x) for x in default_out.detach().cpu().tolist()
+            float(x) for x in _to_floats_checked("default_task_coefficients", default_out)
         ] if default_out is not None else task_coefficients
         method_params_overrides["layer_task_coefficients"] = {
-            int(layer): [float(x) for x in coeff.detach().cpu().tolist()]
+            int(layer): _to_floats_checked(f"layer_task_coefficients[{int(layer)}]", coeff)
             for layer, coeff in layer_out.items()
         }
 
@@ -932,6 +1031,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "log_alpha_grad_stats": log_alpha_grad_stats,
         "log_label_token_stats": log_label_token_stats,
         "coefficient_parameterization": coefficient_parameterization,
+        "magnitude_scope": magnitude_scope,
+        "magnitude_parameterization": magnitude_parameterization,
+        "magnitude_init": magnitude_init,
         "project_coefficients": project_coefficients,
         "coefficient_min": coefficient_min,
         "coefficient_max": coefficient_max,
@@ -982,7 +1084,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "num_adapters": num_adapters,
         "num_delta_entries": len(delta_entries),
         "num_lora_entries": len(lora_entries),
-        "initial_task_coefficients": [float(init_lambda)] * num_adapters,
+        "initial_task_coefficients": [float(x) for x in init_task_coeffs.detach().cpu().tolist()],
         "final_task_coefficients": task_coefficients,
         "last_step_task_coefficients": last_task_coefficients,
         "alpha_task_grad_norm_mean": alpha_task_grad_norm_mean,
@@ -994,6 +1096,15 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "label_token_batches_by_task": dict(global_label_token_by_task_count),
         "eval_subset": dict(eval_subset) if isinstance(eval_subset, Mapping) else None,
     }
+    if magnitude_task is not None:
+        provenance["final_task_magnitude"] = _to_floats_checked("final_task_magnitude", magnitude_task)
+    if magnitude_default is not None:
+        provenance["final_default_magnitude"] = _to_floats_checked("final_default_magnitude", magnitude_default)
+    if magnitude_layer is not None:
+        provenance["final_layer_magnitude"] = {
+            int(layer): _to_floats_checked(f"final_layer_magnitude[{int(layer)}]", magnitude_layer[i])
+            for i, layer in enumerate(layer_indices)
+        }
     if variant == "layer_wise":
         provenance["num_layers"] = len(layer_indices)
         provenance["final_default_task_coefficients"] = method_params_overrides.get("default_task_coefficients")

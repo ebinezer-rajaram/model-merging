@@ -186,6 +186,9 @@ def _compute_single_task_ce_baselines(
     ce_label_smoothing: float,
     ce_reduction: str,
     ce_baseline_batches: int,
+    magnitude_task: Optional[torch.Tensor] = None,
+    magnitude_default: Optional[torch.Tensor] = None,
+    magnitude_layer: Optional[torch.Tensor] = None,
 ) -> Dict[str, float]:
     if ce_baseline_batches <= 0:
         raise ValueError("optimizer.params.ce_baseline_batches must be > 0.")
@@ -255,6 +258,9 @@ def _compute_single_task_ce_baselines(
         alpha_task=alpha_task,
         alpha_default=alpha_default,
         alpha_layer=alpha_layer,
+        magnitude_task=magnitude_task,
+        magnitude_default=magnitude_default,
+        magnitude_layer=magnitude_layer,
         layer_indices=layer_indices,
         coefficient_parameterization=coefficient_parameterization,
         normalize_coefficients=normalize_coefficients,
