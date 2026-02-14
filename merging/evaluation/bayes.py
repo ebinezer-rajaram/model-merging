@@ -288,6 +288,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
     budget = int(search.get("budget", 20))
     if budget <= 0:
         raise ValueError("search.budget must be > 0.")
+    effective_budget = budget
 
     seed = search.get("seed")
     rng = np.random.default_rng(None if seed is None else int(seed))
@@ -399,6 +400,82 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         except Exception as exc:
             _record_run(params, None, invalid_score, {"error": str(exc)})
 
+    def _coerce_point_params(point: Mapping[str, Any], field: str) -> Dict[str, Any]:
+        params_raw = point.get(field, point)
+        if not isinstance(params_raw, Mapping):
+            raise ValueError(f"{field} must be a mapping.")
+        params = {k: params_raw[k] for k in encoder.names if k in params_raw}
+        if set(params.keys()) != set(encoder.names):
+            missing = sorted(set(encoder.names) - set(params.keys()))
+            raise ValueError(f"{field} missing keys: {missing}")
+        return params
+
+    # Inject known BO observations (without evaluating) so the surrogate conditions on them.
+    known_points = search.get("known_points")
+    if known_points is None and bool(search.get("inject_zero_baseline", False)):
+        if config.method == "uniform_scalar_delta" and set(encoder.names) == {"scale"}:
+            known_points = [
+                {
+                    "params": {"scale": 0.0},
+                    "score": 0.0,
+                    "score_details": {
+                        "min_interference_delta": 0.0,
+                        "mean_interference_delta": 0.0,
+                        "source": "analytic_zero_scale",
+                    },
+                }
+            ]
+
+    known_added = 0
+    if known_points is not None:
+        if not isinstance(known_points, list):
+            raise ValueError("search.known_points must be a list.")
+        for entry in known_points:
+            if not isinstance(entry, Mapping):
+                raise ValueError("search.known_points entries must be mappings.")
+            params = _coerce_point_params(entry, "params")
+            key = encoder._key(params)
+            if key in seen:
+                continue
+
+            raw_score = entry.get("score")
+            details = entry.get("score_details")
+            if raw_score is None:
+                if (
+                    config.method == "uniform_scalar_delta"
+                    and set(encoder.names) == {"scale"}
+                    and float(params["scale"]) == 0.0
+                ):
+                    raw_score = 0.0
+                    if not isinstance(details, Mapping):
+                        details = {
+                            "min_interference_delta": 0.0,
+                            "mean_interference_delta": 0.0,
+                            "source": "analytic_zero_scale",
+                        }
+                else:
+                    raise ValueError("search.known_points entries require score unless analytically implied.")
+
+            score = float(raw_score)
+            if not np.isfinite(score):
+                raise ValueError("search.known_points score must be finite.")
+
+            if not isinstance(details, Mapping):
+                details = {}
+            results = entry.get("results") if isinstance(entry.get("results"), Mapping) else None
+            seen.add(key)
+            _record_run(params, results, score, dict(details))
+            known_added += 1
+
+        if known_added:
+            consumes_budget = bool(search.get("known_points_consume_budget", False))
+            if not consumes_budget:
+                effective_budget += known_added
+            print(
+                f"📌 Seeded {known_added} known BO point(s)"
+                + ("" if consumes_budget else f"; preserving {budget} evaluation slots.")
+            )
+
     # Warm-start from previous sweep summaries (no re-evaluation).
     warm_start_sweeps = search.get("warm_start_sweeps") or search.get("warm_start_from")
     if warm_start_sweeps is not None:
@@ -456,7 +533,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
         added = 0
         for score, _tiebreak, params, details, results in candidates:
-            if added >= max_points or len(runs) >= budget:
+            if added >= max_points or len(runs) >= effective_budget:
                 break
             key = encoder._key(params)
             if key in seen:
@@ -488,23 +565,23 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
                 if key in seen:
                     continue
                 seen.add(key)
-                print(f"\n[warm-start {len(runs)+1}/{budget}] Evaluating params: {params}")
+                print(f"\n[warm-start {len(runs)+1}/{effective_budget}] Evaluating params: {params}")
                 _evaluate(params)
-                if len(runs) >= budget:
+                if len(runs) >= effective_budget:
                     break
 
         # Random initialization.
-        while len(runs) < min(init_points, budget):
+        while len(runs) < min(init_points, effective_budget):
             params = encoder.sample(rng)
             key = encoder._key(params)
             if key in seen:
                 continue
             seen.add(key)
-            print(f"\n[init {len(runs)+1}/{budget}] Evaluating params: {params}")
+            print(f"\n[init {len(runs)+1}/{effective_budget}] Evaluating params: {params}")
             _evaluate(params)
 
         # BO loop.
-        while len(runs) < budget:
+        while len(runs) < effective_budget:
             x_train = encoder.encode_many([r["params"] for r in runs])
             y_train = np.asarray([float(r["score"]) for r in runs], dtype=np.float64)
 
@@ -550,7 +627,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
                 phase = "rand"
 
             seen.add(encoder._key(next_params))
-            print(f"\n[{phase} {len(runs)+1}/{budget}] Evaluating params: {next_params}")
+            print(f"\n[{phase} {len(runs)+1}/{effective_budget}] Evaluating params: {next_params}")
             _evaluate(next_params)
     except KeyboardInterrupt:
         _flush_summary()

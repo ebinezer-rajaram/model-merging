@@ -126,6 +126,12 @@ def parse_args() -> argparse.Namespace:
         help="Lambda weight for weighted merges (optional).",
     )
     eval_merged_parser.add_argument(
+        "--scale",
+        type=float,
+        default=None,
+        help="Global scale for uniform_scalar_delta merges (optional).",
+    )
+    eval_merged_parser.add_argument(
         "--run-id",
         default=None,
         help="Run identifier to resolve (best, latest, or run_YYYYMMDD_HHMMSS).",

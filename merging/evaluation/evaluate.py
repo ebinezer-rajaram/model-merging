@@ -520,7 +520,9 @@ def _with_eval_tag(filename: str, eval_tag: Optional[str]) -> str:
 
 
 def _load_eval_metric(task: str, split: str, filename: str, metric_key: str, *, eval_tag: Optional[str] = None) -> Optional[float]:
-    candidates = [_with_eval_tag(filename, eval_tag), filename] if eval_tag else [filename]
+    # In subset-tagged mode, only read subset-tagged metrics to avoid mixing
+    # full-split baselines with subset evaluations.
+    candidates = [_with_eval_tag(filename, eval_tag)] if eval_tag else [filename]
     metrics_path = None
     for name in candidates:
         path = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split / name
@@ -549,7 +551,9 @@ def _load_eval_metrics_json(
     *,
     eval_tag: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    candidates = [_with_eval_tag(filename, eval_tag), filename] if eval_tag else [filename]
+    # In subset-tagged mode, only read subset-tagged metrics to avoid mixing
+    # full-split baselines with subset evaluations.
+    candidates = [_with_eval_tag(filename, eval_tag)] if eval_tag else [filename]
     metrics_path = None
     for name in candidates:
         path = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split / name

@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         help="Lambda weight for weighted merges (optional).",
     )
     parser.add_argument(
+        "--scale",
+        type=float,
+        default=None,
+        help="Global scale for uniform_scalar_delta merges (optional).",
+    )
+    parser.add_argument(
         "--run-id",
         default=None,
         help="Run identifier to resolve (best, latest, or run_YYYYMMDD_HHMMSS).",
@@ -88,11 +94,18 @@ def parse_args() -> argparse.Namespace:
 
 def evaluate_from_args(args: argparse.Namespace) -> dict:
     """Execute merged adapter evaluation based on CLI args."""
+    params = {}
+    if args.scale is not None:
+        params["scale"] = float(args.scale)
+    if args.lambda_weight is not None:
+        params.setdefault("lambda", float(args.lambda_weight))
+
     return evaluate_merged_adapter(
         adapter_path=args.adapter_path,
         method=args.method,
         task_names=_normalize_list(args.tasks),
         lambda_weight=args.lambda_weight,
+        params=params or None,
         run_id=args.run_id,
         eval_tasks=_normalize_list(args.eval_tasks),
         split=args.split,
