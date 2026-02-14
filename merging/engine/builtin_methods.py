@@ -115,7 +115,7 @@ def _task_vector_in_memory(
         lambda_weight=None,
         params=params,
     )
-    task_vectors = [extract_task_vector_from_lora(p) for p in adapter_paths]
+    task_vectors = [apply_transforms(extract_task_vector_from_lora(p), spec.transforms) for p in adapter_paths]
     merged_delta = merge_adapters_uniform(task_vectors, merge_mode=merge_mode)
     metadata = build_merge_metadata(
         method="task_vector",
@@ -182,8 +182,8 @@ def _weighted_delta_in_memory(
     lambda_weight = spec.method_params.get("lambda")
     if lambda_weight is None:
         raise ValueError("weighted_delta requires lambda_weight.")
-    tv1 = extract_task_vector_from_lora(adapter_paths[0])
-    tv2 = extract_task_vector_from_lora(adapter_paths[1])
+    tv1 = apply_transforms(extract_task_vector_from_lora(adapter_paths[0]), spec.transforms)
+    tv2 = apply_transforms(extract_task_vector_from_lora(adapter_paths[1]), spec.transforms)
     merged_delta = merge_task_vectors_weighted(
         tv1,
         tv2,
@@ -223,7 +223,7 @@ def _weighted_delta_n_in_memory(
         lambda_weight=None,
         params=params,
     )
-    task_vectors = [extract_task_vector_from_lora(p) for p in adapter_paths]
+    task_vectors = [apply_transforms(extract_task_vector_from_lora(p), spec.transforms) for p in adapter_paths]
     task_coefficients = spec.method_params.get("task_coefficients")
     normalize_coefficients = bool(spec.method_params.get("normalize_coefficients", True))
     layer_task_coefficients = spec.method_params.get("layer_task_coefficients")
@@ -307,12 +307,21 @@ def _task_vector_save(
     output_path: Path,
     merge_mode: str,
     show_progress: bool,
+    params: Optional[Dict[str, object]],
 ) -> Path:
+    spec = merge_spec_from_legacy_args(
+        adapters=[str(p) for p in adapter_paths],
+        method="task_vector",
+        merge_mode=merge_mode,
+        lambda_weight=None,
+        params=params,
+    )
     merge_uniform_via_task_vectors(
         adapter_paths=adapter_paths,
         output_path=output_path,
         merge_mode=merge_mode,
         show_progress=show_progress,
+        transforms=spec.transforms,
     )
     return output_path
 

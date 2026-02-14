@@ -11,6 +11,7 @@ import torch
 from experiments.extract_vector import extract_task_vector_from_lora
 from merging.config.specs import merge_spec_from_legacy_args
 from merging.engine.registry import MergeOutput, build_merge_metadata
+from merging.plugins.transforms import apply_transforms
 
 
 TensorDict = Dict[str, torch.Tensor]
@@ -147,7 +148,7 @@ def merge_ties(
     k_percent, lambda_scale = _validate_ties_params(spec.method_params)
 
     print(f"🧮 ties: extracting task vectors for {len(adapter_paths)} adapters...")
-    task_vectors = [extract_task_vector_from_lora(path) for path in adapter_paths]
+    task_vectors = [apply_transforms(extract_task_vector_from_lora(path), spec.transforms) for path in adapter_paths]
     keys_to_merge, missing_key_count = _resolve_keys_to_merge(task_vectors, merge_mode)
     print(
         f"🧮 ties: merge_mode={merge_mode}, mergeable_keys={len(keys_to_merge)}, "

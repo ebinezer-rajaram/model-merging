@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 
 from experiments.extract_vector import extract_task_vector_from_lora
+from merging.config.specs import TransformSpec
+from merging.plugins.transforms import apply_transforms
 from merging.runtime.utils import save_merged_adapter
 
 
@@ -17,6 +19,7 @@ def merge_uniform_via_task_vectors(
     output_path: Path,
     merge_mode: str = "common",
     show_progress: bool = True,
+    transforms: Optional[List[TransformSpec]] = None,
 ) -> None:
     """Merge adapters by extracting and merging task vectors.
 
@@ -34,6 +37,8 @@ def merge_uniform_via_task_vectors(
         if show_progress:
             print(f"\n📥 Extracting task vector {i}/{len(adapter_paths)}: {adapter_path.name}")
         tv = extract_task_vector_from_lora(adapter_path)
+        if transforms:
+            tv = apply_transforms(tv, transforms)
         task_vectors.append(tv)
 
     all_keys = [set(tv.keys()) for tv in task_vectors]

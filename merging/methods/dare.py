@@ -10,6 +10,7 @@ import torch
 from experiments.extract_vector import extract_task_vector_from_lora
 from merging.config.specs import merge_spec_from_legacy_args
 from merging.engine.registry import MergeOutput, build_merge_metadata
+from merging.plugins.transforms import apply_transforms
 
 
 TensorDict = Dict[str, torch.Tensor]
@@ -178,7 +179,7 @@ def merge_dare(
         f"🧮 dare: extracting task vectors for {len(adapter_paths)} adapters "
         f"(drop_rate={drop_rate:.4f}, seed={seed})..."
     )
-    task_vectors = [extract_task_vector_from_lora(path) for path in adapter_paths]
+    task_vectors = [apply_transforms(extract_task_vector_from_lora(path), spec.transforms) for path in adapter_paths]
     sparse_vectors, sparsify_stats = sparsify_deltas(task_vectors, drop_rate=drop_rate, seed=seed)
     merged_delta, fuse_stats = fuse_deltas_uniform(sparse_vectors, merge_mode=merge_mode)
     merged_nonzero_entries = int(sum((tensor != 0).sum().item() for tensor in merged_delta.values()))

@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Mapping
 import torch
 
 from merging.config.specs import TransformSpec
+from merging.policies.lambda_policy import extract_layer_index
 
 TensorDict = Dict[str, torch.Tensor]
 TransformFn = Callable[[TensorDict, Mapping[str, object]], TensorDict]
@@ -117,6 +118,69 @@ def _ties_transform_scaffold(weights: TensorDict, params: Mapping[str, object]) 
     return dict(weights)
 
 
+def _validate_layer_l2_normalize_params(params: Mapping[str, object]) -> tuple[float, float, bool]:
+    target_norm_value = params.get("target_norm", 1.0)
+    if not isinstance(target_norm_value, (int, float)) or isinstance(target_norm_value, bool):
+        raise ValueError(
+            "layer_l2_normalize param 'target_norm' must be a float/int >= 0, "
+            f"got {type(target_norm_value).__name__}"
+        )
+    target_norm = float(target_norm_value)
+    if target_norm < 0.0:
+        raise ValueError(f"layer_l2_normalize param 'target_norm' must be >= 0, got {target_norm}")
+
+    eps_value = params.get("eps", 1e-12)
+    if not isinstance(eps_value, (int, float)) or isinstance(eps_value, bool):
+        raise ValueError(
+            "layer_l2_normalize param 'eps' must be a float/int > 0, "
+            f"got {type(eps_value).__name__}"
+        )
+    eps = float(eps_value)
+    if eps <= 0.0:
+        raise ValueError(f"layer_l2_normalize param 'eps' must be > 0, got {eps}")
+
+    include_non_layer_keys_value = params.get("include_non_layer_keys", True)
+    if not isinstance(include_non_layer_keys_value, bool):
+        raise ValueError(
+            "layer_l2_normalize param 'include_non_layer_keys' must be bool, "
+            f"got {type(include_non_layer_keys_value).__name__}"
+        )
+    include_non_layer_keys = bool(include_non_layer_keys_value)
+
+    return target_norm, eps, include_non_layer_keys
+
+
+def _layer_l2_normalize_transform(weights: TensorDict, params: Mapping[str, object]) -> TensorDict:
+    if not weights:
+        return {}
+
+    target_norm, eps, include_non_layer_keys = _validate_layer_l2_normalize_params(params)
+    bucketed_keys: Dict[int, List[str]] = {}
+    for key in weights.keys():
+        layer_idx = extract_layer_index(key)
+        if layer_idx is None:
+            if not include_non_layer_keys:
+                continue
+            layer_idx = -1
+        bucketed_keys.setdefault(int(layer_idx), []).append(key)
+
+    out: TensorDict = {key: tensor.detach().clone() for key, tensor in weights.items()}
+    for keys in bucketed_keys.values():
+        l2_sq = 0.0
+        for key in keys:
+            tensor_f32 = weights[key].detach().to(dtype=torch.float32)
+            l2_sq += float(tensor_f32.pow(2).sum().item())
+        norm = math.sqrt(l2_sq)
+        if norm <= eps:
+            continue
+        scale = target_norm / norm
+        for key in keys:
+            tensor_f32 = weights[key].detach().to(dtype=torch.float32)
+            out[key] = (tensor_f32 * scale).to(dtype=weights[key].dtype)
+
+    return out
+
+
 def register_builtin_transforms() -> None:
     if "identity" not in _TRANSFORMS:
         register_transform("identity", _identity_transform)
@@ -124,6 +188,8 @@ def register_builtin_transforms() -> None:
         register_transform("ties", _ties_transform)
     if "ties_scaffold" not in _TRANSFORMS:
         register_transform("ties_scaffold", _ties_transform_scaffold)
+    if "layer_l2_normalize" not in _TRANSFORMS:
+        register_transform("layer_l2_normalize", _layer_l2_normalize_transform)
 
 
 register_builtin_transforms()

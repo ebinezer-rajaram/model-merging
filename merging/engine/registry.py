@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, Optional, Any
+from typing import Callable, Dict, Optional, Any, Protocol
 from pathlib import Path
 
 import torch
@@ -29,6 +29,19 @@ class MergeResult:
     merge_tag: str
 
 
+class SaveFn(Protocol):
+    def __call__(
+        self,
+        *,
+        adapter_paths: list["Path"],
+        output_path: "Path",
+        merge_mode: str,
+        show_progress: bool,
+        params: Optional[Dict[str, object]],
+    ) -> "Path":
+        ...
+
+
 @dataclass(frozen=True)
 class MergeMethod:
     name: str
@@ -39,7 +52,7 @@ class MergeMethod:
     max_adapters: Optional[int]
     saveable: bool
     merge_in_memory: Callable[..., MergeOutput]
-    save_fn: Optional[Callable[..., Path]] = None
+    save_fn: Optional[SaveFn] = None
 
     def validate(
         self,

@@ -109,6 +109,14 @@ Weighted merge accepts per-key lambda resolution while preserving scalar behavio
 Transforms are pre-merge plugins run on each source adapter weight dict before method composition.
 
 - Built-in: `identity`
+- Built-in: `layer_l2_normalize`
+  - Per-layer task-vector normalization to target L2 (Frobenius) norm.
+  - Params:
+    - `target_norm` (float, default `1.0`)
+    - `eps` (float, default `1e-12`)
+    - `include_non_layer_keys` (bool, default `true`)
+  - Example:
+    - `transforms: [{name: layer_l2_normalize, params: {target_norm: 1.0}}]`
 - Scaffold hook: `ties_scaffold` (no-op placeholder for future transform experiments)
 
 ## Optimizers

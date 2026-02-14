@@ -169,6 +169,7 @@ def run_merge(
                 output_path=output_path,
                 merge_mode=merge_mode,
                 show_progress=show_progress,
+                params=effective_params,
             )
         else:
             if merge_output.merged_weights is None:
