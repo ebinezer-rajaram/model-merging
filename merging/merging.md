@@ -171,6 +171,31 @@ Canonical module: `merging.optimizers.registry`.
     - `optimizer.params.sampling.default.strategy` (`uniform|inverse|sqrt_inverse|balanced|none`)
     - optional overrides under `optimizer.params.sampling.per_task.<task>`
 
+All iterative optimizers (`adamerging`, `gradient`, `supermerge`, `regret_smoothmax`) also support optional periodic held-out selection:
+
+- `optimizer.params.heldout_eval.enabled`: enable periodic held-out evaluation (default `false`)
+- `optimizer.params.heldout_eval.split`: held-out split name (default `test`; must differ from optimizer `split`)
+- `optimizer.params.heldout_eval.frequency_updates`: run held-out eval every N optimizer updates (default `100`)
+- `optimizer.params.heldout_eval.batch_size`: eval batch size override (default optimizer `batch_size`)
+- `optimizer.params.heldout_eval.subset`: optional deterministic held-out subset mapping (`enabled|max_samples|shuffle|seed|per_task`)
+- `optimizer.params.heldout_eval.compute_missing_interference_baselines`: auto-compute missing `base_model` and `best_<task>_adapter` baselines on the held-out subset (default `true`)
+- `optimizer.params.heldout_eval.pareto.patience_evals`: stop after N held-out evals without enough hypervolume gain (default maps from optimizer patience)
+- `optimizer.params.heldout_eval.pareto.min_evals_before_stop`: minimum held-out eval count before stopping is allowed (default `1`)
+- `optimizer.params.heldout_eval.pareto.hypervolume_min_delta`: minimum Pareto hypervolume gain to reset patience (default maps from optimizer threshold)
+- `optimizer.params.heldout_eval.pareto.selection_criterion`: held-out selection score (`pareto_hypervolume` default, or `best_single_metric`, or `l2_shortfall`)
+- `optimizer.params.heldout_eval.pareto.selection_min_delta`: minimum selection-score gain to reset patience (defaults to `hypervolume_min_delta`)
+- `optimizer.params.heldout_eval.pareto.dominance_epsilon`: epsilon for Pareto dominance checks (default `0.0`)
+- `optimizer.params.heldout_eval.pareto.reference_point`: hypervolume reference point per task (default zero vector)
+- `optimizer.params.heldout_eval.restore_best_checkpoint`: restore held-out-selected best coefficients at end (defaults to optimizer restore behavior)
+
+`l2_shortfall` uses:
+
+`S(Δ) = -sqrt((1/T) * Σ_t (1 - Δ_t)^2)`
+
+Maximizing `S` is equivalent to minimizing RMS shortfall to `1`.
+
+When `heldout_eval.enabled=true`, `early_stopping_monitor` is `heldout_<selection_criterion>` and early stopping is driven by the selected held-out score instead of the in-loop training objective.
+
 ## Evaluation
 
 `merging/evaluation/evaluate.py` handles:

@@ -48,6 +48,10 @@ from merging.optimizers.core.shared_training import (
     _extract_model_loss,
     _validate_selection_split,
 )
+from merging.optimizers.core.heldout_selection import (
+    PeriodicHeldoutEvaluator,
+    resolve_heldout_eval_config,
+)
 from merging.runtime.utils import PACKAGE_ROOT, get_task_module
 
 try:
@@ -295,7 +299,25 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         )
 
     tasks = _resolve_supermerge_tasks(context, params)
+    heldout_eval_cfg = resolve_heldout_eval_config(
+        params=params,
+        tasks=tasks,
+        optimization_split=split,
+        default_batch_size=batch_size,
+        default_patience=early_stopping_patience,
+        default_threshold=early_stopping_threshold,
+        default_restore_best_checkpoint=restore_best_checkpoint,
+    )
+    heldout_enabled = bool(heldout_eval_cfg is not None and heldout_eval_cfg.enabled)
+    restore_best_checkpoint_effective = (
+        heldout_eval_cfg.restore_best_checkpoint if heldout_enabled and heldout_eval_cfg is not None else restore_best_checkpoint
+    )
     _validate_selection_split(split=split, enforce_validation_only_selection=enforce_validation_only_selection)
+    if heldout_enabled and merge_impl == "functional_clone_legacy":
+        raise ValueError(
+            "optimizer.params.heldout_eval.enabled=true does not support "
+            "optimizer.params.merge_impl='functional_clone_legacy'."
+        )
     from merging.transforms.registry import apply_transforms
     if merge_impl == "fused_lora_linear":
         if plus_plus:
@@ -511,10 +533,15 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     best_magnitude_task: Optional[torch.Tensor] = None
     best_magnitude_default: Optional[torch.Tensor] = None
     best_magnitude_layer: Optional[torch.Tensor] = None
-    early_stopping_monitor = f"rolling_ce_{rolling_window}" if rolling_window > 1 else "avg_ce_update"
+    early_stopping_monitor = (
+        (f"heldout_{heldout_eval_cfg.pareto.selection_criterion}" if heldout_enabled and heldout_eval_cfg is not None else "heldout_selection")
+        if heldout_enabled
+        else (f"rolling_ce_{rolling_window}" if rolling_window > 1 else "avg_ce_update")
+    )
     streaming_handles = []
     fused_linear_handles = []
     fused_lora_handles = []
+    heldout_evaluator: Optional[PeriodicHeldoutEvaluator] = None
     coefficient_provider = TaskCoefficientProvider()
     init_task_coeffs, init_default_coeffs, init_layer_coeffs = _merge_coeffs(
         alpha_task=alpha_task,
@@ -602,6 +629,14 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             ce_manual_task_weights=ce_manual_task_weights if isinstance(ce_manual_task_weights, Mapping) else None,
             ce_multiplier_cap=ce_multiplier_cap,
         )
+        if heldout_enabled and heldout_eval_cfg is not None:
+            heldout_evaluator = PeriodicHeldoutEvaluator(
+                model=model,
+                processor=processor,
+                tasks=tasks,
+                config=heldout_eval_cfg,
+                show_summary=True,
+            )
         step_iter: Iterable[int]
         if progress_bar and tqdm is not None:
             step_iter = tqdm(range(steps), desc="supermerge", total=steps)
@@ -780,11 +815,12 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                 rolling_ce = sum(update_ce_rolling) / float(len(update_ce_rolling))
                 monitor_ce = rolling_ce if rolling_ce is not None else update_normalized_ce
                 in_warmup = optimizer_steps_completed < early_stopping_warmup_steps
-                if best_ce is None or ((best_ce - monitor_ce) > early_stopping_threshold):
+                improved_train = best_ce is None or ((best_ce - monitor_ce) > early_stopping_threshold)
+                if improved_train:
                     best_ce = monitor_ce
                     best_selected_ce = monitor_ce
                     best_selected_update_step = optimizer_steps_completed
-                    if restore_best_checkpoint:
+                    if (not heldout_enabled) and restore_best_checkpoint_effective:
                         best_alpha_task = alpha_task.detach().clone()
                         if alpha_default is not None:
                             best_alpha_default = alpha_default.detach().clone()
@@ -796,9 +832,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                             best_magnitude_default = magnitude_default.detach().clone()
                         if magnitude_layer is not None:
                             best_magnitude_layer = magnitude_layer.detach().clone()
-                    if not in_warmup:
+                    if (not heldout_enabled) and (not in_warmup):
                         no_improve_steps = 0
-                elif not in_warmup:
+                elif (not heldout_enabled) and (not in_warmup):
                     no_improve_steps += 1
 
                 update_raw_ce_sum = 0.0
@@ -890,7 +926,69 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                                     f"num_layer_overrides={len(coeff_layers)} "
                                     "(set optimizer.params.log_layer_coefficients_full=true to print all)"
                                 )
-                if early_stopping_patience > 0 and no_improve_steps >= early_stopping_patience:
+                if heldout_evaluator is not None:
+                    def _apply_coefficients_for_eval() -> None:
+                        coeff_task_eval, coeff_default_eval, coeff_layers_eval = _merge_coeffs(
+                            alpha_task=alpha_task,
+                            alpha_default=alpha_default,
+                            alpha_layer=alpha_layer,
+                            magnitude_task=magnitude_task,
+                            magnitude_default=magnitude_default,
+                            magnitude_layer=magnitude_layer,
+                            layer_indices=layer_indices,
+                            coefficient_parameterization=coefficient_parameterization,
+                            normalize_coefficients=normalize_coefficients,
+                        )
+                        coefficient_provider.set_coefficients(
+                            task_coeffs=coeff_task_eval,
+                            default_coeffs=coeff_default_eval,
+                            layer_coeffs=coeff_layers_eval,
+                        )
+
+                    heldout_entry = heldout_evaluator.maybe_evaluate(
+                        update_step=optimizer_steps_completed,
+                        apply_coefficients_fn=_apply_coefficients_for_eval,
+                    )
+                    if heldout_entry is not None:
+                        no_improve_steps = int(heldout_entry.get("no_improve_evals", 0))
+                        print(
+                            "[supermerge][heldout] "
+                            f"update_step={optimizer_steps_completed} "
+                            f"criterion={heldout_entry['selection_criterion']} "
+                            f"score={heldout_entry['selection_score']:.6f} "
+                            f"hv={heldout_entry['hypervolume']:.6f} "
+                            f"delta_hv={heldout_entry['delta_hypervolume']:.6f} "
+                            f"frontier={heldout_entry['frontier_size']} "
+                            f"nondominated={heldout_entry['is_nondominated']}"
+                        )
+                        if (
+                            restore_best_checkpoint_effective
+                            and heldout_evaluator.best_update_step == optimizer_steps_completed
+                        ):
+                            best_alpha_task = alpha_task.detach().clone()
+                            if alpha_default is not None:
+                                best_alpha_default = alpha_default.detach().clone()
+                            if alpha_layer is not None:
+                                best_alpha_layer = alpha_layer.detach().clone()
+                            if magnitude_task is not None:
+                                best_magnitude_task = magnitude_task.detach().clone()
+                            if magnitude_default is not None:
+                                best_magnitude_default = magnitude_default.detach().clone()
+                            if magnitude_layer is not None:
+                                best_magnitude_layer = magnitude_layer.detach().clone()
+                        if bool(heldout_entry.get("should_stop", False)):
+                            print(
+                                f"[supermerge] early stopping at step {step + 1}/{steps} "
+                                f"(update_step={optimizer_steps_completed}, monitor={early_stopping_monitor}, "
+                                f"best_score={heldout_evaluator.best_score:.6f}, "
+                                f"patience_evals={heldout_eval_cfg.pareto.patience_evals if heldout_eval_cfg is not None else 0}, "
+                                f"score_min_delta={heldout_eval_cfg.pareto.selection_min_delta if heldout_eval_cfg is not None else 0.0:.2e})"
+                            )
+                            final_ce = update_raw_ce
+                            final_normalized_ce = update_normalized_ce
+                            steps_completed = step + 1
+                            break
+                elif early_stopping_patience > 0 and no_improve_steps >= early_stopping_patience:
                     if optimizer_steps_completed >= min_optimizer_steps_before_early_stop:
                         print(
                             f"[supermerge] early stopping at step {step + 1}/{steps} "
@@ -932,7 +1030,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     )
     last_task_coefficients = [float(x) for x in last_task.detach().cpu().tolist()]
     restored_best_checkpoint = False
-    if restore_best_checkpoint and best_alpha_task is not None:
+    if restore_best_checkpoint_effective and best_alpha_task is not None:
         with torch.no_grad():
             alpha_task.copy_(best_alpha_task)
             if alpha_default is not None and best_alpha_default is not None:
@@ -1049,6 +1147,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "min_optimizer_steps_before_early_stop": min_optimizer_steps_before_early_stop,
         "early_stopping_warmup_steps": early_stopping_warmup_steps,
         "restore_best_checkpoint": restore_best_checkpoint,
+        "restore_best_checkpoint_effective": restore_best_checkpoint_effective,
         "restored_best_checkpoint": restored_best_checkpoint,
         "objective": "supervised_cross_entropy",
         "exact_mode": True,
@@ -1095,6 +1194,29 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "avg_valid_label_tokens_by_task": avg_valid_label_tokens_by_task,
         "label_token_batches_by_task": dict(global_label_token_by_task_count),
         "eval_subset": dict(eval_subset) if isinstance(eval_subset, Mapping) else None,
+        "heldout_eval_enabled": heldout_enabled,
+        "heldout_eval_split": (heldout_eval_cfg.split if heldout_eval_cfg is not None else None),
+        "heldout_eval_frequency_updates": (
+            heldout_eval_cfg.frequency_updates if heldout_eval_cfg is not None else None
+        ),
+        "heldout_eval_subset": (
+            dict(heldout_eval_cfg.subset) if (heldout_eval_cfg is not None and heldout_eval_cfg.subset is not None) else None
+        ),
+        "heldout_eval_count": (len(heldout_evaluator.eval_history) if heldout_evaluator is not None else 0),
+        "heldout_eval_history": (list(heldout_evaluator.eval_history) if heldout_evaluator is not None else []),
+        "heldout_selection_criterion": (heldout_evaluator.selection_criterion if heldout_evaluator is not None else None),
+        "heldout_best_selection_score": (
+            heldout_evaluator.best_score
+            if (heldout_evaluator is not None and heldout_evaluator.best_score != float("-inf"))
+            else None
+        ),
+        "heldout_best_step": (heldout_evaluator.best_update_step if heldout_evaluator is not None else None),
+        "heldout_best_hypervolume": (
+            heldout_evaluator.best_hypervolume
+            if (heldout_evaluator is not None and heldout_evaluator.best_hypervolume != float("-inf"))
+            else None
+        ),
+        "heldout_early_stopped": (heldout_evaluator.early_stopped if heldout_evaluator is not None else False),
     }
     if magnitude_task is not None:
         provenance["final_task_magnitude"] = _to_floats_checked("final_task_magnitude", magnitude_task)

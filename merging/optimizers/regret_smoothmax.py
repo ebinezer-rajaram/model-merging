@@ -39,6 +39,10 @@ from merging.optimizers.core.common import (
     _to_streaming_entries,
 )
 from merging.optimizers.registry import OptimizerContext, OptimizerResult
+from merging.optimizers.core.heldout_selection import (
+    PeriodicHeldoutEvaluator,
+    resolve_heldout_eval_config,
+)
 from merging.runtime.utils import PACKAGE_ROOT, get_task_module
 
 try:
@@ -250,6 +254,29 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         )
     if delta_residency not in {"cpu_stream", "gpu_cache"}:
         raise ValueError("optimizer.params.delta_residency must be one of: cpu_stream|gpu_cache.")
+    heldout_eval_cfg = resolve_heldout_eval_config(
+        params=params,
+        tasks=tasks,
+        optimization_split=split,
+        default_batch_size=batch_size,
+        default_patience=0,
+        default_threshold=0.0,
+        default_restore_best_checkpoint=True,
+    )
+    heldout_enabled = bool(heldout_eval_cfg is not None and heldout_eval_cfg.enabled)
+    restore_best_checkpoint_effective = bool(
+        heldout_eval_cfg.restore_best_checkpoint if heldout_eval_cfg is not None else True
+    )
+    if heldout_enabled and merge_impl == "functional_clone_legacy":
+        raise ValueError(
+            "optimizer.params.heldout_eval.enabled=true does not support "
+            "optimizer.params.merge_impl='functional_clone_legacy'."
+        )
+    heldout_monitor = (
+        f"heldout_{heldout_eval_cfg.pareto.selection_criterion}"
+        if heldout_enabled and heldout_eval_cfg is not None
+        else "best_j"
+    )
 
     from merging.transforms.registry import apply_transforms
 
@@ -409,10 +436,13 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
     best_j: Optional[float] = None
     best_step = 0
     best_u = u.detach().clone()
+    heldout_best_u: Optional[torch.Tensor] = None
     final_j: Optional[float] = None
     steps_completed = 0
+    no_improve_evals = 0
     fixed_base_losses: Dict[str, float] = {}
     fixed_best_losses: Dict[str, float] = {}
+    heldout_evaluator: Optional[PeriodicHeldoutEvaluator] = None
 
     try:
         fixed_base_losses = _compute_fixed_losses(
@@ -451,6 +481,14 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
             mode="best",
             num_adapters=num_adapters,
         )
+        if heldout_enabled and heldout_eval_cfg is not None:
+            heldout_evaluator = PeriodicHeldoutEvaluator(
+                model=model,
+                processor=processor,
+                tasks=tasks,
+                config=heldout_eval_cfg,
+                show_summary=True,
+            )
 
         step_iter: Iterable[int]
         if progress_bar and tqdm is not None:
@@ -567,6 +605,43 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
                 best_step = step + 1
                 best_u = u.detach().clone()
 
+            if heldout_evaluator is not None:
+                def _apply_coefficients_for_eval() -> None:
+                    lambdas_eval = torch.softmax(u.detach(), dim=0)
+                    coefficient_provider.set_coefficients(
+                        task_coeffs=lambdas_eval,
+                        default_coeffs=None,
+                        layer_coeffs={},
+                    )
+
+                heldout_entry = heldout_evaluator.maybe_evaluate(
+                    update_step=steps_completed,
+                    apply_coefficients_fn=_apply_coefficients_for_eval,
+                )
+                if heldout_entry is not None:
+                    no_improve_evals = int(heldout_entry.get("no_improve_evals", 0))
+                    print(
+                        "[regret_smoothmax][heldout] "
+                        f"update_step={steps_completed} "
+                        f"criterion={heldout_entry['selection_criterion']} "
+                        f"score={heldout_entry['selection_score']:.6f} "
+                        f"hv={heldout_entry['hypervolume']:.6f} "
+                        f"delta_hv={heldout_entry['delta_hypervolume']:.6f} "
+                        f"frontier={heldout_entry['frontier_size']} "
+                        f"nondominated={heldout_entry['is_nondominated']}"
+                    )
+                    if heldout_evaluator.best_update_step == steps_completed:
+                        heldout_best_u = u.detach().clone()
+                    if bool(heldout_entry.get("should_stop", False)):
+                        print(
+                            f"[regret_smoothmax] early stopping at step {step + 1}/{steps} "
+                            f"(update_step={steps_completed}, monitor={heldout_monitor}, "
+                            f"best_score={heldout_evaluator.best_score:.6f}, "
+                            f"patience_evals={heldout_eval_cfg.pareto.patience_evals if heldout_eval_cfg is not None else 0}, "
+                            f"score_min_delta={heldout_eval_cfg.pareto.selection_min_delta if heldout_eval_cfg is not None else 0.0:.2e})"
+                        )
+                        break
+
             if logging_steps > 0 and (((step + 1) % logging_steps) == 0 or ((step + 1) == steps)):
                 lambda_values = [float(x) for x in torch.softmax(u.detach(), dim=0).cpu().tolist()]
                 print(
@@ -586,8 +661,14 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         if fused_lora_handles:
             unregister_fused_lora_linear_modules(fused_lora_handles)
 
-    with torch.no_grad():
-        u.copy_(best_u)
+    restored_best_checkpoint = False
+    target_u = best_u
+    if heldout_enabled and heldout_best_u is not None:
+        target_u = heldout_best_u
+    if restore_best_checkpoint_effective:
+        with torch.no_grad():
+            u.copy_(target_u)
+        restored_best_checkpoint = True
     final_lambda = [float(x) for x in torch.softmax(u.detach(), dim=0).cpu().tolist()]
     final_u = [float(x) for x in u.detach().cpu().tolist()]
 
@@ -609,6 +690,7 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         "tau": tau,
         "regret_eps": regret_eps,
         "baseline_batches": baseline_batches,
+        "early_stopping_monitor": heldout_monitor,
         "merge_impl": merge_impl,
         "delta_residency": delta_residency,
         "dtype_compute": dtype_compute,
@@ -631,12 +713,38 @@ def run_regret_smoothmax_optimizer(spec: MergeSpec, context: OptimizerContext) -
         "best_j": best_j,
         "best_step": best_step,
         "final_j": final_j,
+        "restore_best_checkpoint_effective": restore_best_checkpoint_effective,
+        "restored_best_checkpoint": restored_best_checkpoint,
         "final_task_coefficients": final_lambda,
         "final_logits_u": final_u,
         "num_adapters": num_adapters,
         "num_delta_entries": len(delta_entries),
         "num_lora_entries": len(lora_entries),
         "eval_subset": dict(eval_subset) if isinstance(eval_subset, Mapping) else None,
+        "heldout_eval_enabled": heldout_enabled,
+        "heldout_eval_split": (heldout_eval_cfg.split if heldout_eval_cfg is not None else None),
+        "heldout_eval_frequency_updates": (
+            heldout_eval_cfg.frequency_updates if heldout_eval_cfg is not None else None
+        ),
+        "heldout_eval_subset": (
+            dict(heldout_eval_cfg.subset) if (heldout_eval_cfg is not None and heldout_eval_cfg.subset is not None) else None
+        ),
+        "heldout_eval_count": (len(heldout_evaluator.eval_history) if heldout_evaluator is not None else 0),
+        "heldout_eval_history": (list(heldout_evaluator.eval_history) if heldout_evaluator is not None else []),
+        "heldout_selection_criterion": (heldout_evaluator.selection_criterion if heldout_evaluator is not None else None),
+        "heldout_best_selection_score": (
+            heldout_evaluator.best_score
+            if (heldout_evaluator is not None and heldout_evaluator.best_score != float("-inf"))
+            else None
+        ),
+        "heldout_best_step": (heldout_evaluator.best_update_step if heldout_evaluator is not None else None),
+        "heldout_best_hypervolume": (
+            heldout_evaluator.best_hypervolume
+            if (heldout_evaluator is not None and heldout_evaluator.best_hypervolume != float("-inf"))
+            else None
+        ),
+        "heldout_early_stopped": (heldout_evaluator.early_stopped if heldout_evaluator is not None else False),
+        "heldout_no_improve_evals": no_improve_evals,
         "elapsed_sec": time.time() - t0,
         "objective": "tau_logsumexp_headroom_normalized_regret",
     }

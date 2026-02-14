@@ -43,6 +43,10 @@ from merging.optimizers.core.common import (
     _to_streaming_entries,
 )
 from merging.optimizers.registry import OptimizerContext, OptimizerResult
+from merging.optimizers.core.heldout_selection import (
+    PeriodicHeldoutEvaluator,
+    resolve_heldout_eval_config,
+)
 from merging.runtime.utils import get_task_module, PACKAGE_ROOT
 
 try:
@@ -257,6 +261,24 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         )
 
     tasks = _resolve_eval_tasks(context, params)
+    heldout_eval_cfg = resolve_heldout_eval_config(
+        params=params,
+        tasks=tasks,
+        optimization_split=split,
+        default_batch_size=batch_size,
+        default_patience=early_stopping_patience,
+        default_threshold=early_stopping_threshold,
+        default_restore_best_checkpoint=False,
+    )
+    heldout_enabled = bool(heldout_eval_cfg is not None and heldout_eval_cfg.enabled)
+    restore_best_checkpoint_effective = bool(
+        heldout_eval_cfg.restore_best_checkpoint if heldout_eval_cfg is not None else False
+    )
+    if heldout_enabled and merge_impl == "functional_clone_legacy":
+        raise ValueError(
+            "optimizer.params.heldout_eval.enabled=true does not support "
+            "optimizer.params.merge_impl='functional_clone_legacy'."
+        )
     from merging.transforms.registry import apply_transforms
     if merge_impl == "fused_lora_linear":
         if plus_plus:
@@ -427,13 +449,21 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     update_entropy_rolling: List[float] = []
     rolling_entropy: Optional[float] = None
     early_stopping_monitor = (
-        f"rolling_entropy_{entropy_rolling_window}"
-        if entropy_rolling_window > 1
-        else "avg_entropy_update"
+        (f"heldout_{heldout_eval_cfg.pareto.selection_criterion}" if heldout_enabled and heldout_eval_cfg is not None else "heldout_selection")
+        if heldout_enabled
+        else (
+            f"rolling_entropy_{entropy_rolling_window}"
+            if entropy_rolling_window > 1
+            else "avg_entropy_update"
+        )
     )
+    best_alpha_task: Optional[torch.Tensor] = None
+    best_alpha_default: Optional[torch.Tensor] = None
+    best_alpha_layer: Optional[torch.Tensor] = None
     streaming_handles = []
     fused_linear_handles = []
     fused_lora_handles = []
+    heldout_evaluator: Optional[PeriodicHeldoutEvaluator] = None
     coefficient_provider = TaskCoefficientProvider()
     # Parametrization registration performs an immediate forward pass; seed
     # coefficients upfront so streaming mode is valid before the first step.
@@ -475,6 +505,14 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             dtype_compute=dtype_compute,
         )
     try:
+        if heldout_enabled and heldout_eval_cfg is not None:
+            heldout_evaluator = PeriodicHeldoutEvaluator(
+                model=model,
+                processor=processor,
+                tasks=tasks,
+                config=heldout_eval_cfg,
+                show_summary=True,
+            )
         step_iter: Iterable[int]
         if progress_bar and tqdm is not None:
             step_iter = tqdm(range(steps), desc="AdaMerging", total=steps)
@@ -668,10 +706,12 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                 update_label_token_by_task_sum = {task: 0.0 for task in tasks}
                 update_label_token_by_task_count = {task: 0 for task in tasks}
                 monitor_entropy = rolling_entropy if rolling_entropy is not None else update_entropy
-                if best_entropy is None or ((best_entropy - monitor_entropy) > early_stopping_threshold):
+                improved_train = best_entropy is None or ((best_entropy - monitor_entropy) > early_stopping_threshold)
+                if improved_train:
                     best_entropy = monitor_entropy
-                    no_improve_steps = 0
-                else:
+                    if (not heldout_enabled):
+                        no_improve_steps = 0
+                elif not heldout_enabled:
                     no_improve_steps += 1
                 if logging_steps > 0 and (
                     (optimizer_steps_completed % logging_steps) == 0 or (step + 1) == steps
@@ -742,7 +782,59 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                         f"entropy_max={debug_entropy_max:.6f} "
                         f"pmax_mean={debug_pmax:.6f}"
                     )
-                if early_stopping_patience > 0 and no_improve_steps >= early_stopping_patience:
+                if heldout_evaluator is not None:
+                    def _apply_coefficients_for_eval() -> None:
+                        coeff_task_eval, coeff_default_eval, coeff_layers_eval = _merge_coeffs(
+                            alpha_task=alpha_task,
+                            alpha_default=alpha_default,
+                            alpha_layer=alpha_layer,
+                            layer_indices=layer_indices,
+                            coefficient_parameterization=coefficient_parameterization,
+                            normalize_coefficients=normalize_coefficients,
+                        )
+                        coefficient_provider.set_coefficients(
+                            task_coeffs=coeff_task_eval,
+                            default_coeffs=coeff_default_eval,
+                            layer_coeffs=coeff_layers_eval,
+                        )
+
+                    heldout_entry = heldout_evaluator.maybe_evaluate(
+                        update_step=optimizer_steps_completed,
+                        apply_coefficients_fn=_apply_coefficients_for_eval,
+                    )
+                    if heldout_entry is not None:
+                        no_improve_steps = int(heldout_entry.get("no_improve_evals", 0))
+                        print(
+                            "[AdaMerging][heldout] "
+                            f"update_step={optimizer_steps_completed} "
+                            f"criterion={heldout_entry['selection_criterion']} "
+                            f"score={heldout_entry['selection_score']:.6f} "
+                            f"hv={heldout_entry['hypervolume']:.6f} "
+                            f"delta_hv={heldout_entry['delta_hypervolume']:.6f} "
+                            f"frontier={heldout_entry['frontier_size']} "
+                            f"nondominated={heldout_entry['is_nondominated']}"
+                        )
+                        if (
+                            restore_best_checkpoint_effective
+                            and heldout_evaluator.best_update_step == optimizer_steps_completed
+                        ):
+                            best_alpha_task = alpha_task.detach().clone()
+                            if alpha_default is not None:
+                                best_alpha_default = alpha_default.detach().clone()
+                            if alpha_layer is not None:
+                                best_alpha_layer = alpha_layer.detach().clone()
+                        if bool(heldout_entry.get("should_stop", False)):
+                            print(
+                                f"[AdaMerging] early stopping at step {step + 1}/{steps} "
+                                f"(update_step={optimizer_steps_completed}, monitor={early_stopping_monitor}, "
+                                f"best_score={heldout_evaluator.best_score:.6f}, "
+                                f"patience_evals={heldout_eval_cfg.pareto.patience_evals if heldout_eval_cfg is not None else 0}, "
+                                f"score_min_delta={heldout_eval_cfg.pareto.selection_min_delta if heldout_eval_cfg is not None else 0.0:.2e})"
+                            )
+                            final_entropy = update_entropy
+                            steps_completed = step + 1
+                            break
+                elif early_stopping_patience > 0 and no_improve_steps >= early_stopping_patience:
                     print(
                         f"[AdaMerging] early stopping at step {step + 1}/{steps} "
                         f"(update_step={optimizer_steps_completed}, monitor={early_stopping_monitor}, "
@@ -765,6 +857,16 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             unregister_fused_linear_modules(fused_linear_handles)
         if fused_lora_handles:
             unregister_fused_lora_linear_modules(fused_lora_handles)
+
+    restored_best_checkpoint = False
+    if restore_best_checkpoint_effective and best_alpha_task is not None:
+        with torch.no_grad():
+            alpha_task.copy_(best_alpha_task)
+            if alpha_default is not None and best_alpha_default is not None:
+                alpha_default.copy_(best_alpha_default)
+            if alpha_layer is not None and best_alpha_layer is not None:
+                alpha_layer.copy_(best_alpha_layer)
+        restored_best_checkpoint = True
 
     task_out, default_out, layer_out = _merge_coeffs(
         alpha_task=alpha_task,
@@ -856,6 +958,8 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "gradient_accumulation_steps": gradient_accumulation_steps,
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_threshold": early_stopping_threshold,
+        "restore_best_checkpoint_effective": restore_best_checkpoint_effective,
+        "restored_best_checkpoint": restored_best_checkpoint,
         "objective": "entropy_minimization",
         "plus_plus": plus_plus,
         "plus_plus_k": plus_plus_k,
@@ -881,6 +985,29 @@ def run_adamerging_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "avg_valid_label_tokens_by_task": avg_valid_label_tokens_by_task,
         "label_token_batches_by_task": dict(global_label_token_by_task_count),
         "eval_subset": dict(eval_subset) if isinstance(eval_subset, Mapping) else None,
+        "heldout_eval_enabled": heldout_enabled,
+        "heldout_eval_split": (heldout_eval_cfg.split if heldout_eval_cfg is not None else None),
+        "heldout_eval_frequency_updates": (
+            heldout_eval_cfg.frequency_updates if heldout_eval_cfg is not None else None
+        ),
+        "heldout_eval_subset": (
+            dict(heldout_eval_cfg.subset) if (heldout_eval_cfg is not None and heldout_eval_cfg.subset is not None) else None
+        ),
+        "heldout_eval_count": (len(heldout_evaluator.eval_history) if heldout_evaluator is not None else 0),
+        "heldout_eval_history": (list(heldout_evaluator.eval_history) if heldout_evaluator is not None else []),
+        "heldout_selection_criterion": (heldout_evaluator.selection_criterion if heldout_evaluator is not None else None),
+        "heldout_best_selection_score": (
+            heldout_evaluator.best_score
+            if (heldout_evaluator is not None and heldout_evaluator.best_score != float("-inf"))
+            else None
+        ),
+        "heldout_best_step": (heldout_evaluator.best_update_step if heldout_evaluator is not None else None),
+        "heldout_best_hypervolume": (
+            heldout_evaluator.best_hypervolume
+            if (heldout_evaluator is not None and heldout_evaluator.best_hypervolume != float("-inf"))
+            else None
+        ),
+        "heldout_early_stopped": (heldout_evaluator.early_stopped if heldout_evaluator is not None else False),
     }
     if variant == "layer_wise":
         provenance["num_layers"] = len(layer_indices)
