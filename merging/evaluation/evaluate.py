@@ -30,6 +30,7 @@ from merging.evaluation.interference import (
     maybe_add_interference_delta,
     maybe_compute_interference_baselines,
 )
+from merging.optimizers.core.heldout_reporting import export_heldout_tracking_artifacts
 
 
 def _get_optimizer_bool_param(
@@ -307,6 +308,11 @@ def evaluate_merged_adapter(
             merge_metadata_path = output_path / "merge_metadata.json"
             with merge_metadata_path.open("w") as handle:
                 json.dump(metadata, handle, indent=2)
+            export_heldout_tracking_artifacts(
+                metadata=metadata,
+                output_dir=output_path,
+                show_summary=show_summary,
+            )
             run_suffix = f"__{eval_tag}" if eval_tag else ""
             run_results_path = output_path / f"eval_results_{split}{run_suffix}.json"
             with run_results_path.open("w") as handle:
@@ -447,6 +453,11 @@ def evaluate_merged_adapter(
             metadata=metadata,
             summary=summary,
             run_path=merged_run_path,
+        )
+        export_heldout_tracking_artifacts(
+            metadata=metadata,
+            output_dir=merged_run_path,
+            show_summary=show_summary,
         )
 
     return results

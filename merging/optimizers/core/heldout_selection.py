@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -138,11 +139,25 @@ def resolve_heldout_eval_config(
         "l2_shortfall": "l2_shortfall",
         "rms_shortfall": "l2_shortfall",
         "l2_rms_shortfall": "l2_shortfall",
+        "min_interference_delta": "min_interference_delta",
+        "min_interference": "min_interference_delta",
+        "min_delta": "min_interference_delta",
+        "arithmetic_mean_interference_delta": "arithmetic_mean_interference_delta",
+        "mean_interference_delta": "arithmetic_mean_interference_delta",
+        "arithmetic_mean_interference": "arithmetic_mean_interference_delta",
+        "mean_interference": "arithmetic_mean_interference_delta",
+        "mean_delta": "arithmetic_mean_interference_delta",
+        "geometric_mean_interference_delta": "geometric_mean_interference_delta",
+        "geomean_interference_delta": "geometric_mean_interference_delta",
+        "geometric_mean_interference": "geometric_mean_interference_delta",
+        "geomean_interference": "geometric_mean_interference_delta",
+        "gmean_interference": "geometric_mean_interference_delta",
     }
     if selection_criterion not in criterion_aliases:
         raise ValueError(
             "optimizer.params.heldout_eval.pareto.selection_criterion must be one of: "
-            "pareto_hypervolume|best_single_metric|l2_shortfall."
+            "pareto_hypervolume|best_single_metric|l2_shortfall|min_interference_delta|"
+            "arithmetic_mean_interference_delta|geometric_mean_interference_delta."
         )
     selection_criterion = criterion_aliases[selection_criterion]
 
@@ -280,6 +295,19 @@ class PeriodicHeldoutEvaluator:
             # S(Δ) = -sqrt(mean_t max(0, 1 - Δ_t)^2); maximize S <=> minimize RMS shortfall.
             sq = [(max(0.0, 1.0 - float(v))) ** 2 for v in vector]
             return float(-(sum(sq) / float(len(sq))) ** 0.5)
+        if criterion == "min_interference_delta":
+            return float(min(vector)) if vector else float("-inf")
+        if criterion == "arithmetic_mean_interference_delta":
+            return float(sum(float(v) for v in vector) / float(len(vector))) if vector else float("-inf")
+        if criterion == "geometric_mean_interference_delta":
+            if not vector:
+                return float("-inf")
+            vals = [float(v) for v in vector]
+            if any(v < 0.0 for v in vals):
+                return float("-inf")
+            if any(v == 0.0 for v in vals):
+                return 0.0
+            return float(math.exp(sum(math.log(v) for v in vals) / float(len(vals))))
         raise ValueError(f"Unsupported held-out selection criterion '{criterion}'.")
 
     def _build_setups(self) -> Dict[str, Any]:
@@ -386,6 +414,21 @@ class PeriodicHeldoutEvaluator:
                 )
             vector.append(float(value))
 
+        min_interference_delta = float(min(vector)) if vector else None
+        arithmetic_mean_interference_delta = (
+            float(sum(vector) / float(len(vector))) if vector else None
+        )
+        if not vector:
+            geometric_mean_interference_delta = None
+        elif any(v < 0.0 for v in vector):
+            geometric_mean_interference_delta = None
+        elif any(v == 0.0 for v in vector):
+            geometric_mean_interference_delta = 0.0
+        else:
+            geometric_mean_interference_delta = float(
+                math.exp(sum(math.log(float(v)) for v in vector) / float(len(vector)))
+            )
+
         is_nondominated = self._insert_frontier_point(vector)
         hv = _compute_hypervolume(self.frontier, self.config.pareto.reference_point)
         hv_delta = hv - self.best_hypervolume if self.best_hypervolume != float("-inf") else hv
@@ -422,6 +465,9 @@ class PeriodicHeldoutEvaluator:
             "delta_selection_score": float(score_delta),
             "best_selection_score": float(self.best_score),
             "best_single_metric": best_single_metric,
+            "min_interference_delta": min_interference_delta,
+            "arithmetic_mean_interference_delta": arithmetic_mean_interference_delta,
+            "geometric_mean_interference_delta": geometric_mean_interference_delta,
             "l2_shortfall_score": l2_shortfall_score,
         }
         self.eval_history.append(eval_entry)

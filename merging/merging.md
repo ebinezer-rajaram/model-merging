@@ -182,7 +182,7 @@ All iterative optimizers (`adamerging`, `gradient`, `supermerge`, `regret_smooth
 - `optimizer.params.heldout_eval.pareto.patience_evals`: stop after N held-out evals without enough hypervolume gain (default maps from optimizer patience)
 - `optimizer.params.heldout_eval.pareto.min_evals_before_stop`: minimum held-out eval count before stopping is allowed (default `1`)
 - `optimizer.params.heldout_eval.pareto.hypervolume_min_delta`: minimum Pareto hypervolume gain to reset patience (default maps from optimizer threshold)
-- `optimizer.params.heldout_eval.pareto.selection_criterion`: held-out selection score (`pareto_hypervolume` default, or `best_single_metric`, or `l2_shortfall`)
+- `optimizer.params.heldout_eval.pareto.selection_criterion`: held-out selection score (`pareto_hypervolume` default, `best_single_metric`, `l2_shortfall`, `min_interference_delta`, `arithmetic_mean_interference_delta`, or `geometric_mean_interference_delta`)
 - `optimizer.params.heldout_eval.pareto.selection_min_delta`: minimum selection-score gain to reset patience (defaults to `hypervolume_min_delta`)
 - `optimizer.params.heldout_eval.pareto.dominance_epsilon`: epsilon for Pareto dominance checks (default `0.0`)
 - `optimizer.params.heldout_eval.pareto.reference_point`: hypervolume reference point per task (default zero vector)
@@ -196,6 +196,10 @@ All iterative optimizers (`adamerging`, `gradient`, `supermerge`, `regret_smooth
 Maximizing `S` is equivalent to minimizing clipped RMS shortfall to `1` (values above `1` are not penalized).
 
 When `heldout_eval.enabled=true`, `early_stopping_monitor` is `heldout_<selection_criterion>` and early stopping is driven by the selected held-out score instead of the in-loop training objective.
+
+When held-out evaluation history exists, merge run bundles automatically export:
+- `heldout_metrics_history.csv` (all tracked metrics in one table)
+- one plot per metric: min interference, arithmetic mean interference, geometric mean interference, hypervolume, and L2 shortfall.
 
 Recommended split policy:
 - keep `split=test` for final reporting only
