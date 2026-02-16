@@ -205,7 +205,13 @@ def _setup_common_components(
     }
 
 
-def _truncate_eval_dataset(full_eval_ds, max_eval_samples: Optional[int], seed: Optional[int] = None, shuffle: bool = False):
+def _truncate_eval_dataset(
+    full_eval_ds,
+    max_eval_samples: Optional[int],
+    seed: Optional[int] = None,
+    shuffle: bool = False,
+    return_indices: bool = False,
+):
     """Truncate evaluation dataset if max_eval_samples is specified.
 
     Args:
@@ -215,6 +221,8 @@ def _truncate_eval_dataset(full_eval_ds, max_eval_samples: Optional[int], seed: 
         shuffle: If True, randomly sample instead of taking first N samples
     """
     if max_eval_samples is None:
+        if return_indices:
+            return full_eval_ds, None
         return full_eval_ds
 
     max_eval_samples = int(max(0, max_eval_samples))
@@ -232,10 +240,39 @@ def _truncate_eval_dataset(full_eval_ds, max_eval_samples: Optional[int], seed: 
             print(f"🔍 Validation randomly sampled to {len(truncated)} samples (seed={seed}).")
         else:
             # Sequential sampling (first N samples)
+            selected_indices = list(range(max_eval_samples))
             truncated = full_eval_ds.select(range(max_eval_samples))
             print(f"🔍 Validation truncated to {len(truncated)} samples for faster eval.")
+        if return_indices:
+            return truncated, selected_indices
         return truncated
+    if return_indices:
+        return full_eval_ds, None
     return full_eval_ds
+
+
+def _reindex_reference_answers(
+    reference_answers: Sequence[Sequence[str]],
+    selected_indices: Optional[Sequence[int]],
+    expected_length: int,
+) -> list[list[str]]:
+    """Align reference answers with selected evaluation indices."""
+    base = list(reference_answers or [])
+    if selected_indices is None:
+        aligned = [list(answer) for answer in base[:expected_length]]
+    else:
+        aligned = []
+        for idx in selected_indices:
+            idx_int = int(idx)
+            if 0 <= idx_int < len(base):
+                aligned.append(list(base[idx_int]))
+            else:
+                aligned.append([])
+    if len(aligned) < expected_length:
+        aligned.extend([[] for _ in range(expected_length - len(aligned))])
+    elif len(aligned) > expected_length:
+        aligned = aligned[:expected_length]
+    return aligned
 
 
 def _filter_by_duration(
@@ -339,6 +376,8 @@ SPEECH_QA_LOADER_KEYS: Tuple[str, ...] = (
     "max_train_samples",
     "max_validation_samples",
     "max_test_samples",
+    "max_duration",
+    "min_duration",
     "audio_column",
     "question_column",
     "transcript_column",
@@ -1260,18 +1299,18 @@ def run_speech_qa_task(config_path: Path) -> None:
 
     max_eval_samples = training_cfg.get('max_eval_samples')
     shuffle_eval = training_cfg.get("shuffle_eval_subset", False)
-    eval_ds_for_trainer = _truncate_eval_dataset(
+    eval_ds_for_trainer, eval_selected_indices = _truncate_eval_dataset(
         eval_ds_full,
         max_eval_samples,
         seed=seed,
-        shuffle=shuffle_eval
+        shuffle=shuffle_eval,
+        return_indices=True,
     )
-
-    # Truncate answers to match truncated dataset
-    if max_eval_samples is not None and len(eval_ds_for_trainer) < len(eval_ds_full):
-        eval_answers_for_trainer = eval_answers_full[:len(eval_ds_for_trainer)]
-    else:
-        eval_answers_for_trainer = eval_answers_full
+    eval_answers_for_trainer = _reindex_reference_answers(
+        eval_answers_full,
+        eval_selected_indices,
+        len(eval_ds_for_trainer),
+    )
 
     target_sr = getattr(getattr(processor, 'feature_extractor', None), 'sampling_rate', 16000)
     collator = SpeechQACollator(

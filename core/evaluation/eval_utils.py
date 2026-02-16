@@ -64,6 +64,8 @@ SPEECH_QA_EVAL_KEYS: Tuple[str, ...] = (
     "max_train_samples",
     "max_validation_samples",
     "max_test_samples",
+    "max_duration",
+    "min_duration",
     "audio_column",
     "question_column",
     "transcript_column",
@@ -119,6 +121,7 @@ class TaskEvalSetup:
     data_collator: Callable[[Any], Dict[str, Any]]
     compute_metrics: Callable[[Any], Dict[str, float]]
     label_names: Optional[List[str]] = None  # For classification tasks (confusion matrix)
+    apply_subset_indices: Optional[Callable[[Sequence[int]], None]] = None
 
 
 @dataclass
@@ -605,6 +608,8 @@ def _build_generic_eval_setup(
         if key in metrics_cfg:
             metrics_kwargs[key] = metrics_cfg[key]
 
+    apply_subset_indices: Optional[Callable[[Sequence[int]], None]] = None
+
     # Handle Speech QA special case with answers_map
     if answers_map is not None:
         answers_list = list(answers_map.get(normalized_split, []))
@@ -614,20 +619,27 @@ def _build_generic_eval_setup(
                 answers_list = answers_list[: len(dataset)]
             else:
                 answers_list.extend([[] for _ in range(len(dataset) - len(answers_list))])
-        metrics_kwargs["reference_answers"] = answers_list
+        reference_store = {"values": answers_list}
 
-    # Use partial or closure for metrics
-    if "reference_answers" in metrics_kwargs:
-        # Speech QA case: use closure to capture reference_answers
-        ref_answers = metrics_kwargs.pop("reference_answers")
+        def _apply_subset_indices(indices: Sequence[int]) -> None:
+            selected: List[List[str]] = []
+            for idx in indices:
+                idx_int = int(idx)
+                if 0 <= idx_int < len(answers_list):
+                    selected.append(list(answers_list[idx_int]))
+                else:
+                    selected.append([])
+            reference_store["values"] = selected
+
+        apply_subset_indices = _apply_subset_indices
 
         def metrics_fn(eval_pred: Any) -> Dict[str, float]:
             return task_config.compute_metrics_fn(
-                eval_pred, **metrics_kwargs, reference_answers=ref_answers
+                eval_pred,
+                **metrics_kwargs,
+                reference_answers=reference_store["values"],
             )
-
     else:
-        # Standard case: use partial
         metrics_fn = partial(task_config.compute_metrics_fn, **metrics_kwargs)
 
     return TaskEvalSetup(
@@ -635,6 +647,7 @@ def _build_generic_eval_setup(
         data_collator=collator,
         compute_metrics=metrics_fn,
         label_names=label_names,
+        apply_subset_indices=apply_subset_indices,
     )
 
 

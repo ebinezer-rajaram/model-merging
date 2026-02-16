@@ -1,3 +1,13 @@
 """Task definitions for speech merging."""
 
-__all__ = ["asr", "emotion", "speaker_id", "intent", "speech_qa", "st"]
+__all__ = [
+    "asr",
+    "emotion",
+    "intent",
+    "kws",
+    "langid",
+    "speaker_id",
+    "speaker_ver",
+    "speech_qa",
+    "st",
+]

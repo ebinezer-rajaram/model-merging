@@ -668,6 +668,8 @@ def evaluate(
                             },
                         )
                 eval_setup.dataset = eval_setup.dataset.select(selected_indices)
+                if eval_setup.apply_subset_indices is not None:
+                    eval_setup.apply_subset_indices(selected_indices)
 
         # Enable prediction storage if confusion matrix is requested
         store_predictions = generate_confusion_matrix and eval_setup.label_names is not None
