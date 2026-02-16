@@ -96,7 +96,11 @@ def _optimizer_run_tag(extra_params: Optional[Dict]) -> Optional[str]:
 
 def _is_run_dir(path: Path) -> bool:
     """Check if a path looks like a merged adapter run directory."""
-    return (path / "adapter_model.safetensors").exists() or (path / "adapter_config.json").exists()
+    return (
+        (path / "adapter_model.safetensors").exists()
+        or (path / "adapter_config.json").exists()
+        or (path / "merge_metadata.json").exists()
+    )
 
 
 def _select_run_dir(path: Path, run_id: Optional[str] = None) -> Path:

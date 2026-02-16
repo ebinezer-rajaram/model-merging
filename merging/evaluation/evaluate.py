@@ -33,6 +33,27 @@ from merging.evaluation.interference import (
 from merging.optimizers.core.heldout_reporting import export_heldout_tracking_artifacts
 
 
+def _has_saved_adapter_files(path: Path) -> bool:
+    return (path / "adapter_model.safetensors").exists() and (path / "adapter_config.json").exists()
+
+
+def _prepare_replay_params_from_metadata(params: Mapping[str, Any]) -> Dict[str, Any]:
+    """Prepare method params for replaying a prior merge without rerunning an optimizer."""
+    replay = dict(params)
+    optimizer = replay.get("optimizer")
+    if isinstance(optimizer, Mapping):
+        optimizer_type = str(optimizer.get("type", "none")).strip().lower()
+        if optimizer_type != "none":
+            replay["optimizer"] = {
+                "type": "none",
+                "params": {
+                    "replay_from_merge_metadata": True,
+                    "original_optimizer_type": optimizer_type,
+                },
+            }
+    return replay
+
+
 def _get_optimizer_bool_param(
     params: Optional[Dict[str, object]],
     key: str,
@@ -363,6 +384,60 @@ def evaluate_merged_adapter(
     tasks_to_eval = eval_tasks or source_tasks
     if not tasks_to_eval:
         raise ValueError("No evaluation tasks provided or inferred for merged adapter.")
+
+    # In-memory-only methods (e.g., weighted_delta_n + supermerge) may still have a
+    # run bundle with merge_metadata.json but no saved adapter weights.
+    if not _has_saved_adapter_files(merged_run_path):
+        if not isinstance(metadata.get("params"), Mapping):
+            raise ValueError(
+                f"No saved adapter found at {merged_run_path}, and merge metadata does not include replayable params."
+            )
+
+        replay_method = method or metadata.get("merge_method")
+        if not isinstance(replay_method, str) or not replay_method:
+            raise ValueError("Could not infer merge method from metadata for in-memory replay.")
+
+        source_adapters = metadata.get("source_adapters")
+        replay_adapter_specs: List[str] = []
+        if isinstance(source_adapters, list):
+            for entry in source_adapters:
+                if isinstance(entry, Mapping):
+                    path_raw = entry.get("path")
+                    if isinstance(path_raw, str) and path_raw.strip():
+                        replay_adapter_specs.append(path_raw.strip())
+        if not replay_adapter_specs:
+            replay_adapter_specs = list(source_tasks or task_names or [])
+        if not replay_adapter_specs:
+            raise ValueError(
+                "Could not infer source adapters from merge metadata. "
+                "Provide --tasks (or evaluate from a run that includes source_adapters paths)."
+            )
+
+        replay_params = _prepare_replay_params_from_metadata(metadata["params"])
+        replay_merge_mode = str(metadata.get("merge_mode", merge_mode))
+        if show_summary:
+            print(
+                "\nℹ️  No saved adapter weights found. "
+                "Replaying merged evaluation in-memory using params from merge_metadata.json."
+            )
+
+        return evaluate_merged_adapter(
+            adapter_path=None,
+            method=replay_method,
+            task_names=replay_adapter_specs,
+            params=replay_params,
+            eval_tasks=tasks_to_eval,
+            split=split,
+            batch_size=batch_size,
+            enable_cache=enable_cache,
+            generate_confusion_matrix=generate_confusion_matrix,
+            save_merged=save_merged,
+            save_results=save_results,
+            show_summary=show_summary,
+            merge_mode=replay_merge_mode,
+            compute_missing_interference_baselines=compute_missing_interference_baselines,
+            eval_subset=eval_subset,
+        )
 
     merge_tag = build_merge_tag(metadata, source_tasks or task_names)
 
