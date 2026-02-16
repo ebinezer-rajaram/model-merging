@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from experiments.extract_vector import extract_task_vector_from_lora
+from merging.runtime.task_vectors import extract_task_vector_from_lora
 from merging.policies.lambda_policy import build_lambda_policy
 from merging.methods.task_vector import merge_uniform_via_task_vectors
 from merging.engine.registry import MergeMethod, MergeOutput, build_merge_metadata, register_merge_method

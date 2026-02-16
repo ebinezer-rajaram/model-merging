@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from core import load_config, prepare_task_for_evaluation, run_evaluation
-from experiments.evaluate_task import _prepare_dataset_cache
+from core.evaluation.evaluate_task import prepare_dataset_cache
 from merging.evaluation.interference import (
     compute_eval_tag_from_subset,
     maybe_add_interference_delta,
@@ -317,7 +317,7 @@ class PeriodicHeldoutEvaluator:
             config_path = task_module.get_config_path(PACKAGE_ROOT, None)
             config = load_config(config_path)
             artifact_dirs = task_module.get_artifact_directories(PACKAGE_ROOT)
-            config = _prepare_dataset_cache(config, artifact_dirs)
+            config = prepare_dataset_cache(config, artifact_dirs)
             setup = prepare_task_for_evaluation(task, self.processor, split=self.config.split, config=config)
             setup.dataset = _maybe_subset_dataset(
                 setup.dataset,

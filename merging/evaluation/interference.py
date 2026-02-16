@@ -110,7 +110,7 @@ def maybe_compute_interference_baselines(
     """Ensure baseline metrics exist for computing interference_delta."""
     # Import lazily to avoid pulling in heavyweight deps for call sites
     # that only want to read or post-process metrics.
-    from experiments.evaluate_task import evaluate
+    from core.evaluation.evaluate_task import evaluate
 
     eval_tag = compute_eval_tag_from_subset(eval_subset)
     for task in tasks:

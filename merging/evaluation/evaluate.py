@@ -115,7 +115,7 @@ def evaluate_merged_adapter(
     eval_subset: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict]:
     """Evaluate a merged adapter on one or more tasks."""
-    from experiments.evaluate_task import evaluate
+    from core.evaluation.evaluate_task import evaluate
 
     results: Dict[str, Dict] = {}
     eval_tag: Optional[str] = None
@@ -652,7 +652,7 @@ def _evaluate_saved_merged(
     show_summary: bool,
     eval_subset: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict]:
-    from experiments.evaluate_task import evaluate
+    from core.evaluation.evaluate_task import evaluate
 
     results: Dict[str, Dict] = {}
     source_tasks = infer_merged_source_tasks(metadata)

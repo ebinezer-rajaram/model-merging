@@ -4,8 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from experiments import evaluate_task
-from experiments.train_task import main as train_task_main
+import core.evaluation.evaluate_task as evaluate_task
+from core.training.train_task import main as train_task_main
 
 
 def parse_args() -> argparse.Namespace:
@@ -327,7 +327,7 @@ def dispatch_evaluate(args: argparse.Namespace) -> None:
 
 def dispatch_evaluate_merged(args: argparse.Namespace) -> None:
     """Invoke the merged evaluation workflow."""
-    from experiments.evaluate_merged import evaluate_from_args
+    from merging.evaluation.cli import evaluate_from_args
 
     evaluate_from_args(args)
 

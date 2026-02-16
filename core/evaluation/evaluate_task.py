@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import json
 import os
 import random
@@ -13,10 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any
 
-CURRENT_DIR = Path(__file__).resolve().parent
-PACKAGE_ROOT = CURRENT_DIR.parent
-if str(PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_ROOT))
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 from core import (
     compute_base_cache_path,
@@ -227,7 +223,7 @@ def _resolve_adapter_path(
     return path, trained_on_task
 
 
-def _get_model_path(config: Dict, task: str) -> Path:
+def get_model_path(config: Dict, task: str) -> Path:
     """Resolve the model checkpoint path from configuration."""
     model_cfg = config.get("model", {})
     model_rel = model_cfg.get("path", "data/models/Qwen2.5-Omni-3B")
@@ -251,7 +247,7 @@ def _resolve_batch_size(args: argparse.Namespace, config: Dict) -> int:
     return int(training_cfg.get("per_device_eval_batch_size", 4))
 
 
-def _prepare_dataset_cache(config: Dict, artifact_dirs: Dict[str, Path]) -> Dict:
+def prepare_dataset_cache(config: Dict, artifact_dirs: Dict[str, Path]) -> Dict:
     """Ensure dataset cache directories resolve relative to the artifact root."""
     dataset_cfg = config.setdefault("dataset", {})
     cache_dir = dataset_cfg.get("cache_dir")
@@ -263,6 +259,11 @@ def _prepare_dataset_cache(config: Dict, artifact_dirs: Dict[str, Path]) -> Dict
         cache_path = ensure_dir(artifact_dirs["datasets"])
     dataset_cfg["cache_dir"] = cache_path
     return config
+
+
+# Temporary compatibility aliases for in-repo transition.
+_get_model_path = get_model_path
+_prepare_dataset_cache = prepare_dataset_cache
 
 
 def _json_default(value: Any) -> str:
@@ -471,9 +472,9 @@ def evaluate(
     # Load config if not already loaded (for ST, it's already loaded above)
     if task != ST_TASK_NAME:
         config = load_config(config_path)
-    config = _prepare_dataset_cache(config, artifact_dirs)
+    config = prepare_dataset_cache(config, artifact_dirs)
 
-    model_path = _get_model_path(config, task)
+    model_path = get_model_path(config, task)
     adapter_path, detected_trained_on_task = _resolve_adapter_path(adapter, run_id, trained_on_task)
     if delta_weights is not None and adapter_path is not None:
         raise ValueError("delta_weights cannot be used with adapter_path.")

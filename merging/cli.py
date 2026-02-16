@@ -79,16 +79,16 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 Examples:
   # Uniform merging (equal weighting)
-  python experiments/merge_vectors.py --adapters asr emotion --method uniform --evaluate
+  python main.py merge --adapters asr emotion --method uniform --evaluate
 
   # Weighted merging with lambda=0.7 (70% asr, 30% emotion)
-  python experiments/merge_vectors.py --adapters asr emotion --method weighted --lambda 0.7
+  python main.py merge --adapters asr emotion --method weighted --lambda 0.7
 
   # Task vector merging (works with different LoRA ranks)
-  python experiments/merge_vectors.py --adapters asr emotion intent --method task_vector
+  python main.py merge --adapters asr emotion intent --method task_vector
 
   # Custom output path
-  python experiments/merge_vectors.py --adapters asr emotion --output artifacts/my_merge
+  python main.py merge --adapters asr emotion --output artifacts/my_merge
         """,
     )
     parser.add_argument(

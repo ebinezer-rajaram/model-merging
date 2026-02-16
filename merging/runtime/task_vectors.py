@@ -137,12 +137,12 @@ def main() -> None:
 
     adapter_path = Path(args.adapter).expanduser()
     if not adapter_path.is_absolute():
-        package_root = Path(__file__).resolve().parent.parent
+        package_root = Path(__file__).resolve().parents[2]
         adapter_path = package_root / adapter_path
 
     output_path = Path(args.output).expanduser()
     if not output_path.is_absolute():
-        package_root = Path(__file__).resolve().parent.parent
+        package_root = Path(__file__).resolve().parents[2]
         output_path = package_root / output_path
 
     print(f"🔍 Extracting task vector from: {adapter_path}")

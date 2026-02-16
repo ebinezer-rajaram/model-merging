@@ -10,8 +10,8 @@ import torch
 
 from core import load_config, set_global_seed
 from core.evaluation.eval_utils import load_model_and_processor
-from experiments.evaluate_task import _get_model_path, _prepare_dataset_cache
-from experiments.extract_vector import extract_task_vector_from_lora
+from core.evaluation.evaluate_task import get_model_path, prepare_dataset_cache
+from merging.runtime.task_vectors import extract_task_vector_from_lora
 from merging.config.specs import MergeSpec
 from merging.optimizers.core.streaming import (
     TaskCoefficientProvider,
@@ -352,8 +352,8 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     first_config_path = first_task_module.get_config_path(PACKAGE_ROOT, None)
     first_config = load_config(first_config_path)
     first_artifacts = first_task_module.get_artifact_directories(PACKAGE_ROOT)
-    first_config = _prepare_dataset_cache(first_config, first_artifacts)
-    model_path = _get_model_path(first_config, tasks[0])
+    first_config = prepare_dataset_cache(first_config, first_artifacts)
+    model_path = get_model_path(first_config, tasks[0])
     if force_cpu:
         model, processor = load_model_and_processor(
             model_path,

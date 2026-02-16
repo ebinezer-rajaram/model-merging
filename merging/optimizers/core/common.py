@@ -16,7 +16,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from core import load_config, prepare_task_for_evaluation
-from experiments.evaluate_task import _prepare_dataset_cache
+from core.evaluation.evaluate_task import prepare_dataset_cache
 from merging.optimizers.core.streaming import StreamingDeltaEntry, StreamingLoraEntry
 from merging.optimizers.registry import OptimizerContext
 from merging.policies.lambda_policy import extract_layer_index
@@ -493,7 +493,7 @@ def _build_task_loader(
     config_path = task_module.get_config_path(PACKAGE_ROOT, None)
     config = load_config(config_path)
     artifact_dirs = task_module.get_artifact_directories(PACKAGE_ROOT)
-    config = _prepare_dataset_cache(config, artifact_dirs)
+    config = prepare_dataset_cache(config, artifact_dirs)
     setup = prepare_task_for_evaluation(task, processor, split=split, config=config)
     setup.dataset = _maybe_subset_dataset(setup.dataset, task=task, eval_subset=eval_subset)
     resolved_sampling = _resolve_sampling_for_task(task=task, sampling=sampling)

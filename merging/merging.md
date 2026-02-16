@@ -10,7 +10,7 @@ This package implements a modular framework for merging LoRA adapters, evaluatin
 4. **Evaluate merged adapter** on one or more tasks
 5. **Record outputs** into unified directories (run bundle + eval index)
 
-The canonical CLI entrypoint is `main.py`. Legacy CLI is `experiments/merge_vectors.py` (shim).
+The canonical CLI entrypoint is `main.py`.
 
 ## Package Structure
 

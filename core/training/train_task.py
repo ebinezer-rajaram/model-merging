@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import sys
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -13,10 +12,7 @@ from transformers import EarlyStoppingCallback
 
 torch.set_float32_matmul_precision("high")
 
-CURRENT_DIR = Path(__file__).resolve().parent
-PACKAGE_ROOT = CURRENT_DIR.parent
-if str(PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_ROOT))
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 from core import (
     BalancedBatchSampler,
