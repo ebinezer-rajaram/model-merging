@@ -66,6 +66,7 @@ artifacts_old/
 # Analysis: track code/docs, ignore generated outputs
 analysis/plots/
 analysis/results/
+analysis/evaluation/
 analysis/scripts/__pycache__/
 
 # ML model/checkpoint binaries and arrays
