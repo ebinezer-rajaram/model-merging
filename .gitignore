@@ -5,23 +5,24 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Python cache
+# Python/runtime caches
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.ipynb_checkpoints
 
-# Virtual envs
+# Virtual environments
 venv/
 env/
 ENV/
 .venv/
 
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-
-# Build artifacts
+# Build/distribution artifacts
 build/
 dist/
 *.egg-info/
@@ -29,35 +30,46 @@ dist/
 *.manifest
 *.spec
 
-# Logs
-logs/
+# Runtime/log outputs
 *.log
 *.out
 *.err
 nohup.out
 
-# Data files
-data/
-datasets/
-*.csv
-*.tsv
-*.json
-*.xlsx
-*.zip
-*.gz
-*.tar
-*.tar.gz
-*.h5
-*.hdf5
-*.pkl
-*.pickle
-*.joblib
-*.npy
-*.npz
+# Experiment output directories (keep placeholders)
+logs/**
+!logs/.gitkeep
+!logs/README.md
 
-# Model artifacts
+runs/**
+!runs/.gitkeep
+!runs/README.md
+
+artifacts/**
+!artifacts/.gitkeep
+!artifacts/README.md
+
+data/**
+!data/.gitkeep
+!data/README.md
+
+datasets/
+results/
+outputs/
+plots/
+artifacts_old/
+**/wandb/
+**/mlruns/
+**/tensorboard/
+**/lightning_logs/
+
+# Analysis: track code/docs, ignore generated outputs
+analysis/plots/
+analysis/results/
+analysis/scripts/__pycache__/
+
+# ML model/checkpoint binaries and arrays
 adapters/
-artifacts/
 checkpoints/
 checkpoints*/
 models/
@@ -70,6 +82,13 @@ models/
 *.pb
 *.tflite
 *.weights
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.joblib
 
 # Trainer/optimizer state
 trainer_state.json
@@ -78,38 +97,16 @@ optimizer.pt
 scheduler.pt
 rng_state.pth
 
-# Experiment outputs
-runs/
-results/
-outputs/
-wandb/
-mlruns/
-tensorboard/
-lightning_logs/
-analysis/
-plots/
-artifacts_old/
-docs/
-
-# Env/config
+# Env/secrets
 .env
 .env.*
-*.yml
-*.yaml
-!configs/*.yml
-!configs/*.yaml
 
-# Temp/cache
+# Temp/system
 .cache/
 tmp/
 temp/
 *.tmp
 *.bak
 *.old
-
-# System
 *.pid
 *.sock
-
-# Other
-*.png
