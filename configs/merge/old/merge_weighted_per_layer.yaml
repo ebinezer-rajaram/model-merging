@@ -1,0 +1,16 @@
+adapters: [asr, emotion]
+method: weighted
+merge_mode: common
+method_params:
+  # Scalar fallback for compatibility and output tags.
+  lambda: 0.5
+lambda_policy:
+  type: per_layer
+  default: 0.5
+  overrides:
+    0: 0.8
+    1: 0.7
+    2: 0.6
+transforms:
+  - name: identity
+    params: {}

@@ -1,0 +1,9 @@
+adapters: [emotion, intent, kws, langid]
+method: dare
+merge_mode: common
+method_params:
+  drop_rate: 0.9
+  seed: 42
+transforms:
+  - name: identity
+    params: {}

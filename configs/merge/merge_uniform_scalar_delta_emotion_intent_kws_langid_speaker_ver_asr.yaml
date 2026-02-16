@@ -1,0 +1,28 @@
+adapters: [emotion, intent, kws, langid, speaker_ver, asr]
+method: uniform_scalar_delta
+merge_mode: common
+
+search:
+  type: bayes
+  budget: 20
+  init_points: 6
+  inject_zero_baseline: true
+  initial_points: [{scale: 0.25}, {scale: 0.5}, {scale: 0.75}, {scale: 1.0}, {scale: 1.25}, {scale: 1.5}]
+  seed: 42
+  space:
+    scale:
+      type: float
+      min: 0.0
+      max: 1.5
+
+eval_subset:
+  enabled: true
+  seed: 0
+  shuffle: true
+  stratified: true
+  max_samples: 1000
+
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr]
+split: validation
+save_merged: false
+constraint_nonnegative: false

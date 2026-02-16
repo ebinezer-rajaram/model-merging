@@ -31,7 +31,7 @@ dataset:
   seed: 0
   num_proc: auto
   cache_splits: true
-  force_rebuild: true              # Force rebuild to ensure we get fresh data
+  force_rebuild: false              # Force rebuild to ensure we get fresh data
   # Sample limits
   total_pairs: 20000                  # Total number of pairs (50/50 pos/neg) across all splits
   max_train_samples: null
@@ -93,9 +93,9 @@ training:
   initial_eval: true
   # Checkpointing
   save_total_limit: 3
-  resume_from_checkpoint: auto        # Options: null (start fresh), "auto" (detect latest), or explicit path
+  resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
-  early_stopping_patience: 10
+  early_stopping_patience: 5
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1  # Binary classification: use accuracy

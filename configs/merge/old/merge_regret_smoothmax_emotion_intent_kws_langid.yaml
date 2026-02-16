@@ -1,0 +1,55 @@
+adapters: [emotion, intent, kws, langid]
+method: weighted_delta_n
+merge_mode: common
+
+optimizer:
+  type: regret_smoothmax
+  params:
+    tasks: [emotion, intent, kws, langid]
+    split: validation
+    steps: 1000
+    batch_size: 1
+    lr: 1.0e-4
+    betas: [0.9, 0.999]
+    tau: 0.1
+    regret_eps: 1.0e-4
+    baseline_batches: 64
+    ce_ignore_index: -100
+    init_mode: uniform
+    merge_impl: fused_linear
+    delta_residency: gpu_cache
+    model_dtype: bf16
+    dtype_compute: bf16
+    task_vector_dtype: bf16
+    gradient_checkpointing: true
+    allow_tf32: true
+    use_autocast: true
+    progress_bar: true
+    logging_steps: 10
+    dataloader_num_workers: 8
+    dataloader_pin_memory: true
+    non_blocking_transfer: true
+    sampling:
+      default:
+        enabled: false
+        strategy: sqrt_inverse
+      per_task:
+        emotion:
+          enabled: true
+          strategy: sqrt_inverse
+        intent:
+          enabled: true
+          strategy: sqrt_inverse
+        kws:
+          enabled: false
+        langid:
+          enabled: false
+
+search:
+  type: grid
+  grid: {}
+
+eval_tasks: [emotion, intent, kws, langid]
+split: test
+save_merged: false
+constraint_nonnegative: true

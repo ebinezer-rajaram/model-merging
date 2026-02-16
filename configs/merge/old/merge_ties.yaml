@@ -1,0 +1,9 @@
+adapters: [asr, emotion]
+method: ties
+merge_mode: common
+method_params:
+  k: 20
+  lambda: 1.0
+transforms:
+  - name: identity
+    params: {}

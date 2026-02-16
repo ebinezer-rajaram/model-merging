@@ -1,0 +1,60 @@
+adapters: [emotion, intent, kws, langid]
+method: weighted_delta_n
+merge_mode: common
+
+optimizer:
+  type: gradient
+  params:
+    variant: task_wise          # or layer_wise
+    task_scope: classification
+    tasks: [emotion, intent, kws, langid]
+    split: validation
+    steps: 1000
+    batch_size: 1
+    lr: 3.0e-4
+    init_lambda: 0.25
+    coefficient_parameterization: projected_lambda
+    project_coefficients: true
+    coefficient_min: 0.0
+    coefficient_max: 1.0
+    normalize_coefficients: false   
+    merge_impl: fused_linear
+    delta_residency: gpu_cache
+    model_dtype: bf16
+    dtype_compute: bf16
+    task_vector_dtype: bf16
+    gradient_checkpointing: true
+    allow_tf32: true
+    empty_cache_interval: 0
+    progress_bar: true
+    logging_steps: 1
+    entropy_rolling_window: 20
+    dataloader_num_workers: 8
+    dataloader_pin_memory: true
+    non_blocking_transfer: true
+    gradient_accumulation_steps: 1
+    restore_best_checkpoint: false
+    early_stopping_patience: 80
+    early_stopping_threshold: 5.0e-4
+    min_optimizer_steps_before_early_stop: 120
+    early_stopping_warmup_steps: 80
+    enforce_validation_only_selection: true
+    ce_ignore_index: -100
+    ce_label_smoothing: 0.0
+    ce_reduction: mean
+    ce_task_weighting: baseline_normalized
+    ce_baseline_source: single_task_eval
+    ce_baseline_floor: 0.1
+    ce_baseline_batches: 128
+    ce_multiplier_cap: 2.5
+    save_metadata_pre_eval: true
+    print_coefficients_pre_eval: true
+
+search:
+  type: grid
+  grid: {}
+
+eval_tasks: [emotion, intent, kws, langid]
+split: test
+save_merged: false
+constraint_nonnegative: true

@@ -2,7 +2,7 @@
 
 task: st
 seed: 0
-language: en_de                       # Language pair (affects prompts and artifact directories). Format: {source_lang}_{target_lang}
+language: en_ar                     # Language pair (affects prompts and artifact directories). Format: {source_lang}_{target_lang}
 
 # Model Configuration
 model:
@@ -76,7 +76,7 @@ training:
   save_total_limit: 4
   resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
-  early_stopping_patience: 10
+  early_stopping_patience: 3
   early_stopping_threshold: 0       # BLEU improvement threshold
   load_best_model_at_end: true
   metric_for_best_model: bleu

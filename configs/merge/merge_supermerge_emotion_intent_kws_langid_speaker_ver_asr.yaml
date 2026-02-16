@@ -1,0 +1,88 @@
+adapters: [emotion, intent, kws, langid, speaker_ver, asr]
+method: weighted_delta_n
+merge_mode: common
+
+optimizer:
+  type: supermerge
+  params:
+    variant: layer_wise
+    tasks: [emotion, intent, kws, langid, speaker_ver, asr]
+    split: train
+    steps: 8000
+    batch_size: 4
+    seed: 0
+    lr: 1.0e-3
+    init_lambda: 0.25
+    coefficient_parameterization: simplex_softmax_scaled
+    magnitude_scope: per_layer
+    magnitude_parameterization: linear
+    magnitude_init: 3.906        # with 6 tasks, simplex starts at 1/6 each, so 3.444 gives ~0.651 per task (matching prior 4-task per-task init)
+    normalize_coefficients: false
+    betas: [0.9, 0.99]
+    merge_impl: fused_lora_linear
+    delta_residency: gpu_cache
+    model_dtype: bf16
+    dtype_compute: bf16
+    task_vector_dtype: bf16
+    gradient_checkpointing: true
+    zero_dropout: true
+    allow_tf32: true
+    empty_cache_interval: 0
+    progress_bar: true
+    logging_steps: 50
+    log_label_token_stats: false
+    log_alpha_grad_stats: false
+    log_coefficients_during_training: true
+    log_layer_coefficients_full: true
+    entropy_rolling_window: 4
+    dataloader_num_workers: 8
+    dataloader_pin_memory: true
+    non_blocking_transfer: true
+    gradient_accumulation_steps: 2
+    restore_best_checkpoint: false
+    early_stopping_patience: 0
+    early_stopping_threshold: 5.0e-4
+    min_optimizer_steps_before_early_stop: 120
+    early_stopping_warmup_steps: 80
+    enforce_validation_only_selection: false
+    heldout_eval:
+      enabled: true
+      split: validation
+      frequency_updates: 200
+      subset:
+        enabled: true
+        max_samples: 500
+        stratified: true
+        stratify_by: label
+        shuffle: false
+        seed: 0
+      compute_missing_interference_baselines: true
+      pareto:
+        selection_criterion: geometric_mean_interference_delta
+        patience_evals: 5
+        min_evals_before_stop: 5
+        hypervolume_min_delta: 0.01
+        selection_min_delta: 0.005
+        dominance_epsilon: 0.02
+      restore_best_checkpoint: true
+    ce_use_model_loss: true
+    ce_ignore_index: -100
+    ce_label_smoothing: 0.0
+    ce_reduction: mean
+    ce_task_weighting: equal
+    ce_baseline_source: single_task_eval
+    ce_baseline_floor: 1.0e-6
+    ce_baseline_batches: 64
+    hierarchical:
+      enabled: false
+      strategy: breadth_first
+      grouping: task_similarity
+
+search:
+  type: grid
+  grid: {}
+
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr]
+split: test
+save_merged: false
+constraint_nonnegative: false

@@ -31,10 +31,10 @@ dataset:
   seed: 0
   num_proc: auto
   cache_splits: true
-  force_rebuild: false
+  force_rebuild: true
   # Sample limits
   max_speakers: 500                   # Select top 100 speakers by sample count
-  max_samples_per_speaker: 40        # Limit to 200 utterances per speaker
+  max_samples_per_speaker: 100        # Limit to 200 utterances per speaker
   max_train_samples: null
   max_validation_samples: null
   max_test_samples: null
@@ -72,9 +72,9 @@ loss:
 # Training Configuration
 training:
   # Compute & batching
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 2
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 24
+  gradient_accumulation_steps: 4
   bf16: true
   fp16: false
   gradient_checkpointing: true
@@ -87,17 +87,17 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   # Schedule
-  num_train_epochs: 3
+  num_train_epochs: 5
   eval_strategy: steps
-  eval_steps: 100
+  eval_steps: 250
   save_strategy: steps
-  save_steps: 100
+  save_steps: 250
   initial_eval: true
   # Checkpointing
   save_total_limit: 3
-  resume_from_checkpoint: auto        # Options: null (start fresh), "auto" (detect latest), or explicit path
+  resume_from_checkpoint: null        # Options: null (start fresh), "auto" (detect latest), or explicit path
   # Early stopping
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   early_stopping_threshold: 0.001
   load_best_model_at_end: true
   metric_for_best_model: eval_macro_f1

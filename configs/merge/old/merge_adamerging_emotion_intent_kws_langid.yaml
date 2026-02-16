@@ -1,0 +1,53 @@
+adapters: [emotion, intent, kws, langid]
+method: weighted_delta_n
+merge_mode: common
+
+optimizer:
+  type: adamerging
+  params:
+    variant: task_wise          # or layer_wise
+    task_scope: classification
+    tasks: [emotion, intent, kws, langid]
+    split: validation                 # paper-style unlabeled test-time entropy minimization
+    steps: 2000                  # start small, then increase
+    batch_size: 1
+    seed: 0
+    lr: 0.001
+    init_lambda: 0.3
+    coefficient_parameterization: projected_lambda
+    project_coefficients: true
+    coefficient_min: 0.0
+    coefficient_max: 1.0
+    normalize_coefficients: false
+    merge_impl: fused_linear
+    delta_residency: gpu_cache
+    model_dtype: bf16
+    dtype_compute: bf16
+    task_vector_dtype: bf16
+    gradient_checkpointing: true
+    allow_tf32: true
+    empty_cache_interval: 0
+    progress_bar: true
+    logging_steps: 1
+    entropy_rolling_window: 5
+    dataloader_num_workers: 8
+    dataloader_pin_memory: true
+    non_blocking_transfer: true
+    gradient_accumulation_steps: 10
+    early_stopping_patience: 0
+    early_stopping_threshold: 1.0e-3
+    entropy_temperature: 1.5
+    entropy_chunk_size: 4096
+    entropy_debug_stats: false
+    entropy_debug_steps: 1
+    save_metadata_pre_eval: true
+    print_coefficients_pre_eval: true
+
+search:
+  type: grid
+  grid: {}                      # single run (no hyperparam sweep)
+
+eval_tasks: [emotion, intent, kws, langid]
+split: test
+save_merged: false
+constraint_nonnegative: true
