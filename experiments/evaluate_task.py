@@ -598,16 +598,21 @@ def evaluate(
                             selected_indices = list(cached.get("indices", []))
                 if selected_indices is None:
                     label_column: Optional[str] = None
-                    if subset_stratified:
+                    use_stratified = bool(subset_stratified)
+                    if use_stratified:
                         label_column = subset_label_column or dataset_cfg.get("label_column")
                         if not label_column:
                             label_column = "label"
                         if label_column not in eval_setup.dataset.column_names and "label" in eval_setup.dataset.column_names:
                             label_column = "label"
                         if label_column not in eval_setup.dataset.column_names:
-                            raise ValueError(
-                                "eval_subset stratified requires a valid label_column in config or eval_subset."
+                            use_stratified = False
+                            label_column = None
+                            print(
+                                f"⚠️  eval_subset stratified requested for {task}/{split} "
+                                "but no valid label_column was found; falling back to non-stratified selection."
                             )
+                    if use_stratified:
                         labels = list(eval_setup.dataset[label_column])
                         by_label: Dict[Any, list[int]] = defaultdict(list)
                         for idx, label in enumerate(labels):
@@ -651,7 +656,7 @@ def evaluate(
                             "max_samples": max_eval_samples,
                             "shuffle": subset_shuffle,
                             "seed": subset_seed,
-                            "stratified": subset_stratified,
+                            "stratified": use_stratified,
                         }
                         if label_column is not None:
                             metadata["label_column"] = label_column

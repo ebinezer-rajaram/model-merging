@@ -515,9 +515,12 @@ def _build_generic_eval_setup(
         "force_rebuild": dataset_cfg.get("force_rebuild", False),
     }
 
-    # Add task-specific config keys
+    # Add task-specific config keys.
+    #
+    # Preserve explicit `null` overrides from task configs (YAML -> None). Some
+    # loaders treat None as "use full dataset" and rely on receiving the key.
     for key in task_config.loader_config_keys:
-        if key in dataset_cfg and dataset_cfg[key] is not None:
+        if key in dataset_cfg:
             loader_kwargs[key] = dataset_cfg[key]
 
     # Special handling for ST task: map top-level 'language' to 'dataset_config'
@@ -724,9 +727,10 @@ def _get_asr_task_config() -> TaskConfig:
 
     # ASR has special loader args that need defaults
     def _asr_loader_wrapper(**kwargs):
-        # Set ASR-specific defaults
-        kwargs.setdefault("train_hours", 10.0)
-        kwargs.setdefault("val_hours", 1.0)
+        # Keep ASR aligned with other loaders: omitted caps mean full split.
+        # Use explicit values in config when bounded subsets are desired.
+        kwargs.setdefault("train_hours", None)
+        kwargs.setdefault("val_hours", None)
         kwargs.setdefault("return_full_validation", True)
         kwargs.setdefault("return_test_split", True)
         kwargs.setdefault("test_split", "test.clean")
