@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
+import logging
 import warnings
 
 import torch
@@ -20,6 +21,31 @@ DEFAULT_LORA_TARGET_MODULES = [
     "fc1",
     "fc2",
 ]
+
+
+_SUPPRESSED_LOG_SNIPPETS = (
+    "System prompt modified, audio output may not work as expected.",
+    "Audio output mode only works when using default system prompt",
+)
+
+
+class _QwenAudioOutputWarningFilter(logging.Filter):
+    """Suppress known non-actionable Qwen audio-output warning spam."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(snippet in message for snippet in _SUPPRESSED_LOG_SNIPPETS)
+
+
+_LOG_FILTER_INSTALLED = False
+
+
+def _install_qwen_log_filter_once() -> None:
+    global _LOG_FILTER_INSTALLED
+    if _LOG_FILTER_INSTALLED:
+        return
+    logging.getLogger().addFilter(_QwenAudioOutputWarningFilter())
+    _LOG_FILTER_INSTALLED = True
 
 
 def create_lora_config_from_dict(lora_dict: Dict[str, Any]) -> LoraConfig:
@@ -89,6 +115,7 @@ def load_qwen_model(
     Qwen2_5OmniProcessor,
 ]:
     """Load a Qwen Omni model and optionally attach a LoRA adapter."""
+    _install_qwen_log_filter_once()
     processor = Qwen2_5OmniProcessor.from_pretrained(str(model_path), use_fast=use_fast_tokenizer)
 
     tokenizer = getattr(processor, "tokenizer", None)

@@ -61,9 +61,19 @@ SPEAKER_EXTRA_EVAL_KEYS: Tuple[str, ...] = (
 SPEECH_QA_EVAL_KEYS: Tuple[str, ...] = (
     "dataset_name",
     "dataset_config",
+    "data_dir",
+    "train_json",
+    "test_json",
+    "audio_root",
+    "noisy_test_variant",
+    "min_wavs_per_split",
+    "max_missing_audio_rate",
+    "allow_train_only_fallback",
+    "audio_merge_policy",
     "max_train_samples",
     "max_validation_samples",
     "max_test_samples",
+    "max_total_samples",
     "max_duration",
     "min_duration",
     "audio_column",
@@ -604,7 +614,7 @@ def _build_generic_eval_setup(
 
     # Add config-specific metric parameters (e.g., wer_normalization for ASR)
     metrics_cfg = cfg.get("metrics", {})
-    for key in ("wer_normalization",):
+    for key in ("wer_normalization", "debug_eval_dump_samples", "debug_eval_dump_path"):
         if key in metrics_cfg:
             metrics_kwargs[key] = metrics_cfg[key]
 
@@ -613,23 +623,37 @@ def _build_generic_eval_setup(
     # Handle Speech QA special case with answers_map
     if answers_map is not None:
         answers_list = list(answers_map.get(normalized_split, []))
+        ids_list = [str(value) for value in dataset["id"]] if "id" in dataset.column_names else []
+        questions_list = [str(value) for value in dataset["question"]] if "question" in dataset.column_names else []
         # Align answers_list length with dataset
         if len(answers_list) != len(dataset):
             if len(answers_list) > len(dataset):
                 answers_list = answers_list[: len(dataset)]
             else:
                 answers_list.extend([[] for _ in range(len(dataset) - len(answers_list))])
-        reference_store = {"values": answers_list}
+        if len(ids_list) < len(dataset):
+            ids_list.extend(["" for _ in range(len(dataset) - len(ids_list))])
+        if len(questions_list) < len(dataset):
+            questions_list.extend(["" for _ in range(len(dataset) - len(questions_list))])
+        reference_store = {"values": answers_list, "ids": ids_list, "questions": questions_list}
 
         def _apply_subset_indices(indices: Sequence[int]) -> None:
             selected: List[List[str]] = []
+            selected_ids: List[str] = []
+            selected_questions: List[str] = []
             for idx in indices:
                 idx_int = int(idx)
                 if 0 <= idx_int < len(answers_list):
                     selected.append(list(answers_list[idx_int]))
+                    selected_ids.append(ids_list[idx_int])
+                    selected_questions.append(questions_list[idx_int])
                 else:
                     selected.append([])
+                    selected_ids.append("")
+                    selected_questions.append("")
             reference_store["values"] = selected
+            reference_store["ids"] = selected_ids
+            reference_store["questions"] = selected_questions
 
         apply_subset_indices = _apply_subset_indices
 
@@ -638,6 +662,11 @@ def _build_generic_eval_setup(
                 eval_pred,
                 **metrics_kwargs,
                 reference_answers=reference_store["values"],
+                reference_ids=reference_store.get("ids"),
+                reference_questions=reference_store.get("questions"),
+                audit_samples=int(metrics_kwargs.get("debug_eval_dump_samples", 0)),
+                audit_dump_path=metrics_kwargs.get("debug_eval_dump_path"),
+                split_name=normalized_split,
             )
     else:
         metrics_fn = partial(task_config.compute_metrics_fn, **metrics_kwargs)

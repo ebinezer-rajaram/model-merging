@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from datasets import Dataset
 
@@ -205,6 +206,7 @@ def run_training_with_evaluation(
     confusion_matrix_normalize: bool = True,
     label_names: Optional[List[str]] = None,
     resume_from_checkpoint: Optional[str] = None,
+    initial_eval_callback: Optional[Callable[[CustomTrainer], Dict[str, Any]]] = None,
 ) -> None:
     """Execute training loop with optional initial eval, training, final eval, and artifact saving.
 
@@ -227,11 +229,15 @@ def run_training_with_evaluation(
         resume_from_checkpoint: Optional checkpoint path to resume from
     """
     seed_history_rows: List[Dict[str, Any]] = []
+    runtime_metadata = (config or {}).get("runtime_metadata", {}) if config is not None else {}
 
     # Optional initial evaluation
     if initial_eval:
         print("🧪 Running initial evaluation before training...")
-        initial_metrics = trainer.evaluate()
+        if initial_eval_callback is not None:
+            initial_metrics = initial_eval_callback(trainer)
+        else:
+            initial_metrics = trainer.evaluate()
         if isinstance(initial_metrics, dict) and initial_metrics:
             scalar_metrics = {
                 key: value
@@ -264,7 +270,15 @@ def run_training_with_evaluation(
 
     # Final evaluation on full validation dataset
     print(f"🎯 Running evaluation on validation split ({len(full_eval_dataset)} samples)...")
-    final_eval_metrics = trainer.evaluate(eval_dataset=full_eval_dataset)
+    original_group_by_length = bool(getattr(trainer.args, "group_by_length", False))
+    disable_length_grouping = original_group_by_length and not isinstance(full_eval_dataset, Dataset)
+    if disable_length_grouping:
+        trainer.args.group_by_length = False
+    try:
+        final_eval_metrics = trainer.evaluate(eval_dataset=full_eval_dataset)
+    finally:
+        if disable_length_grouping:
+            trainer.args.group_by_length = original_group_by_length
     if isinstance(final_eval_metrics, dict) and final_eval_metrics:
         scalar_final_metrics = {
             key: value for key, value in final_eval_metrics.items() if isinstance(value, (int, float))
@@ -320,7 +334,15 @@ def run_training_with_evaluation(
             trainer.compute_metrics = compute_metrics_with_predictions
 
         # Evaluate test set - these metrics are captured separately and saved to test_metrics.json
-        test_metrics = trainer.evaluate(eval_dataset=test_dataset)
+        original_group_by_length = bool(getattr(trainer.args, "group_by_length", False))
+        disable_length_grouping = original_group_by_length and not isinstance(test_dataset, Dataset)
+        if disable_length_grouping:
+            trainer.args.group_by_length = False
+        try:
+            test_metrics = trainer.evaluate(eval_dataset=test_dataset)
+        finally:
+            if disable_length_grouping:
+                trainer.args.group_by_length = original_group_by_length
 
         # Restore original compute_metrics
         if original_compute_metrics is not None:
@@ -397,6 +419,16 @@ def run_training_with_evaluation(
         print("💾 Saving LoRA adapter and processor...")
         save_artifacts(trainer, processor, run_dir)
 
+        if runtime_metadata:
+            runtime_metadata_path = run_dir / "runtime_metadata.json"
+            with runtime_metadata_path.open("w") as handle:
+                json.dump(runtime_metadata, handle, indent=2)
+            audit_source = runtime_metadata.get("speech_qa_eval_audit_source")
+            if audit_source:
+                audit_source_path = Path(str(audit_source))
+                if audit_source_path.exists():
+                    shutil.copy(audit_source_path, run_dir / "speech_qa_eval_audit.jsonl")
+
         # Use test metrics for ranking if available, otherwise validation metrics
         metrics_for_ranking = test_metrics if test_metrics is not None else final_eval_metrics
 
@@ -410,8 +442,6 @@ def run_training_with_evaluation(
 
         # Save both validation and test metrics separately
         # These are saved independently and NOT included in training_history.csv
-        import json
-
         # Save validation metrics (final eval on full validation set)
         validation_metrics_path = run_dir / "validation_metrics.json"
         with validation_metrics_path.open("w") as f:
@@ -449,6 +479,15 @@ def run_training_with_evaluation(
         print("💾 Saving LoRA adapter and processor...")
         ensure_dir(final_adapter_dir)
         save_artifacts(trainer, processor, final_adapter_dir)
+        if runtime_metadata:
+            runtime_metadata_path = final_adapter_dir / "runtime_metadata.json"
+            with runtime_metadata_path.open("w") as handle:
+                json.dump(runtime_metadata, handle, indent=2)
+            audit_source = runtime_metadata.get("speech_qa_eval_audit_source")
+            if audit_source:
+                audit_source_path = Path(str(audit_source))
+                if audit_source_path.exists():
+                    shutil.copy(audit_source_path, final_adapter_dir / "speech_qa_eval_audit.jsonl")
         print(f"✅ Done: {final_adapter_dir}")
 
 

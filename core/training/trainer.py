@@ -10,6 +10,15 @@ from torch.utils.data import DataLoader, Sampler
 from transformers import Trainer
 
 
+def sanitize_generation_kwargs(generation_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove sampling-only kwargs when greedy decoding is configured."""
+    sanitized = dict(generation_kwargs or {})
+    if not bool(sanitized.get("do_sample", False)):
+        for key in ("temperature", "top_p", "top_k"):
+            sanitized.pop(key, None)
+    return sanitized
+
+
 class CustomTrainer(Trainer):
     """Custom trainer that optionally performs generation during evaluation."""
 
@@ -23,7 +32,8 @@ class CustomTrainer(Trainer):
         custom_sampler: Optional[Sampler] = None,
         **kwargs,
     ):
-        self.generation_kwargs = generation_kwargs or {"max_new_tokens": 128, "do_sample": False}
+        base_generation = generation_kwargs or {"max_new_tokens": 128, "do_sample": False}
+        self.generation_kwargs = sanitize_generation_kwargs(base_generation)
         self.enable_generation = enable_generation
         self.constrained_decoding_fn = constrained_decoding_fn
         self.custom_loss_fn = custom_loss_fn
@@ -192,6 +202,7 @@ class CustomTrainer(Trainer):
         if final_gen_kwargs.get("num_beams", 1) > 1:
             final_gen_kwargs.setdefault("early_stopping", True)
 
+        final_gen_kwargs = sanitize_generation_kwargs(final_gen_kwargs)
         generated = model.generate(**gen_inputs, **final_gen_kwargs)
 
         # For metrics, return only newly generated tokens (exclude the prompt).
@@ -258,6 +269,39 @@ class CustomTrainer(Trainer):
                 pin_memory=self.args.dataloader_pin_memory,
                 drop_last=self.args.dataloader_drop_last,
             )
+
+    def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:
+        """Force deterministic eval ordering so metric references stay aligned."""
+        original_group_by_length = bool(getattr(self.args, "group_by_length", False))
+        if original_group_by_length:
+            self.args.group_by_length = False
+        try:
+            return super().get_eval_dataloader(eval_dataset)
+        finally:
+            if original_group_by_length:
+                self.args.group_by_length = True
+
+    def get_test_dataloader(self, test_dataset) -> DataLoader:
+        """Force deterministic test ordering so metric references stay aligned."""
+        original_group_by_length = bool(getattr(self.args, "group_by_length", False))
+        if original_group_by_length:
+            self.args.group_by_length = False
+        try:
+            return super().get_test_dataloader(test_dataset)
+        finally:
+            if original_group_by_length:
+                self.args.group_by_length = True
+
+    def get_predict_dataloader(self, predict_dataset) -> DataLoader:
+        """Force deterministic predict ordering so per-sample debug prints stay aligned."""
+        original_group_by_length = bool(getattr(self.args, "group_by_length", False))
+        if original_group_by_length:
+            self.args.group_by_length = False
+        try:
+            return super().get_predict_dataloader(predict_dataset)
+        finally:
+            if original_group_by_length:
+                self.args.group_by_length = True
 
 
 def save_history_to_csv(

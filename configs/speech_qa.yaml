@@ -25,19 +25,29 @@ model:
 # Dataset Configuration
 dataset:
   # Source
-  dataset_name: AudioLLMs/spoken_squad_test  # Dataset only has 'test' split with 5,351 samples (will be split)
+  dataset_name: local_spoken_squad      # Use local GitHub Spoken-SQuAD checkout
   dataset_config: null
+  data_dir: data/datasets/Spoken-SQuAD  # Root containing spoken_*.json and wav/{train,test}
+  train_json: spoken_train-v1.1.json
+  test_json: spoken_test-v1.1.json
+  audio_root: null                       # null => <data_dir>/wav
+  noisy_test_variant: none               # Options: none, wer44, wer54
+  min_wavs_per_split: 100                # Fail fast when wav extraction is missing/incomplete
+  max_missing_audio_rate: 0.05            # Allow unresolved QA->audio mappings to be dropped without failing
+  allow_train_only_fallback: true        # If test wavs are missing, derive all splits from train
+  audio_merge_policy: concatenate_sentences  # Options: first_sentence, concatenate_sentences
   # Processing
   seed: 0
   num_proc: auto
   cache_splits: true
   force_rebuild: false
   # Sample limits
-  max_train_samples: null             # null = use all from split
+  max_total_samples: 6000             # Auto-distribute across train/validation/test after split
+  max_train_samples: null              # Leave null when using max_total_samples
   max_validation_samples: null
   max_test_samples: null
   # Audio filtering
-  max_duration: 20.0                  # Filter out very long audio
+  max_duration: 60.0                  # Filter out very long audio
   min_duration: 1.0                   # Filter out very short clips
   # Column mappings
   audio_column: null                  # Will auto-detect 'context' via fallback logic
@@ -47,13 +57,13 @@ dataset:
   context_column: null                # Not using text context
   id_column: null                     # No ID column
   # Splits
-  split_percentages:                  # Create train/val/test splits from 'test' split
-    train: 0.70                       # 70% for training (~3,746 samples)
-    validation: 0.15                  # 15% for validation (~803 samples)
-    test: 0.15                        # 15% for test (~802 samples)
-  train_split: test                   # Source split to divide
-  validation_split: null              # Will be created from split_percentages
-  test_split: null                    # Will be created from split_percentages
+  split_percentages:                    # Derive train/validation/test from train source when needed
+    train: 0.80
+    validation: 0.10
+    test: 0.10
+  train_split: train
+  validation_split: null
+  test_split: test
   # Task-specific
   include_transcript: false           # No transcript available, audio-only QA
   include_context: false              # No text passage context
@@ -70,17 +80,17 @@ training:
   gradient_checkpointing_kwargs:
     use_reentrant: false
   # Optimization
-  learning_rate: 3e-5
+  learning_rate: 5e-5
   lr_scheduler_type: cosine
   warmup_ratio: 0.1
   weight_decay: 0.01
   max_grad_norm: 1.0
   # Schedule
-  num_train_epochs: 5
+  num_train_epochs: 4
   eval_strategy: steps
-  eval_steps: 100
+  eval_steps: 20
   save_strategy: steps
-  save_steps: 100
+  save_steps: 20
   initial_eval: true
   # Checkpointing
   save_total_limit: 3
@@ -102,15 +112,16 @@ training:
   shuffle_eval_subset: false
   eval_accumulation_steps: 4
   remove_unused_columns: false
+  label_preflight_samples: 0        # Decode a small batch and verify label targets before training
+  label_preflight_mismatch_threshold: 0
   # Logging
-  logging_steps: 20
+  logging_steps: 2
   report_to:
     - tensorboard
   # Generation
   generation_kwargs:
-    max_new_tokens: 48                # Answers are typically short
+    max_new_tokens: 24                # Extractive spans should be short
     do_sample: false                  # Greedy decoding for deterministic results
-    temperature: 0.0
     num_beams: 1
 
 # Artifacts Configuration
@@ -121,3 +132,4 @@ artifacts:
 metrics:
   history_csv: speech_qa_training_history.csv
   loss_plot: speech_qa_loss_metrics.png
+  debug_eval_dump_samples: 10

@@ -7,6 +7,8 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
+import evaluate
+import numpy as np
 import torch
 from transformers import EarlyStoppingCallback
 
@@ -271,6 +273,202 @@ def _reindex_reference_answers(
     return aligned
 
 
+def _reindex_reference_texts(
+    values: Sequence[Any],
+    selected_indices: Optional[Sequence[int]],
+    expected_length: int,
+) -> list[str]:
+    """Align text metadata (ids/questions) to selected evaluation indices."""
+    base = ["" if value is None else str(value) for value in (values or [])]
+    if selected_indices is None:
+        aligned = base[:expected_length]
+    else:
+        aligned = []
+        for idx in selected_indices:
+            idx_int = int(idx)
+            aligned.append(base[idx_int] if 0 <= idx_int < len(base) else "")
+    if len(aligned) < expected_length:
+        aligned.extend(["" for _ in range(expected_length - len(aligned))])
+    elif len(aligned) > expected_length:
+        aligned = aligned[:expected_length]
+    return aligned
+
+
+def _normalize_qa_text(text: str) -> str:
+    """Normalize short answer text for lightweight consistency checks."""
+    import re
+
+    cleaned = str(text or "").strip().lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"[^0-9a-z\s]", "", cleaned)
+    return cleaned.strip()
+
+
+def _run_speech_qa_label_preflight(
+    *,
+    collator: SpeechQACollator,
+    processor: Any,
+    train_dataset: Any,
+    sample_count: int,
+    mismatch_threshold: float,
+) -> None:
+    """Decode preflight labels and fail fast on obvious target-format issues."""
+    if int(sample_count) <= 0:
+        print("ℹ️  Speech-QA label preflight disabled (label_preflight_samples <= 0).")
+        return
+    num_samples = min(max(1, int(sample_count)), len(train_dataset))
+    features = [train_dataset[idx] for idx in range(num_samples)]
+    batch = collator(features)
+    labels = batch.get("labels")
+    if labels is None:
+        raise RuntimeError("Speech-QA preflight expected 'labels' in collator output.")
+
+    tokenizer = processor.tokenizer
+    mismatch_count = 0
+    prompt_leak_count = 0
+
+    for idx, feature in enumerate(features):
+        row = labels[idx]
+        label_ids = [int(token) for token in row.tolist() if int(token) != -100]
+        decoded_label = tokenizer.decode(label_ids, skip_special_tokens=True).strip()
+        decoded_norm = _normalize_qa_text(decoded_label)
+        answers = feature.get("answers") or [feature.get("label_text", "")]
+        gold_text = str(answers[0] if answers else "").strip()
+        gold_norm = _normalize_qa_text(gold_text)
+
+        if ("question:" in decoded_label.lower()) or ("listen to the audio segment" in decoded_label.lower()):
+            prompt_leak_count += 1
+        if decoded_norm != gold_norm:
+            mismatch_count += 1
+
+        if idx == 0:
+            input_ids = batch["input_ids"][idx]
+            decoded_input = tokenizer.decode(input_ids.tolist(), skip_special_tokens=True)
+            print("🔎 Speech-QA label preflight sample:")
+            print(f"  input_tail: {decoded_input[-240:].replace(chr(10), ' ')}")
+            print(f"  decoded_label: {decoded_label}")
+            print(f"  gold_answer: {gold_text}")
+
+    mismatch_rate = mismatch_count / float(num_samples)
+    print(
+        f"✅ Speech-QA label preflight: samples={num_samples}, "
+        f"mismatch_rate={mismatch_rate:.2%}, prompt_leak_count={prompt_leak_count}"
+    )
+
+    if prompt_leak_count > 0:
+        raise RuntimeError(
+            f"Speech-QA label preflight detected prompt leakage in {prompt_leak_count}/{num_samples} samples."
+        )
+    if mismatch_rate > float(mismatch_threshold):
+        raise RuntimeError(
+            f"Speech-QA label preflight mismatch_rate={mismatch_rate:.2%} exceeds "
+            f"threshold={float(mismatch_threshold):.2%}."
+        )
+
+
+def _decode_eval_predictions(processor: Any, predictions: Any) -> list[str]:
+    """Decode generation outputs with the same sanitization as qualitative eval."""
+    if isinstance(predictions, tuple):
+        predictions = predictions[0]
+    prediction_array = np.array(predictions)
+    pad_id = processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id or 0
+    prediction_array = np.where(
+        (prediction_array < 0) | ~np.isfinite(prediction_array),
+        int(pad_id),
+        prediction_array,
+    ).astype(np.int64)
+    decoded = processor.batch_decode(prediction_array, skip_special_tokens=True)
+    cleaned = []
+    for text in decoded:
+        value = str(text or "").strip()
+        if "assistant\n" in value:
+            value = value.split("assistant\n", 1)[1].strip()
+        cleaned.append(value)
+    return cleaned
+
+
+def _build_speech_qa_initial_eval_callback(
+    *,
+    processor: Any,
+    dataset: Any,
+    reference_store: Dict[str, Any],
+) -> Callable[[CustomTrainer], Dict[str, Any]]:
+    """Create a callback that prints Speech-QA initial eval in qualitative style."""
+
+    squad_metric = evaluate.load("squad")
+
+    def _callback(trainer: CustomTrainer) -> Dict[str, Any]:
+        original_group_by_length = bool(getattr(trainer.args, "group_by_length", False))
+        trainer.args.group_by_length = False
+        try:
+            outputs = trainer.predict(dataset)
+        finally:
+            trainer.args.group_by_length = original_group_by_length
+        pred_texts = _decode_eval_predictions(processor, outputs.predictions)
+
+        references = list(reference_store.get("values") or [])
+        questions = list(reference_store.get("questions") or [])
+
+        if len(references) < len(pred_texts):
+            references.extend([[] for _ in range(len(pred_texts) - len(references))])
+        if len(questions) < len(pred_texts):
+            questions.extend(["" for _ in range(len(pred_texts) - len(questions))])
+
+        for idx, pred in enumerate(pred_texts):
+            refs_raw = references[idx]
+            if isinstance(refs_raw, (list, tuple)):
+                refs = [str(item).strip() for item in refs_raw if str(item).strip()]
+            else:
+                refs = [str(refs_raw).strip()] if str(refs_raw).strip() else []
+            refs = refs or [""]
+
+            score = squad_metric.compute(
+                predictions=[{"id": str(idx), "prediction_text": pred}],
+                references=[{"id": str(idx), "answers": {"text": refs, "answer_start": [0] * max(1, len(refs))}}],
+            )
+            em = float(score.get("exact_match", 0.0))
+            f1 = float(score.get("f1", 0.0))
+            if em >= 100.0:
+                verdict = "EXACT"
+            elif f1 >= 50.0:
+                verdict = "GOOD"
+            elif f1 >= 20.0:
+                verdict = "PARTIAL"
+            else:
+                verdict = "MISS"
+
+            print(f"[{idx}] {verdict}  f1={f1:.1f}  em={em:.1f}")
+            print(f"  Q   : {questions[idx]}")
+            print(f"  REF : {refs}")
+            print(f"  PRED: {pred}")
+
+        official = compute_speech_qa_metrics(
+            (outputs.predictions, outputs.label_ids),
+            processor=processor,
+            reference_answers=references,
+            reference_ids=reference_store.get("ids"),
+            reference_questions=reference_store.get("questions"),
+            audit_dump_path=reference_store.get("audit_dump_path"),
+            audit_samples=int(reference_store.get("audit_samples", 0)),
+            split_name=reference_store.get("split_name"),
+        )
+
+        metrics: Dict[str, Any] = {
+            "eval_exact_match": float(official.get("exact_match", 0.0)),
+            "eval_f1": float(official.get("f1", 0.0)),
+            "eval_num_samples": float(official.get("num_samples", len(pred_texts))),
+        }
+        raw_metrics = dict(getattr(outputs, "metrics", {}) or {})
+        for key, value in raw_metrics.items():
+            if key.startswith("test_"):
+                metrics[f"eval_{key[5:]}"] = value
+            elif key.startswith("eval_"):
+                metrics[key] = value
+        return metrics
+
+    return _callback
+
+
 def _filter_by_duration(
     dataset,
     max_duration_seconds: Optional[float],
@@ -323,11 +521,17 @@ class _DatasetWithReferenceStore:
         return len(self._dataset)
 
     def __getitem__(self, idx):
-        self._reference_store['values'] = self._reference_values
+        if isinstance(self._reference_values, dict):
+            self._reference_store.update(self._reference_values)
+        else:
+            self._reference_store['values'] = self._reference_values
         return self._dataset[idx]
 
     def __iter__(self):
-        self._reference_store['values'] = self._reference_values
+        if isinstance(self._reference_values, dict):
+            self._reference_store.update(self._reference_values)
+        else:
+            self._reference_store['values'] = self._reference_values
         return iter(self._dataset)
 
 
@@ -369,9 +573,19 @@ CLASSIFICATION_BASE_KEYS: Tuple[str, ...] = (
 SPEECH_QA_LOADER_KEYS: Tuple[str, ...] = (
     "dataset_name",
     "dataset_config",
+    "data_dir",
+    "train_json",
+    "test_json",
+    "audio_root",
+    "noisy_test_variant",
+    "min_wavs_per_split",
+    "max_missing_audio_rate",
+    "allow_train_only_fallback",
+    "audio_merge_policy",
     "max_train_samples",
     "max_validation_samples",
     "max_test_samples",
+    "max_total_samples",
     "max_duration",
     "min_duration",
     "audio_column",
@@ -1245,6 +1459,7 @@ def run_speech_qa_task(config_path: Path) -> None:
 
     training_cfg = config.get('training', {})
     dataset_cfg = config.get('dataset', {})
+    metrics_cfg = config.get('metrics', {})
     artifact_dirs = get_speech_qa_artifact_directories(PACKAGE_ROOT)
 
     # Setup common components
@@ -1272,6 +1487,22 @@ def run_speech_qa_task(config_path: Path) -> None:
         cache_path=cache_path,
     )
     train_ds, val_ds, test_ds, answers_map = load_speech_qa_dataset(**loader_kwargs)
+    dataset_metadata = dict(answers_map.get("_metadata") or {})
+
+    split_origin = dataset_metadata.get("split_origin")
+    if split_origin == "train_only_fallback":
+        train_meta = dataset_metadata.get("train") or {}
+        print("⚠️  Speech-QA split provenance: validation/test are derived from train-only fallback.")
+        print(
+            "   "
+            f"split_origin={split_origin}, "
+            f"missing_audio_rate={float(train_meta.get('missing_audio_rate', 0.0)):.2%}, "
+            f"multi_sentence_prefixes={int(train_meta.get('multi_sentence_prefixes', 0))}, "
+            f"audio_merge_policy={dataset_metadata.get('audio_merge_policy', 'first_sentence')}"
+        )
+    if dataset_metadata:
+        runtime_metadata = config.setdefault("runtime_metadata", {})
+        runtime_metadata["speech_qa_dataset_provenance"] = dataset_metadata
 
     if train_ds is None:
         raise RuntimeError('Speech QA dataset did not provide a training split.')
@@ -1287,9 +1518,11 @@ def run_speech_qa_task(config_path: Path) -> None:
     if val_ds is not None:
         eval_ds_full = val_ds
         eval_answers_full = answers_map.get('validation', [])
+        eval_split_name = "validation"
     elif test_ds is not None:
         eval_ds_full = test_ds
         eval_answers_full = answers_map.get('test', [])
+        eval_split_name = "test"
     else:
         raise RuntimeError('Speech QA dataset requires a validation or test split.')
 
@@ -1307,6 +1540,18 @@ def run_speech_qa_task(config_path: Path) -> None:
         eval_selected_indices,
         len(eval_ds_for_trainer),
     )
+    eval_ids_full = [str(value) for value in eval_ds_full["id"]] if "id" in eval_ds_full.column_names else []
+    eval_questions_full = [str(value) for value in eval_ds_full["question"]] if "question" in eval_ds_full.column_names else []
+    eval_ids_for_trainer = _reindex_reference_texts(
+        eval_ids_full,
+        eval_selected_indices,
+        len(eval_ds_for_trainer),
+    )
+    eval_questions_for_trainer = _reindex_reference_texts(
+        eval_questions_full,
+        eval_selected_indices,
+        len(eval_ds_for_trainer),
+    )
 
     target_sr = getattr(getattr(processor, 'feature_extractor', None), 'sampling_rate', 16000)
     collator = SpeechQACollator(
@@ -1314,6 +1559,16 @@ def run_speech_qa_task(config_path: Path) -> None:
         sampling_rate=target_sr,
         include_transcript=dataset_cfg.get('include_transcript', True),
         include_context=dataset_cfg.get('include_context', False),
+    )
+
+    preflight_samples = int(training_cfg.get("label_preflight_samples", 12))
+    preflight_threshold = float(training_cfg.get("label_preflight_mismatch_threshold", 0.05))
+    _run_speech_qa_label_preflight(
+        collator=collator,
+        processor=processor,
+        train_dataset=train_ds,
+        sample_count=preflight_samples,
+        mismatch_threshold=preflight_threshold,
     )
 
     # Parse training configuration with Speech QA-specific defaults
@@ -1329,9 +1584,8 @@ def run_speech_qa_task(config_path: Path) -> None:
         "early_stopping_patience": 4,
         "length_column_name": "duration",
         "generation_kwargs": {
-            "max_new_tokens": 48,
+            "max_new_tokens": 12,
             "do_sample": False,
-            "temperature": 0.0,
             "num_beams": 1,
         },
     }
@@ -1345,13 +1599,30 @@ def run_speech_qa_task(config_path: Path) -> None:
     training_args = build_training_arguments(train_config, output_dir=str(output_dir))
     early_stopping_kwargs = build_early_stopping_kwargs(train_config)
 
-    reference_store = {'values': eval_answers_for_trainer}
+    debug_eval_dump_samples = int(metrics_cfg.get("debug_eval_dump_samples", 10))
+    debug_eval_dump_path = metrics_dir / "speech_qa_eval_audit.jsonl"
+    if debug_eval_dump_samples > 0:
+        runtime_metadata = config.setdefault("runtime_metadata", {})
+        runtime_metadata["speech_qa_eval_audit_source"] = str(debug_eval_dump_path)
+    reference_store = {
+        'values': eval_answers_for_trainer,
+        'ids': eval_ids_for_trainer,
+        'questions': eval_questions_for_trainer,
+        'split_name': eval_split_name,
+        'audit_dump_path': str(debug_eval_dump_path) if debug_eval_dump_samples > 0 else None,
+        'audit_samples': debug_eval_dump_samples,
+    }
 
     def _qa_metrics(eval_pred: Any) -> Dict[str, float]:
         return compute_speech_qa_metrics(
             eval_pred,
             processor=processor,
             reference_answers=reference_store['values'],
+            reference_ids=reference_store.get('ids'),
+            reference_questions=reference_store.get('questions'),
+            audit_dump_path=reference_store.get('audit_dump_path'),
+            audit_samples=int(reference_store.get('audit_samples', 0)),
+            split_name=reference_store.get('split_name'),
         )
 
     trainer = CustomTrainer(
@@ -1373,20 +1644,50 @@ def run_speech_qa_task(config_path: Path) -> None:
         # We have both validation and test, so use test for final evaluation
         test_ds_for_eval = test_ds
         test_answers = answers_map.get('test', [])
+        test_ids = [str(value) for value in test_ds_for_eval["id"]] if "id" in test_ds_for_eval.column_names else []
+        test_questions = [str(value) for value in test_ds_for_eval["question"]] if "question" in test_ds_for_eval.column_names else []
+    else:
+        test_ids = []
+        test_questions = []
 
-    # Run training with evaluation (using full eval dataset)
-    reference_store['values'] = eval_answers_full
-
-    # Wrap test dataset to update reference answers before evaluation
-    reference_store['values'] = eval_answers_full
+    # Wrap datasets to update references before evaluation.
+    full_eval_ds_wrapped = _DatasetWithReferenceStore(
+        eval_ds_full,
+        reference_store,
+        {
+            "values": eval_answers_full,
+            "ids": eval_ids_full,
+            "questions": eval_questions_full,
+            "split_name": eval_split_name,
+            "audit_dump_path": str(debug_eval_dump_path) if debug_eval_dump_samples > 0 else None,
+            "audit_samples": debug_eval_dump_samples,
+        },
+    )
     test_ds_wrapped = None
     if test_ds_for_eval is not None and test_answers:
-        test_ds_wrapped = _DatasetWithReferenceStore(test_ds_for_eval, reference_store, test_answers)
+        test_ds_wrapped = _DatasetWithReferenceStore(
+            test_ds_for_eval,
+            reference_store,
+            {
+                "values": test_answers,
+                "ids": test_ids,
+                "questions": test_questions,
+                "split_name": "test",
+                "audit_dump_path": str(debug_eval_dump_path) if debug_eval_dump_samples > 0 else None,
+                "audit_samples": debug_eval_dump_samples,
+            },
+        )
+
+    initial_eval_callback = _build_speech_qa_initial_eval_callback(
+        processor=processor,
+        dataset=eval_ds_for_trainer,
+        reference_store=reference_store,
+    )
 
     run_training_with_evaluation(
         trainer,
         processor=processor,
-        full_eval_dataset=eval_ds_full,
+        full_eval_dataset=full_eval_ds_wrapped,
         initial_eval=train_config.initial_eval,
         history_csv_path=history_csv_path,
         loss_plot_path=loss_plot_path,
@@ -1396,6 +1697,7 @@ def run_speech_qa_task(config_path: Path) -> None:
         metrics_dir=metrics_dir,
         test_dataset=test_ds_wrapped,
         test_split_name="test",
+        initial_eval_callback=initial_eval_callback,
     )
 
 

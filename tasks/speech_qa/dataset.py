@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+import hashlib
+import json
+import os
 from pathlib import Path
+import re
+import wave
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
-from datasets import Dataset, DatasetDict
+from datasets import Audio, Dataset, DatasetDict
+from tqdm.auto import tqdm
 
 from core import resolve_num_proc
 from core.tasks.dataset import (
@@ -20,6 +27,7 @@ from core.tasks.dataset import (
     add_duration_to_dataset,
     assemble_splits,
     cache_and_sample_splits,
+    filter_by_duration,
     load_dataset,
     print_dataset_summary,
 )
@@ -27,12 +35,22 @@ from core.tasks.dataset import (
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "speech_qa" / "datasets"
 
-DEFAULT_DATASET_NAME = "AudioLLMs/spoken_squad_test"
+LOCAL_SPOKEN_SQUAD_DATASET_NAME = "local_spoken_squad"
+DEFAULT_DATASET_NAME = LOCAL_SPOKEN_SQUAD_DATASET_NAME
+DEFAULT_LOCAL_DATA_DIR = PACKAGE_ROOT / "data" / "datasets" / "Spoken-SQuAD"
+DEFAULT_LOCAL_TRAIN_JSON = "spoken_train-v1.1.json"
+DEFAULT_LOCAL_TEST_JSON = "spoken_test-v1.1.json"
+NOISY_TEST_JSON_MAP: Dict[str, str] = {
+    "wer44": "spoken_test-v1.1_WER44.json",
+    "wer54": "spoken_test-v1.1_WER54.json",
+}
 FALLBACK_QUESTION_COLUMNS: Tuple[str, ...] = ("question", "query", "instruction")
-FALLBACK_TRANSCRIPT_COLUMNS: Tuple[str, ...] = ("transcript", "text", "sentence", "context")
+# Keep "context" out of transcript fallbacks to avoid clobbering the QA passage.
+FALLBACK_TRANSCRIPT_COLUMNS: Tuple[str, ...] = ("transcript", "text", "sentence")
 FALLBACK_CONTEXT_COLUMNS: Tuple[str, ...] = ("context", "passage", "paragraph")
 FALLBACK_ID_COLUMNS: Tuple[str, ...] = ("id", "qid", "example_id")
 FALLBACK_ANSWER_COLUMNS: Tuple[str, ...] = ("answers", "answer")
+AUDIO_MERGE_POLICIES: Tuple[str, ...] = ("first_sentence", "concatenate_sentences")
 
 MANIFEST_FIELDS: Tuple[str, ...] = (
     "id",
@@ -43,6 +61,51 @@ MANIFEST_FIELDS: Tuple[str, ...] = (
     "transcript",
     "path",
 )
+
+
+def _allocate_total_samples(
+    dataset: DatasetDict,
+    max_total_samples: int,
+) -> Dict[str, Optional[int]]:
+    """Allocate a global sample budget across available splits by split sizes."""
+    split_names = [name for name in ("train", "validation", "test") if name in dataset]
+    if not split_names:
+        return {"train": None, "validation": None, "test": None}
+
+    split_sizes = {name: len(dataset[name]) for name in split_names}
+    total_available = sum(split_sizes.values())
+    if total_available <= 0:
+        return {"train": 0, "validation": 0, "test": 0}
+
+    target_total = min(int(max_total_samples), total_available)
+    if target_total <= 0:
+        return {"train": 0, "validation": 0, "test": 0}
+
+    # Largest-remainder allocation to preserve total exactly.
+    raw = {
+        name: (target_total * split_sizes[name] / total_available)
+        for name in split_names
+    }
+    base = {name: int(raw[name]) for name in split_names}
+    remainder = target_total - sum(base.values())
+    if remainder > 0:
+        order = sorted(
+            split_names,
+            key=lambda name: (raw[name] - base[name], split_sizes[name]),
+            reverse=True,
+        )
+        idx = 0
+        while remainder > 0:
+            chosen = order[idx % len(order)]
+            if base[chosen] < split_sizes[chosen]:
+                base[chosen] += 1
+                remainder -= 1
+            idx += 1
+
+    allocation = {"train": None, "validation": None, "test": None}
+    for name in split_names:
+        allocation[name] = min(base[name], split_sizes[name])
+    return allocation
 
 
 def _normalize_answers(example: Dict[str, Any], answer_column: str) -> Dict[str, Any]:
@@ -74,6 +137,439 @@ def _normalize_answers(example: Dict[str, Any], answer_column: str) -> Dict[str,
     return example
 
 
+def _resolve_local_spoken_squad_paths(
+    *,
+    data_dir: Path,
+    train_json: str,
+    test_json: str,
+    noisy_test_variant: str,
+    audio_root: Optional[Path],
+) -> Dict[str, Path]:
+    """Resolve local Spoken-SQuAD json/audio paths and validate required files."""
+    root = data_dir.resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"local_spoken_squad data_dir does not exist: {root}")
+
+    train_json_path = (root / train_json).resolve()
+    test_json_name = NOISY_TEST_JSON_MAP.get(noisy_test_variant, test_json)
+    test_json_path = (root / test_json_name).resolve()
+
+    if not train_json_path.exists():
+        raise FileNotFoundError(f"Spoken-SQuAD train json not found: {train_json_path}")
+    if not test_json_path.exists():
+        raise FileNotFoundError(f"Spoken-SQuAD test json not found: {test_json_path}")
+
+    root_audio = (audio_root or (root / "wav")).resolve()
+    train_audio_dir = (root_audio / "train").resolve()
+    test_audio_dir = (root_audio / "test").resolve()
+    return {
+        "root": root,
+        "train_json": train_json_path,
+        "test_json": test_json_path,
+        "audio_root": root_audio,
+        "train_audio_dir": train_audio_dir,
+        "test_audio_dir": test_audio_dir,
+    }
+
+
+def _build_spoken_squad_audio_index(split_audio_dir: Path) -> Dict[Tuple[int, int], List[Tuple[int, Path]]]:
+    """Index Spoken-SQuAD wav files by (topic_idx, paragraph_idx)."""
+    index: Dict[Tuple[int, int], List[Tuple[int, Path]]] = {}
+    if not split_audio_dir.exists():
+        return index
+    for wav_path in split_audio_dir.rglob("*.wav"):
+        match = re.match(r"^(\d+)_(\d+)(?:_(\d+))?$", wav_path.stem)
+        if not match:
+            continue
+        topic_idx = int(match.group(1))
+        para_idx = int(match.group(2))
+        sent_idx = int(match.group(3)) if match.group(3) is not None else 0
+        index.setdefault((topic_idx, para_idx), []).append((sent_idx, wav_path.resolve()))
+    for key in index:
+        index[key].sort(key=lambda pair: pair[0])
+    return index
+
+
+def _load_spoken_squad_split_from_local(
+    *,
+    json_path: Path,
+    split_name: str,
+    audio_index: Dict[Tuple[int, int], List[Tuple[int, Path]]],
+    max_missing_audio_rate: float,
+    audio_merge_policy: str,
+    concatenated_audio_dir: Optional[Path],
+) -> Tuple[Dataset, Dict[str, Any]]:
+    """Load one Spoken-SQuAD split from local SQuAD-format JSON + wav index."""
+    with json_path.open("r") as handle:
+        payload = json.load(handle)
+    data_items = list(payload.get("data") or [])
+
+    rows: List[Dict[str, Any]] = []
+    missing_audio = 0
+    total_qas = 0
+    multi_sentence_prefixes = 0
+    concatenated_audio_files = 0
+    concatenation_failures = 0
+
+    zero_based_matches = 0
+    one_based_matches = 0
+    unresolved_prefixes = 0
+
+    total_paragraphs = sum(len(list(article.get("paragraphs") or [])) for article in data_items)
+    show_concat_progress = (audio_merge_policy == "concatenate_sentences") and (total_paragraphs > 0)
+    paragraph_progress = tqdm(
+        total=total_paragraphs,
+        desc=f"🔊 Concatenating {split_name} audio",
+        unit="para",
+        leave=False,
+        disable=not show_concat_progress,
+    )
+    progress_refresh_interval = 128
+    processed_paragraphs = 0
+
+    concat_futures: Dict[Tuple[int, int], Future] = {}
+    concat_fallback_path: Dict[Tuple[int, int], Path] = {}
+    concat_row_indices: Dict[Tuple[int, int], List[int]] = {}
+    concat_success_keys: set[Tuple[int, int]] = set()
+    concat_requested_keys: set[Tuple[int, int]] = set()
+    concat_executor: Optional[ThreadPoolExecutor] = None
+    if audio_merge_policy == "concatenate_sentences":
+        max_workers = min(8, max(1, int(os.cpu_count() or 1)))
+        concat_executor = ThreadPoolExecutor(max_workers=max_workers)
+    if show_concat_progress:
+        paragraph_progress.set_postfix(concatenated=0, concat_failures=0, missing_qas=0)
+
+    def _build_concat(target_path: Path, source_wavs: List[Path]) -> Path:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        _concatenate_wavs(source_wavs, target_path)
+        return target_path
+
+    for topic_idx, article in enumerate(data_items):
+        paragraphs = list(article.get("paragraphs") or [])
+        for para_idx, paragraph in enumerate(paragraphs):
+            context = str(paragraph.get("context") or "")
+            qas = list(paragraph.get("qas") or [])
+            # Spoken-SQuAD wav archives are commonly indexed with 0-based prefixes
+            # (topic_idx_paragraph_idx[_sentence_idx].wav), while some local exports
+            # are 1-based. Resolve 0-based first, then fallback to 1-based.
+            zero_based_key = (topic_idx, para_idx)
+            one_based_key = (topic_idx + 1, para_idx + 1)
+            matched_key: Optional[Tuple[int, int]] = None
+
+            audio_candidates = audio_index.get(zero_based_key, [])
+            if audio_candidates:
+                matched_key = zero_based_key
+                zero_based_matches += 1
+            else:
+                audio_candidates = audio_index.get(one_based_key, [])
+                if audio_candidates:
+                    matched_key = one_based_key
+                    one_based_matches += 1
+                else:
+                    unresolved_prefixes += 1
+
+            chosen_audio: Optional[Path] = None
+            concat_key_for_rows: Optional[Tuple[int, int]] = None
+            if audio_candidates:
+                chosen_audio = audio_candidates[0][1]
+                if len(audio_candidates) > 1:
+                    multi_sentence_prefixes += 1
+                    if audio_merge_policy == "concatenate_sentences":
+                        if concatenated_audio_dir is None:
+                            raise ValueError(
+                                "concatenated_audio_dir must be provided when using "
+                                "audio_merge_policy='concatenate_sentences'."
+                            )
+                        if matched_key is None:
+                            raise ValueError("matched_key must be resolved when audio candidates exist.")
+
+                        concat_key_for_rows = matched_key
+                        concat_requested_keys.add(concat_key_for_rows)
+                        concat_fallback_path[concat_key_for_rows] = audio_candidates[0][1]
+                        concat_path = concatenated_audio_dir / f"{matched_key[0]}_{matched_key[1]}_concat.wav"
+                        if concat_path.exists():
+                            concat_success_keys.add(concat_key_for_rows)
+                        elif concat_executor is not None and concat_key_for_rows not in concat_futures:
+                            concat_futures[concat_key_for_rows] = concat_executor.submit(
+                                _build_concat,
+                                concat_path,
+                                [path for _, path in audio_candidates],
+                            )
+                        chosen_audio = concat_path.resolve()
+
+            for qa in qas:
+                total_qas += 1
+                if chosen_audio is None:
+                    missing_audio += 1
+                    continue
+                answers_raw = list(qa.get("answers") or [])
+                answers = [
+                    str(answer.get("text", "")).strip()
+                    for answer in answers_raw
+                    if isinstance(answer, Mapping) and str(answer.get("text", "")).strip()
+                ]
+                if not answers:
+                    answers = [""]
+                rows.append(
+                    {
+                        "id": str(qa.get("id") or f"{split_name}_{topic_idx}_{para_idx}_{len(rows)}"),
+                        "question": str(qa.get("question") or "").strip(),
+                        "answers": answers,
+                        "label_text": answers[0],
+                        "context": context,
+                        "audio": str(chosen_audio),
+                    }
+                )
+                if concat_key_for_rows is not None:
+                    concat_row_indices.setdefault(concat_key_for_rows, []).append(len(rows) - 1)
+
+            processed_paragraphs += 1
+            if show_concat_progress and (processed_paragraphs % progress_refresh_interval == 0):
+                paragraph_progress.set_postfix(
+                    concatenated=int(len(concat_success_keys)),
+                    concat_failures=int(concatenation_failures),
+                    missing_qas=int(missing_audio),
+                )
+            paragraph_progress.update(1)
+
+    failed_concat_keys: set[Tuple[int, int]] = set()
+    for concat_key, future in concat_futures.items():
+        try:
+            future.result()
+            concat_success_keys.add(concat_key)
+        except (RuntimeError, ValueError, OSError):
+            failed_concat_keys.add(concat_key)
+
+    if concat_executor is not None:
+        concat_executor.shutdown(wait=True)
+
+    if failed_concat_keys:
+        for concat_key in failed_concat_keys:
+            fallback = concat_fallback_path.get(concat_key)
+            if fallback is None:
+                continue
+            for row_idx in concat_row_indices.get(concat_key, []):
+                rows[row_idx]["audio"] = str(fallback)
+        concatenation_failures = len(failed_concat_keys)
+
+    concatenated_audio_files = len(concat_success_keys)
+
+    if show_concat_progress:
+        paragraph_progress.set_postfix(
+            concatenated=int(concatenated_audio_files),
+            concat_failures=int(concatenation_failures),
+            missing_qas=int(missing_audio),
+        )
+    paragraph_progress.close()
+
+    if total_qas == 0:
+        raise ValueError(f"No QA items found in local Spoken-SQuAD split: {json_path}")
+    if not rows:
+        raise ValueError(
+            f"All QA items were dropped for split '{split_name}' because audio files were unresolved."
+        )
+
+    missing_rate = float(missing_audio / max(1, total_qas))
+    if missing_rate > float(max_missing_audio_rate):
+        raise ValueError(
+            f"Too many missing audio mappings for split '{split_name}': "
+            f"{missing_audio}/{total_qas} ({missing_rate:.2%}) exceeds "
+            f"max_missing_audio_rate={max_missing_audio_rate:.2%}."
+        )
+
+    if missing_audio > 0:
+        print(
+            f"⚠️  local_spoken_squad {split_name}: dropped {missing_audio}/{total_qas} QA rows "
+            f"({missing_rate:.2%}) due to unresolved audio."
+        )
+    if multi_sentence_prefixes > 0:
+        if audio_merge_policy == "concatenate_sentences":
+            print(
+                f"ℹ️  local_spoken_squad {split_name}: {multi_sentence_prefixes} paragraph prefixes had "
+                "multiple sentence wav files; concatenating sentence wavs per prefix."
+            )
+            if concatenation_failures > 0:
+                print(
+                    f"⚠️  local_spoken_squad {split_name}: failed to concatenate "
+                    f"{concatenation_failures}/{multi_sentence_prefixes} prefixes; "
+                    "fell back to first sentence audio."
+                )
+        else:
+            print(
+                f"ℹ️  local_spoken_squad {split_name}: {multi_sentence_prefixes} paragraph prefixes had "
+                "multiple sentence wav files; using the first sentence file per prefix."
+            )
+
+    split_ds = Dataset.from_list(rows)
+    split_ds = split_ds.cast_column("audio", Audio(sampling_rate=16000))
+    split_metadata = {
+        "split": split_name,
+        "source_json": str(json_path),
+        "audio_merge_policy": audio_merge_policy,
+        "audio_index_key_matches": {
+            "zero_based": int(zero_based_matches),
+            "one_based": int(one_based_matches),
+            "unresolved": int(unresolved_prefixes),
+        },
+        "total_qas": int(total_qas),
+        "rows_loaded": int(len(rows)),
+        "dropped_missing_audio": int(missing_audio),
+        "missing_audio_rate": float(missing_rate),
+        "multi_sentence_prefixes": int(multi_sentence_prefixes),
+        "concatenated_audio_files": int(concatenated_audio_files),
+        "concatenation_failures": int(concatenation_failures),
+    }
+    return split_ds, split_metadata
+
+
+def _concatenate_wavs(source_paths: Sequence[Path], output_path: Path) -> None:
+    """Concatenate wav files with identical format into one wav."""
+    if not source_paths:
+        raise ValueError("source_paths must not be empty")
+
+    params = None
+    pcm_chunks: List[bytes] = []
+    for path in source_paths:
+        with wave.open(str(path), "rb") as handle:
+            current_params = (handle.getnchannels(), handle.getsampwidth(), handle.getframerate())
+            if params is None:
+                params = current_params
+            elif current_params != params:
+                raise ValueError(
+                    "Cannot concatenate wav files with different formats: "
+                    f"{params!r} vs {current_params!r}"
+                )
+            pcm_chunks.append(handle.readframes(handle.getnframes()))
+
+    if params is None:
+        raise ValueError("Failed to infer wav params for concatenation.")
+
+    nchannels, sampwidth, framerate = params
+    with wave.open(str(output_path), "wb") as out:
+        out.setnchannels(int(nchannels))
+        out.setsampwidth(int(sampwidth))
+        out.setframerate(int(framerate))
+        out.writeframes(b"".join(pcm_chunks))
+
+
+def _load_local_spoken_squad_dataset(
+    *,
+    data_dir: Optional[Path | str],
+    train_json: str,
+    test_json: str,
+    audio_root: Optional[Path | str],
+    noisy_test_variant: str,
+    min_wavs_per_split: int,
+    max_missing_audio_rate: float,
+    allow_train_only_fallback: bool,
+    audio_merge_policy: str,
+) -> Tuple[DatasetDict, Dict[str, Any]]:
+    """Load local Spoken-SQuAD json + wav archives into a DatasetDict."""
+    noisy = str(noisy_test_variant or "none").strip().lower()
+    if noisy not in {"none", *NOISY_TEST_JSON_MAP.keys()}:
+        raise ValueError("noisy_test_variant must be one of: none|wer44|wer54.")
+    root = Path(data_dir).expanduser() if data_dir is not None else DEFAULT_LOCAL_DATA_DIR
+    resolved = _resolve_local_spoken_squad_paths(
+        data_dir=root,
+        train_json=train_json,
+        test_json=test_json,
+        noisy_test_variant=noisy,
+        audio_root=(Path(audio_root).expanduser() if audio_root is not None else None),
+    )
+    train_audio_dir = resolved["train_audio_dir"]
+    test_audio_dir = resolved["test_audio_dir"]
+
+    train_wavs = list(train_audio_dir.rglob("*.wav")) if train_audio_dir.exists() else []
+    test_wavs = list(test_audio_dir.rglob("*.wav")) if test_audio_dir.exists() else []
+
+    min_wavs = int(min_wavs_per_split)
+    if min_wavs < 0:
+        raise ValueError("min_wavs_per_split must be >= 0.")
+    if len(train_wavs) < min_wavs:
+        raise FileNotFoundError(
+            "Local Spoken-SQuAD wav files look incomplete. Expected at least "
+            f"{min_wavs} wavs per split under '{resolved['audio_root']}'. "
+            f"Found train={len(train_wavs)}, test={len(test_wavs)}. "
+            "Ensure archives are extracted into wav/train and wav/test."
+        )
+
+    use_train_only_source = len(test_wavs) < min_wavs and bool(allow_train_only_fallback)
+    if len(test_wavs) < min_wavs and not use_train_only_source:
+        raise FileNotFoundError(
+            "Local Spoken-SQuAD wav files look incomplete. Expected at least "
+            f"{min_wavs} wavs per split under '{resolved['audio_root']}'. "
+            f"Found train={len(train_wavs)}, test={len(test_wavs)}. "
+            "Ensure archives are extracted into wav/train and wav/test."
+        )
+    if use_train_only_source:
+        print(
+            "ℹ️  local_spoken_squad: test wavs missing/incomplete "
+            f"(train={len(train_wavs)}, test={len(test_wavs)}). "
+            "Using configured train-only fallback (allow_train_only_fallback=true); "
+            "this is expected when intentionally deriving train/validation/test from train audio only."
+        )
+
+    merge_policy = str(audio_merge_policy or "first_sentence").strip().lower()
+    if merge_policy not in AUDIO_MERGE_POLICIES:
+        raise ValueError(
+            f"audio_merge_policy must be one of {AUDIO_MERGE_POLICIES}, received {audio_merge_policy!r}."
+        )
+    concatenated_audio_root = resolved["audio_root"] / "_concatenated"
+
+    train_audio_index = _build_spoken_squad_audio_index(train_audio_dir)
+    if not train_audio_index:
+        raise ValueError(
+            "Failed to index local Spoken-SQuAD wav files. Expected filenames like "
+            "'TopicIndex_ParagraphIndex[_SentenceIndex].wav'."
+        )
+    test_audio_index: Dict[Tuple[int, int], List[Tuple[int, Path]]] = {}
+    if not use_train_only_source:
+        test_audio_index = _build_spoken_squad_audio_index(test_audio_dir)
+        if not test_audio_index:
+            raise ValueError(
+                "Failed to index local Spoken-SQuAD wav files. Expected filenames like "
+                "'TopicIndex_ParagraphIndex[_SentenceIndex].wav'."
+            )
+
+    print(
+        "📦 Loading local Spoken-SQuAD from "
+        f"{resolved['root']} (train_wavs={len(train_wavs)}, test_wavs={len(test_wavs)})"
+    )
+
+    train_split, train_metadata = _load_spoken_squad_split_from_local(
+        json_path=resolved["train_json"],
+        split_name="train",
+        audio_index=train_audio_index,
+        max_missing_audio_rate=max_missing_audio_rate,
+        audio_merge_policy=merge_policy,
+        concatenated_audio_dir=concatenated_audio_root / "train",
+    )
+    if use_train_only_source:
+        metadata = {
+            "split_origin": "train_only_fallback",
+            "audio_merge_policy": merge_policy,
+            "train": train_metadata,
+            "test": None,
+        }
+        return DatasetDict({"train": train_split}), metadata
+
+    test_split, test_metadata = _load_spoken_squad_split_from_local(
+        json_path=resolved["test_json"],
+        split_name="test",
+        audio_index=test_audio_index,
+        max_missing_audio_rate=max_missing_audio_rate,
+        audio_merge_policy=merge_policy,
+        concatenated_audio_dir=concatenated_audio_root / "test",
+    )
+    metadata = {
+        "split_origin": "standard_train_test",
+        "audio_merge_policy": merge_policy,
+        "train": train_metadata,
+        "test": test_metadata,
+    }
+    return DatasetDict({"train": train_split, "test": test_split}), metadata
+
+
 def load_speech_qa_dataset(
     *,
     dataset_name: str = DEFAULT_DATASET_NAME,
@@ -81,6 +577,7 @@ def load_speech_qa_dataset(
     max_train_samples: Optional[int] = None,
     max_validation_samples: Optional[int] = None,
     max_test_samples: Optional[int] = None,
+    max_total_samples: Optional[int] = None,
     max_duration: Optional[float] = None,
     min_duration: Optional[float] = None,
     seed: int = 0,
@@ -98,19 +595,44 @@ def load_speech_qa_dataset(
     train_split: str = "train",
     validation_split: Optional[str] = "validation",
     test_split: Optional[str] = "test",
-) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], Dict[str, List[List[str]]]]:
+    data_dir: Optional[Path | str] = None,
+    train_json: str = DEFAULT_LOCAL_TRAIN_JSON,
+    test_json: str = DEFAULT_LOCAL_TEST_JSON,
+    audio_root: Optional[Path | str] = None,
+    noisy_test_variant: str = "none",
+    min_wavs_per_split: int = 100,
+    max_missing_audio_rate: float = 0.01,
+    allow_train_only_fallback: bool = True,
+    audio_merge_policy: str = "first_sentence",
+) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], Dict[str, Any]]:
     """
     Load an audio question answering dataset with optional sub-sampling.
 
-    Returns train, validation, test splits (None when missing) and a mapping of per-split answer sets.
+    Returns train, validation, test splits (None when missing) and a mapping with:
+    - train/validation/test answer sets
+    - _metadata: dataset provenance (for local Spoken-SQuAD).
     """
     # Normalize sample counts
     max_train_samples = _normalize_target_count("max_train_samples", max_train_samples)
     max_validation_samples = _normalize_target_count("max_validation_samples", max_validation_samples)
     max_test_samples = _normalize_target_count("max_test_samples", max_test_samples)
+    max_total_samples = _normalize_target_count("max_total_samples", max_total_samples)
 
+    dataset_provenance: Dict[str, Any] = {}
     # Load dataset
-    if dataset_config:
+    if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME:
+        dataset, dataset_provenance = _load_local_spoken_squad_dataset(
+            data_dir=data_dir,
+            train_json=train_json,
+            test_json=test_json,
+            audio_root=audio_root,
+            noisy_test_variant=noisy_test_variant,
+            min_wavs_per_split=min_wavs_per_split,
+            max_missing_audio_rate=max_missing_audio_rate,
+            allow_train_only_fallback=allow_train_only_fallback,
+            audio_merge_policy=audio_merge_policy,
+        )
+    elif dataset_config:
         dataset = load_dataset(dataset_name, dataset_config)
     else:
         dataset = load_dataset(dataset_name)
@@ -185,43 +707,58 @@ def load_speech_qa_dataset(
             test_split=test_split,
         )
 
+    if max_total_samples is not None:
+        explicit_any = any(
+            value is not None for value in (max_train_samples, max_validation_samples, max_test_samples)
+        )
+        if explicit_any:
+            raise ValueError(
+                "Use either max_total_samples or per-split max_*_samples, not both."
+            )
+        allocation = _allocate_total_samples(dataset, int(max_total_samples))
+        max_train_samples = allocation["train"]
+        max_validation_samples = allocation["validation"]
+        max_test_samples = allocation["test"]
+
     # Normalize answers
     normalize_fn = partial(_normalize_answers, answer_column=target_answer_column)
     dataset = dataset.map(normalize_fn)
 
-    # Add duration information
+    # Build cache root path
+    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
+
+    # Add duration information (with caching)
     effective_num_proc = resolve_num_proc(num_proc)
-    dataset = add_duration_to_dataset(dataset, audio_column=audio_column_name, num_proc=effective_num_proc)
+    dataset = add_duration_to_dataset(
+        dataset,
+        audio_column=audio_column_name,
+        num_proc=effective_num_proc,
+        cache_dir=cache_root if not force_rebuild else None,
+    )
 
-    # Filter by duration if specified
-    if max_duration is not None or min_duration is not None:
-        def _keep_duration(example: dict) -> bool:
-            duration = example.get("duration") or 0.0
-            duration_float = float(duration)
-            if max_duration is not None and duration_float > max_duration:
-                return False
-            if min_duration is not None and duration_float < min_duration:
-                return False
-            return True
-
-        for split_name in list(dataset.keys()):
-            before = len(dataset[split_name])
-            dataset[split_name] = dataset[split_name].filter(_keep_duration)
-            after = len(dataset[split_name])
-            if after != before:
-                filtered_count = before - after
-                duration_info = []
-                if max_duration is not None:
-                    duration_info.append(f">{max_duration:.1f}s")
-                if min_duration is not None:
-                    duration_info.append(f"<{min_duration:.1f}s")
-                duration_str = " or ".join(duration_info)
-                print(f"⏱️ Filtered {filtered_count} {split_name} samples ({duration_str}).")
+    # Filter by duration if specified (with caching)
+    dataset = filter_by_duration(
+        dataset,
+        max_duration=max_duration,
+        min_duration=min_duration,
+        cache_dir=cache_root if not force_rebuild else None,
+    )
 
     # Build cache path
-    cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
     dataset_key = dataset_name.replace("/", "_")
     config_key = dataset_config or "default"
+    if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME:
+        local_source = {
+            "data_dir": str((Path(data_dir).expanduser() if data_dir is not None else DEFAULT_LOCAL_DATA_DIR).resolve()),
+            "train_json": str(train_json),
+            "test_json": str(test_json),
+            "noisy_test_variant": str(noisy_test_variant),
+            "audio_merge_policy": str(audio_merge_policy),
+        }
+        source_hash = hashlib.md5(
+            json.dumps(local_source, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:10]
+        config_key = f"local_{source_hash}"
     cache_name = (
         f"{dataset_key}_{config_key}"
         f"_train_{_samples_key(max_train_samples)}"
@@ -247,6 +784,11 @@ def load_speech_qa_dataset(
             "dataset": dataset_name,
             "config": dataset_config,
             "audio_column": audio_column_name,
+            "data_dir": str(data_dir) if data_dir is not None else None,
+            "train_json": train_json if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
+            "test_json": test_json if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
+            "noisy_test_variant": noisy_test_variant if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
+            "audio_merge_policy": audio_merge_policy if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
         },
     )
 
@@ -268,6 +810,7 @@ def load_speech_qa_dataset(
     answers_map["train"] = _collect_answers(train_subset)
     answers_map["validation"] = _collect_answers(validation_subset)
     answers_map["test"] = _collect_answers(test_subset)
+    answers_map["_metadata"] = dataset_provenance
 
     # Print summary
     print_dataset_summary(
@@ -311,7 +854,7 @@ class SpeechQACollator:
         transcript = str(feature.get("transcript", "") or "").strip()
         context = str(feature.get("context", "") or "").strip()
 
-        instruction = "Listen to the audio segment and answer the question."
+        instruction = "Copy the shortest exact answer span from the audio. Output only those words."
         if question:
             instruction += f"\nQuestion: {question}"
         if transcript and self.include_transcript:

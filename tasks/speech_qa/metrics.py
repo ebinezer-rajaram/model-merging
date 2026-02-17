@@ -2,46 +2,22 @@
 
 from __future__ import annotations
 
-import collections
+import json
+from pathlib import Path
 import re
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
+import evaluate
 import numpy as np
+from evaluate import EvaluationModule
 
 
-_ARTICLES = {"a", "an", "the"}
-
-
-def _normalize_answer(text: str) -> str:
-    """Lowercase, remove punctuation/articles/extra whitespace."""
-    if not text:
-        return ""
-    text = text.lower()
-    text = re.sub(r"[^0-9a-z\s]", " ", text)
-    tokens = [token for token in text.split() if token and token not in _ARTICLES]
-    return " ".join(tokens)
-
-
-def _f1_score(prediction: str, ground_truth: str) -> float:
-    pred_tokens = _normalize_answer(prediction).split()
-    truth_tokens = _normalize_answer(ground_truth).split()
-    if not pred_tokens and not truth_tokens:
-        return 1.0
-    if not pred_tokens or not truth_tokens:
-        return 0.0
-    common = collections.Counter(pred_tokens) & collections.Counter(truth_tokens)
-    num_same = sum(common.values())
-    if num_same == 0:
-        return 0.0
-    precision = num_same / len(pred_tokens)
-    recall = num_same / len(truth_tokens)
-    if precision + recall == 0.0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
-
-
-def _exact_match_score(prediction: str, ground_truth: str) -> float:
-    return float(_normalize_answer(prediction) == _normalize_answer(ground_truth))
+_SQUAD_METRIC: Optional[EvaluationModule] = None
+_AUDIT_WRAPPERS = (
+    r"^\s*answer\s*:\s*",
+    r"^\s*the answer is\s*",
+    r"^\s*final answer\s*:\s*",
+)
 
 
 def _safe_decode_ids(tokenizer, token_ids, *, skip_special_tokens: bool = True) -> str:
@@ -84,9 +60,111 @@ def _decode_labels(array: np.ndarray, tokenizer) -> Sequence[str]:
     return decoded
 
 
-def _best_over_ground_truths(metric_fn, prediction: str, ground_truths: Iterable[str]) -> float:
-    scores = [metric_fn(prediction, truth) for truth in ground_truths]
-    return max(scores) if scores else 0.0
+def _sanitize_prediction_ids(array: np.ndarray, tokenizer) -> np.ndarray:
+    """Replace invalid/padded generation ids with pad token before decoding."""
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id
+    if pad_id is None:
+        pad_id = 0
+
+    numeric = np.array(array)
+    invalid = (numeric < 0) | ~np.isfinite(numeric)
+    if invalid.any():
+        numeric = np.where(invalid, int(pad_id), numeric)
+    return numeric.astype(np.int64, copy=False)
+
+
+def _strip_chat_artifacts(text: str) -> str:
+    text = (text or "").strip()
+    if "assistant\n" in text:
+        text = text.split("assistant\n", 1)[1].strip()
+    return text
+
+
+def _normalize_prediction_text(text: str) -> str:
+    """Normalize prediction wrappers before official SQuAD scoring."""
+    text = _strip_chat_artifacts(text)
+    for pattern in _AUDIT_WRAPPERS:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    text = text.strip().strip("\"'`")
+    return text
+
+
+def _get_squad_metric() -> EvaluationModule:
+    global _SQUAD_METRIC
+    if _SQUAD_METRIC is None:
+        _SQUAD_METRIC = evaluate.load("squad")
+    return _SQUAD_METRIC
+
+
+def _build_squad_references(
+    reference_answers: Sequence[Sequence[str]],
+    label_texts: Sequence[str],
+) -> List[Dict[str, object]]:
+    references: List[Dict[str, object]] = []
+    for idx, answers in enumerate(reference_answers):
+        answer_texts = [str(answer).strip() for answer in (answers or []) if str(answer).strip()]
+        if not answer_texts and idx < len(label_texts):
+            fallback = (label_texts[idx] or "").strip()
+            answer_texts = [fallback] if fallback else [""]
+        references.append(
+            {
+                "id": str(idx),
+                "answers": {
+                    "text": answer_texts if answer_texts else [""],
+                    "answer_start": [0] * max(1, len(answer_texts)),
+                },
+            }
+        )
+    return references
+
+
+def _write_eval_audit_dump(
+    *,
+    dump_path: Path,
+    samples_to_dump: int,
+    predictions: Sequence[str],
+    references: Sequence[Dict[str, object]],
+    ids: Optional[Sequence[str]],
+    questions: Optional[Sequence[str]],
+    split_name: Optional[str],
+) -> None:
+    if samples_to_dump <= 0:
+        return
+    limit = min(int(samples_to_dump), len(predictions), len(references))
+    if limit <= 0:
+        return
+
+    metric = _get_squad_metric()
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+    records: List[Dict[str, object]] = []
+
+    for idx in range(limit):
+        ref = references[idx]
+        pred = predictions[idx]
+        single_result = metric.compute(
+            predictions=[{"id": ref["id"], "prediction_text": pred}],
+            references=[ref],
+        )
+        ref_answers = ref.get("answers", {}).get("text", []) if isinstance(ref, dict) else []
+        records.append(
+            {
+                "split": split_name or "eval",
+                "index": idx,
+                "id": (ids[idx] if ids and idx < len(ids) else str(ref.get("id", idx))),
+                "question": (questions[idx] if questions and idx < len(questions) else ""),
+                "prediction_text": pred,
+                "gold_answers": list(ref_answers),
+                "normalized_prediction": pred,
+                "best_f1": float(single_result.get("f1", 0.0)),
+                "exact_match": float(single_result.get("exact_match", 0.0)),
+            }
+        )
+
+    with dump_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
 def compute_speech_qa_metrics(
@@ -94,8 +172,13 @@ def compute_speech_qa_metrics(
     *,
     processor,
     reference_answers: Sequence[Sequence[str]],
+    reference_ids: Optional[Sequence[str]] = None,
+    reference_questions: Optional[Sequence[str]] = None,
+    audit_dump_path: Optional[str | Path] = None,
+    audit_samples: int = 0,
+    split_name: Optional[str] = None,
 ) -> Dict[str, float]:
-    """Compute exact match and F1 metrics for generated answers."""
+    """Compute SQuAD exact-match/F1 in 0-100 scale using the official HF SQuAD metric."""
     preds, labels = eval_pred
     if isinstance(preds, tuple):
         preds = preds[0]
@@ -104,52 +187,43 @@ def compute_speech_qa_metrics(
 
     preds = np.array(preds)
     labels = np.array(labels)
+    preds = _sanitize_prediction_ids(preds, processor.tokenizer)
 
     tokenizer = processor.tokenizer
     pred_texts_raw = _safe_batch_decode(tokenizer, preds, skip_special_tokens=True)
     label_texts_raw = _decode_labels(labels, tokenizer)
 
-    # Post-process to remove chat template artifacts (matching ASR approach)
-    pred_texts = []
-    for text in pred_texts_raw:
-        text = text.strip()
-        # Extract answer from chat response format if needed
-        if "assistant\n" in text:
-            text = text.split("assistant\n", 1)[1].strip()
-        pred_texts.append(text)
-
-    label_texts = []
-    for text in label_texts_raw:
-        text = text.strip()
-        # Extract answer from chat response format if needed
-        if "assistant\n" in text:
-            text = text.split("assistant\n", 1)[1].strip()
-        label_texts.append(text)
+    pred_texts = [_normalize_prediction_text(text) for text in pred_texts_raw]
+    label_texts = [_strip_chat_artifacts(text) for text in label_texts_raw]
 
     total = min(len(pred_texts), len(reference_answers))
     if total == 0:
         return {"exact_match": 0.0, "f1": 0.0, "num_samples": 0.0}
 
-    exact_scores: List[float] = []
-    f1_scores: List[float] = []
+    pred_texts = pred_texts[:total]
+    label_texts = label_texts[:total]
+    references = _build_squad_references(reference_answers[:total], label_texts)
+    predictions = [{"id": str(idx), "prediction_text": pred_texts[idx]} for idx in range(total)]
 
-    for idx in range(total):
-        prediction = pred_texts[idx]
-        target_answers = reference_answers[idx]
-        if not target_answers:
-            target_answers = [label_texts[idx]]
+    metric = _get_squad_metric()
+    result = metric.compute(predictions=predictions, references=references)
+    exact_match = float(result.get("exact_match", 0.0))
+    f1_mean = float(result.get("f1", 0.0))
 
-        exact = _best_over_ground_truths(_exact_match_score, prediction, target_answers)
-        f1 = _best_over_ground_truths(_f1_score, prediction, target_answers)
-        exact_scores.append(exact)
-        f1_scores.append(f1)
-
-    exact_match = float(np.mean(exact_scores)) if exact_scores else 0.0
-    f1_mean = float(np.mean(f1_scores)) if f1_scores else 0.0
+    if audit_dump_path:
+        _write_eval_audit_dump(
+            dump_path=Path(audit_dump_path),
+            samples_to_dump=int(max(0, audit_samples)),
+            predictions=pred_texts,
+            references=references,
+            ids=list(reference_ids) if reference_ids is not None else None,
+            questions=list(reference_questions) if reference_questions is not None else None,
+            split_name=split_name,
+        )
 
     return {
-        "exact_match": exact_match * 100.0,
-        "f1": f1_mean * 100.0,
+        "exact_match": exact_match,
+        "f1": f1_mean,
         "num_samples": float(total),
     }
 

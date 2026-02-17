@@ -9,7 +9,7 @@ from random import Random
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
-from datasets import Dataset
+from datasets import Audio, Dataset
 
 __all__ = [
     "safe_cpu_count",
@@ -350,11 +350,38 @@ def build_manifest(
     if not indices:
         return manifest
 
+    # Restrict reads to required columns and avoid decoding audio arrays.
+    available_columns = set(ds.column_names)
+    required_columns = {col for col in (fields or []) if col in available_columns}
+    if duration_field in ds.column_names:
+        required_columns.add(duration_field)
+    if audio_column and audio_column in available_columns:
+        required_columns.add(audio_column)
+
+    manifest_ds = ds
+    if required_columns:
+        manifest_ds = ds.select_columns(sorted(required_columns))
+    if audio_column and audio_column in manifest_ds.column_names:
+        try:
+            audio_feature = manifest_ds.features.get(audio_column)
+            if isinstance(audio_feature, Audio) and bool(getattr(audio_feature, "decode", True)):
+                manifest_ds = manifest_ds.cast_column(
+                    audio_column,
+                    Audio(
+                        sampling_rate=audio_feature.sampling_rate,
+                        mono=audio_feature.mono,
+                        decode=False,
+                    ),
+                )
+        except Exception:
+            # Best effort optimization; fallback to original behavior on any cast error.
+            pass
+
     field_set = list(fields or [])
     skipped_count = 0
     for position, idx in enumerate(indices):
         try:
-            example = ds[int(idx)]
+            example = manifest_ds[int(idx)]
             if not isinstance(example, dict):
                 raise TypeError(
                     f"Expected dataset row to be a mapping, received {type(example)!r}"

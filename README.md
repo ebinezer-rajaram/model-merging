@@ -180,8 +180,20 @@ python3 main.py merge-sweep --adapters asr emotion --method weighted --search-ty
 | `langid` | `configs/langid.yaml` | `google/fleurs` | Language ID across configurable language sets. |
 | `speaker_id` | `configs/speaker_id.yaml` | `speechcolab/voxceleb1` | Speaker identification with subset controls for scale. |
 | `speaker_ver` | `configs/speaker_ver.yaml` | `speechcolab/voxceleb1` | Speaker verification with positive/negative pair controls. |
-| `speech_qa` | `configs/speech_qa.yaml` | `AudioLLMs/spoken_squad_test` | Spoken QA with prompt and context options. |
+| `speech_qa` | `configs/speech_qa.yaml` | `local_spoken_squad` (`data/datasets/Spoken-SQuAD`) | Local Spoken-SQuAD loader (JSON + wav files) with optional noisy test variants. |
 | `st` | `configs/st.yaml` | `fixie-ai/covost2` | Speech translation with configurable language pair/splits. |
+
+### Local Spoken-SQuAD Setup
+
+```bash
+git clone https://github.com/Chia-Hsuan-Lee/Spoken-SQuAD.git data/datasets/Spoken-SQuAD
+bash scripts/prepare_spoken_squad_local.sh data/datasets/Spoken-SQuAD
+```
+
+Expected extracted layout:
+
+- `data/datasets/Spoken-SQuAD/wav/train`
+- `data/datasets/Spoken-SQuAD/wav/test`
 
 ## Merge Config Usage
 
