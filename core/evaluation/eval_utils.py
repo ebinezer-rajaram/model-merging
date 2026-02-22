@@ -82,6 +82,8 @@ SPEECH_QA_EVAL_KEYS: Tuple[str, ...] = (
     "context_column",
     "id_column",
     "answer_column",
+    "subtask_column",
+    "include_choices_in_prompt",
     "split_percentages",
     "train_split",
     "validation_split",
@@ -598,7 +600,7 @@ def _build_generic_eval_setup(
     if label_names is not None and "label_names" not in collator_kwargs:
         collator_kwargs["label_names"] = list(label_names or [])
     # Inject dataset_cfg overrides (e.g., include_transcript)
-    for key in ("include_transcript", "include_context", "prepend_scenario"):
+    for key in ("include_transcript", "include_context", "include_choices_in_prompt", "prepend_scenario"):
         if key in dataset_cfg:
             collator_kwargs[key] = dataset_cfg[key]
     # Inject language from top-level config for ST task
@@ -625,6 +627,18 @@ def _build_generic_eval_setup(
         answers_list = list(answers_map.get(normalized_split, []))
         ids_list = [str(value) for value in dataset["id"]] if "id" in dataset.column_names else []
         questions_list = [str(value) for value in dataset["question"]] if "question" in dataset.column_names else []
+        choice_maps_list: List[Dict[str, str]] = []
+        for idx in range(len(dataset)):
+            row = dataset[idx]
+            choice_maps_list.append(
+                {
+                    "A": str(row.get("choice_a", "") or ""),
+                    "B": str(row.get("choice_b", "") or ""),
+                    "C": str(row.get("choice_c", "") or ""),
+                    "D": str(row.get("choice_d", "") or ""),
+                }
+            )
+        subtasks_list = [str(value) for value in dataset["task_name"]] if "task_name" in dataset.column_names else []
         # Align answers_list length with dataset
         if len(answers_list) != len(dataset):
             if len(answers_list) > len(dataset):
@@ -635,25 +649,39 @@ def _build_generic_eval_setup(
             ids_list.extend(["" for _ in range(len(dataset) - len(ids_list))])
         if len(questions_list) < len(dataset):
             questions_list.extend(["" for _ in range(len(dataset) - len(questions_list))])
-        reference_store = {"values": answers_list, "ids": ids_list, "questions": questions_list}
+        reference_store = {
+            "values": answers_list,
+            "ids": ids_list,
+            "questions": questions_list,
+            "choice_maps": choice_maps_list,
+            "subtasks": subtasks_list,
+        }
 
         def _apply_subset_indices(indices: Sequence[int]) -> None:
             selected: List[List[str]] = []
             selected_ids: List[str] = []
             selected_questions: List[str] = []
+            selected_choice_maps: List[Dict[str, str]] = []
+            selected_subtasks: List[str] = []
             for idx in indices:
                 idx_int = int(idx)
                 if 0 <= idx_int < len(answers_list):
                     selected.append(list(answers_list[idx_int]))
                     selected_ids.append(ids_list[idx_int])
                     selected_questions.append(questions_list[idx_int])
+                    selected_choice_maps.append(dict(choice_maps_list[idx_int]))
+                    selected_subtasks.append(subtasks_list[idx_int] if idx_int < len(subtasks_list) else "")
                 else:
                     selected.append([])
                     selected_ids.append("")
                     selected_questions.append("")
+                    selected_choice_maps.append({})
+                    selected_subtasks.append("")
             reference_store["values"] = selected
             reference_store["ids"] = selected_ids
             reference_store["questions"] = selected_questions
+            reference_store["choice_maps"] = selected_choice_maps
+            reference_store["subtasks"] = selected_subtasks
 
         apply_subset_indices = _apply_subset_indices
 
@@ -664,6 +692,8 @@ def _build_generic_eval_setup(
                 reference_answers=reference_store["values"],
                 reference_ids=reference_store.get("ids"),
                 reference_questions=reference_store.get("questions"),
+                reference_choice_maps=reference_store.get("choice_maps"),
+                reference_subtasks=reference_store.get("subtasks"),
                 audit_samples=int(metrics_kwargs.get("debug_eval_dump_samples", 0)),
                 audit_dump_path=metrics_kwargs.get("debug_eval_dump_path"),
                 split_name=normalized_split,
@@ -876,7 +906,18 @@ def _get_speech_qa_task_config() -> TaskConfig:
         compute_metrics_fn=compute_speech_qa_metrics,
         metrics_params={},
         required_columns=("audio", "question", "answers", "label_text"),
-        optional_columns=("transcript", "context", "duration", "id"),
+        optional_columns=(
+            "transcript",
+            "context",
+            "duration",
+            "id",
+            "task_name",
+            "answer_letter",
+            "choice_a",
+            "choice_b",
+            "choice_c",
+            "choice_d",
+        ),
     )
 
 

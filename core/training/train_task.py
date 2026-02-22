@@ -294,6 +294,35 @@ def _reindex_reference_texts(
     return aligned
 
 
+def _reindex_reference_choice_maps(
+    values: Sequence[Any],
+    selected_indices: Optional[Sequence[int]],
+    expected_length: int,
+) -> list[dict[str, str]]:
+    """Align choice maps to selected evaluation indices."""
+    base: list[dict[str, str]] = []
+    for value in (values or []):
+        if isinstance(value, dict):
+            base.append({str(k): str(v) for k, v in value.items()})
+        else:
+            base.append({})
+    if selected_indices is None:
+        aligned = base[:expected_length]
+    else:
+        aligned = []
+        for idx in selected_indices:
+            idx_int = int(idx)
+            if 0 <= idx_int < len(base):
+                aligned.append(dict(base[idx_int]))
+            else:
+                aligned.append({})
+    if len(aligned) < expected_length:
+        aligned.extend({} for _ in range(expected_length - len(aligned)))
+    elif len(aligned) > expected_length:
+        aligned = aligned[:expected_length]
+    return aligned
+
+
 def _normalize_qa_text(text: str) -> str:
     """Normalize short answer text for lightweight consistency checks."""
     import re
@@ -332,8 +361,10 @@ def _run_speech_qa_label_preflight(
         label_ids = [int(token) for token in row.tolist() if int(token) != -100]
         decoded_label = tokenizer.decode(label_ids, skip_special_tokens=True).strip()
         decoded_norm = _normalize_qa_text(decoded_label)
-        answers = feature.get("answers") or [feature.get("label_text", "")]
-        gold_text = str(answers[0] if answers else "").strip()
+        gold_text = str(feature.get("label_text") or "").strip()
+        if not gold_text:
+            answers = feature.get("answers") or [""]
+            gold_text = str(answers[0] if answers else "").strip()
         gold_norm = _normalize_qa_text(gold_text)
 
         if ("question:" in decoded_label.lower()) or ("listen to the audio segment" in decoded_label.lower()):
@@ -448,12 +479,23 @@ def _build_speech_qa_initial_eval_callback(
             reference_answers=references,
             reference_ids=reference_store.get("ids"),
             reference_questions=reference_store.get("questions"),
+            reference_choice_maps=reference_store.get("choice_maps"),
+            reference_subtasks=reference_store.get("subtasks"),
             audit_dump_path=reference_store.get("audit_dump_path"),
             audit_samples=int(reference_store.get("audit_samples", 0)),
             split_name=reference_store.get("split_name"),
         )
+        print(
+            "📌 Speech-QA initial summary: "
+            f"accuracy={float(official.get('accuracy', 0.0)):.4f} "
+            f"recognized_rate={float(official.get('recognized_rate', 0.0)):.4f} "
+            f"f1={float(official.get('f1', 0.0)):.2f} "
+            f"em={float(official.get('exact_match', 0.0)):.2f}"
+        )
 
         metrics: Dict[str, Any] = {
+            "eval_accuracy": float(official.get("accuracy", 0.0)),
+            "eval_recognized_rate": float(official.get("recognized_rate", 0.0)),
             "eval_exact_match": float(official.get("exact_match", 0.0)),
             "eval_f1": float(official.get("f1", 0.0)),
             "eval_num_samples": float(official.get("num_samples", len(pred_texts))),
@@ -594,6 +636,8 @@ SPEECH_QA_LOADER_KEYS: Tuple[str, ...] = (
     "context_column",
     "id_column",
     "answer_column",
+    "subtask_column",
+    "include_choices_in_prompt",
     "split_percentages",
     "train_split",
     "validation_split",
@@ -1508,7 +1552,22 @@ def run_speech_qa_task(config_path: Path) -> None:
         raise RuntimeError('Speech QA dataset did not provide a training split.')
 
     # Filter datasets to keep only necessary columns
-    keep_columns = ['audio', 'question', 'answers', 'label_text', 'transcript', 'context', 'duration', 'id']
+    keep_columns = [
+        'audio',
+        'question',
+        'answers',
+        'label_text',
+        'answer_letter',
+        'task_name',
+        'transcript',
+        'context',
+        'duration',
+        'id',
+        'choice_a',
+        'choice_b',
+        'choice_c',
+        'choice_d',
+    ]
     train_ds = filter_dataset_columns(train_ds, keep_columns)
     if val_ds is not None:
         val_ds = filter_dataset_columns(val_ds, keep_columns)
@@ -1552,6 +1611,26 @@ def run_speech_qa_task(config_path: Path) -> None:
         eval_selected_indices,
         len(eval_ds_for_trainer),
     )
+    eval_choice_maps_full = [
+        {
+            "A": str(eval_ds_full[idx].get("choice_a", "") or ""),
+            "B": str(eval_ds_full[idx].get("choice_b", "") or ""),
+            "C": str(eval_ds_full[idx].get("choice_c", "") or ""),
+            "D": str(eval_ds_full[idx].get("choice_d", "") or ""),
+        }
+        for idx in range(len(eval_ds_full))
+    ]
+    eval_choice_maps_for_trainer = _reindex_reference_choice_maps(
+        eval_choice_maps_full,
+        eval_selected_indices,
+        len(eval_ds_for_trainer),
+    )
+    eval_subtasks_full = [str(value) for value in eval_ds_full["task_name"]] if "task_name" in eval_ds_full.column_names else []
+    eval_subtasks_for_trainer = _reindex_reference_texts(
+        eval_subtasks_full,
+        eval_selected_indices,
+        len(eval_ds_for_trainer),
+    )
 
     target_sr = getattr(getattr(processor, 'feature_extractor', None), 'sampling_rate', 16000)
     collator = SpeechQACollator(
@@ -1559,6 +1638,7 @@ def run_speech_qa_task(config_path: Path) -> None:
         sampling_rate=target_sr,
         include_transcript=dataset_cfg.get('include_transcript', True),
         include_context=dataset_cfg.get('include_context', False),
+        include_choices_in_prompt=dataset_cfg.get('include_choices_in_prompt', False),
     )
 
     preflight_samples = int(training_cfg.get("label_preflight_samples", 12))
@@ -1579,12 +1659,12 @@ def run_speech_qa_task(config_path: Path) -> None:
         "logging_steps": 100,
         "save_steps": 200,
         "eval_steps": 200,
-        "metric_for_best_model": "f1",
+        "metric_for_best_model": "accuracy",
         "greater_is_better": True,
         "early_stopping_patience": 4,
         "length_column_name": "duration",
         "generation_kwargs": {
-            "max_new_tokens": 12,
+            "max_new_tokens": 1,
             "do_sample": False,
             "num_beams": 1,
         },
@@ -1608,6 +1688,8 @@ def run_speech_qa_task(config_path: Path) -> None:
         'values': eval_answers_for_trainer,
         'ids': eval_ids_for_trainer,
         'questions': eval_questions_for_trainer,
+        'choice_maps': eval_choice_maps_for_trainer,
+        'subtasks': eval_subtasks_for_trainer,
         'split_name': eval_split_name,
         'audit_dump_path': str(debug_eval_dump_path) if debug_eval_dump_samples > 0 else None,
         'audit_samples': debug_eval_dump_samples,
@@ -1620,6 +1702,8 @@ def run_speech_qa_task(config_path: Path) -> None:
             reference_answers=reference_store['values'],
             reference_ids=reference_store.get('ids'),
             reference_questions=reference_store.get('questions'),
+            reference_choice_maps=reference_store.get('choice_maps'),
+            reference_subtasks=reference_store.get('subtasks'),
             audit_dump_path=reference_store.get('audit_dump_path'),
             audit_samples=int(reference_store.get('audit_samples', 0)),
             split_name=reference_store.get('split_name'),
@@ -1646,9 +1730,21 @@ def run_speech_qa_task(config_path: Path) -> None:
         test_answers = answers_map.get('test', [])
         test_ids = [str(value) for value in test_ds_for_eval["id"]] if "id" in test_ds_for_eval.column_names else []
         test_questions = [str(value) for value in test_ds_for_eval["question"]] if "question" in test_ds_for_eval.column_names else []
+        test_choice_maps = [
+            {
+                "A": str(test_ds_for_eval[idx].get("choice_a", "") or ""),
+                "B": str(test_ds_for_eval[idx].get("choice_b", "") or ""),
+                "C": str(test_ds_for_eval[idx].get("choice_c", "") or ""),
+                "D": str(test_ds_for_eval[idx].get("choice_d", "") or ""),
+            }
+            for idx in range(len(test_ds_for_eval))
+        ]
+        test_subtasks = [str(value) for value in test_ds_for_eval["task_name"]] if "task_name" in test_ds_for_eval.column_names else []
     else:
         test_ids = []
         test_questions = []
+        test_choice_maps = []
+        test_subtasks = []
 
     # Wrap datasets to update references before evaluation.
     full_eval_ds_wrapped = _DatasetWithReferenceStore(
@@ -1658,6 +1754,8 @@ def run_speech_qa_task(config_path: Path) -> None:
             "values": eval_answers_full,
             "ids": eval_ids_full,
             "questions": eval_questions_full,
+            "choice_maps": eval_choice_maps_full,
+            "subtasks": eval_subtasks_full,
             "split_name": eval_split_name,
             "audit_dump_path": str(debug_eval_dump_path) if debug_eval_dump_samples > 0 else None,
             "audit_samples": debug_eval_dump_samples,
@@ -1672,6 +1770,8 @@ def run_speech_qa_task(config_path: Path) -> None:
                 "values": test_answers,
                 "ids": test_ids,
                 "questions": test_questions,
+                "choice_maps": test_choice_maps,
+                "subtasks": test_subtasks,
                 "split_name": "test",
                 "audit_dump_path": str(debug_eval_dump_path) if debug_eval_dump_samples > 0 else None,
                 "audit_samples": debug_eval_dump_samples,

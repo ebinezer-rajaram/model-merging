@@ -13,7 +13,7 @@ TASK_METRICS: Dict[str, Tuple[str, bool]] = {
     "asr": ("wer", False),
     "emotion": ("macro_f1", True),
     "intent": ("accuracy", True),
-    "speech_qa": ("f1", True),
+    "speech_qa": ("accuracy", True),
     "kws": ("macro_f1", True),
     "langid": ("accuracy", True),
     "speaker_id": ("accuracy", True),

@@ -17,10 +17,12 @@ def test_speech_qa_allowlists_include_local_dataset_keys() -> None:
         "allow_train_only_fallback",
         "audio_merge_policy",
         "max_total_samples",
+        "include_choices_in_prompt",
+        "subtask_column",
     }
     assert required.issubset(set(SPEECH_QA_LOADER_KEYS))
     assert required.issubset(set(SPEECH_QA_EVAL_KEYS))
 
 
-def test_speech_qa_interference_metric_mapping_uses_f1() -> None:
-    assert TASK_METRICS["speech_qa"] == ("f1", True)
+def test_speech_qa_interference_metric_mapping_uses_accuracy() -> None:
+    assert TASK_METRICS["speech_qa"] == ("accuracy", True)

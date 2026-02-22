@@ -36,7 +36,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CACHE_ROOT = PACKAGE_ROOT / "artifacts" / "speech_qa" / "datasets"
 
 LOCAL_SPOKEN_SQUAD_DATASET_NAME = "local_spoken_squad"
-DEFAULT_DATASET_NAME = LOCAL_SPOKEN_SQUAD_DATASET_NAME
+DEFAULT_DATASET_NAME = "ddwang2000/MMSU"
 DEFAULT_LOCAL_DATA_DIR = PACKAGE_ROOT / "data" / "datasets" / "Spoken-SQuAD"
 DEFAULT_LOCAL_TRAIN_JSON = "spoken_train-v1.1.json"
 DEFAULT_LOCAL_TEST_JSON = "spoken_test-v1.1.json"
@@ -49,13 +49,16 @@ FALLBACK_QUESTION_COLUMNS: Tuple[str, ...] = ("question", "query", "instruction"
 FALLBACK_TRANSCRIPT_COLUMNS: Tuple[str, ...] = ("transcript", "text", "sentence")
 FALLBACK_CONTEXT_COLUMNS: Tuple[str, ...] = ("context", "passage", "paragraph")
 FALLBACK_ID_COLUMNS: Tuple[str, ...] = ("id", "qid", "example_id")
-FALLBACK_ANSWER_COLUMNS: Tuple[str, ...] = ("answers", "answer")
+FALLBACK_ANSWER_COLUMNS: Tuple[str, ...] = ("answers", "answer", "answer_gt")
+CHOICE_COLUMNS: Tuple[str, ...] = ("choice_a", "choice_b", "choice_c", "choice_d")
 AUDIO_MERGE_POLICIES: Tuple[str, ...] = ("first_sentence", "concatenate_sentences")
 
 MANIFEST_FIELDS: Tuple[str, ...] = (
     "id",
+    "task_name",
     "question",
     "label_text",
+    "answer_letter",
     "answers",
     "context",
     "transcript",
@@ -134,6 +137,51 @@ def _normalize_answers(example: Dict[str, Any], answer_column: str) -> Dict[str,
 
     example["answers"] = normalized
     example["label_text"] = normalized[0]
+    return example
+
+
+def _normalize_choice_text(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def _derive_answer_letter(example: Dict[str, Any], answers: Sequence[str]) -> str:
+    """Resolve MMSU answer text to option letter A/B/C/D."""
+    normalized_answers = {_normalize_choice_text(answer) for answer in answers if str(answer).strip()}
+    if not normalized_answers:
+        return ""
+    for label, key in zip(("A", "B", "C", "D"), CHOICE_COLUMNS):
+        choice_value = _normalize_choice_text(example.get(key, ""))
+        if choice_value and choice_value in normalized_answers:
+            return label
+    return ""
+
+
+def _normalize_answers_for_mmsu(example: Dict[str, Any], answer_column: str) -> Dict[str, Any]:
+    """Normalize answers and derive A/B/C/D target labels for MMSU."""
+    example = _normalize_answers(example, answer_column)
+    answers = list(example.get("answers") or [])
+    answer_letter = _derive_answer_letter(example, answers)
+    if not answer_letter:
+        example_id = str(example.get("id", "") or "")
+        raise ValueError(
+            "Unable to derive MMSU answer letter from choices for example "
+            f"id={example_id!r} answers={answers!r}."
+        )
+    example["answer_letter"] = answer_letter
+    example["label_text"] = answer_letter
+    return example
+
+
+def _inject_choice_context(example: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a deterministic choices block in context when multiple-choice fields exist."""
+    labels = ("A", "B", "C", "D")
+    lines: List[str] = []
+    for label, key in zip(labels, CHOICE_COLUMNS):
+        value = str(example.get(key, "") or "").strip()
+        if value:
+            lines.append(f"{label}. {value}")
+    if lines:
+        example["context"] = "\n".join(lines)
     return example
 
 
@@ -591,6 +639,7 @@ def load_speech_qa_dataset(
     context_column: Optional[str] = None,
     id_column: Optional[str] = None,
     answer_column: Optional[str] = None,
+    subtask_column: str = "task_name",
     split_percentages: Optional[Mapping[str, float] | Sequence[float]] = None,
     train_split: str = "train",
     validation_split: Optional[str] = "validation",
@@ -604,6 +653,7 @@ def load_speech_qa_dataset(
     max_missing_audio_rate: float = 0.01,
     allow_train_only_fallback: bool = True,
     audio_merge_policy: str = "first_sentence",
+    include_choices_in_prompt: bool = False,
 ) -> Tuple[Optional[Dataset], Optional[Dataset], Optional[Dataset], Dict[str, Any]]:
     """
     Load an audio question answering dataset with optional sub-sampling.
@@ -668,6 +718,8 @@ def load_speech_qa_dataset(
         fallback_context = _select_candidate_column(dataset, FALLBACK_CONTEXT_COLUMNS)
         if fallback_context and fallback_context != "context":
             dataset = _rename_column(dataset, fallback_context, "context")
+        elif bool(include_choices_in_prompt) and _select_candidate_column(dataset, CHOICE_COLUMNS):
+            dataset = dataset.map(_inject_choice_context)
 
     if id_column and id_column != "id":
         dataset = _rename_column(dataset, id_column, "id")
@@ -679,6 +731,22 @@ def load_speech_qa_dataset(
     target_answer_column = answer_column or _select_candidate_column(dataset, FALLBACK_ANSWER_COLUMNS)
     if not target_answer_column:
         raise ValueError("Dataset must include an answers column. Provide 'answer_column'.")
+
+    is_mmsu = str(dataset_name or "").strip().lower() == DEFAULT_DATASET_NAME.lower()
+    if is_mmsu:
+        subtask_name = str(subtask_column or "task_name").strip()
+        if not subtask_name:
+            raise ValueError("subtask_column must be a non-empty string for MMSU.")
+        if subtask_name != "task_name":
+            if not _column_exists(dataset, subtask_name):
+                raise ValueError(
+                    f"MMSU requires subtask column '{subtask_name}', but it was not found."
+                )
+            dataset = _rename_column(dataset, subtask_name, "task_name")
+        elif not _column_exists(dataset, "task_name"):
+            raise ValueError(
+                "MMSU requires a 'task_name' column for subtask interference analysis."
+            )
 
     # Apply split percentages if specified
     if split_percentages:
@@ -721,30 +789,15 @@ def load_speech_qa_dataset(
         max_test_samples = allocation["test"]
 
     # Normalize answers
-    normalize_fn = partial(_normalize_answers, answer_column=target_answer_column)
+    if is_mmsu:
+        normalize_fn = partial(_normalize_answers_for_mmsu, answer_column=target_answer_column)
+    else:
+        normalize_fn = partial(_normalize_answers, answer_column=target_answer_column)
     dataset = dataset.map(normalize_fn)
 
     # Build cache root path
     cache_root = Path(cache_dir) if cache_dir is not None else DATASET_CACHE_ROOT
 
-    # Add duration information (with caching)
-    effective_num_proc = resolve_num_proc(num_proc)
-    dataset = add_duration_to_dataset(
-        dataset,
-        audio_column=audio_column_name,
-        num_proc=effective_num_proc,
-        cache_dir=cache_root if not force_rebuild else None,
-    )
-
-    # Filter by duration if specified (with caching)
-    dataset = filter_by_duration(
-        dataset,
-        max_duration=max_duration,
-        min_duration=min_duration,
-        cache_dir=cache_root if not force_rebuild else None,
-    )
-
-    # Build cache path
     dataset_key = dataset_name.replace("/", "_")
     config_key = dataset_config or "default"
     if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME:
@@ -759,6 +812,26 @@ def load_speech_qa_dataset(
             json.dumps(local_source, sort_keys=True).encode("utf-8")
         ).hexdigest()[:10]
         config_key = f"local_{source_hash}"
+    duration_filter_cache_dir = cache_root / f"{dataset_key}_{config_key}"
+
+    # Add duration information (with caching)
+    effective_num_proc = resolve_num_proc(num_proc)
+    dataset = add_duration_to_dataset(
+        dataset,
+        audio_column=audio_column_name,
+        num_proc=effective_num_proc,
+        cache_dir=duration_filter_cache_dir if not force_rebuild else None,
+    )
+
+    # Filter by duration if specified (with caching)
+    dataset = filter_by_duration(
+        dataset,
+        max_duration=max_duration,
+        min_duration=min_duration,
+        cache_dir=duration_filter_cache_dir if not force_rebuild else None,
+    )
+
+    # Build cache path
     cache_name = (
         f"{dataset_key}_{config_key}"
         f"_train_{_samples_key(max_train_samples)}"
@@ -789,6 +862,8 @@ def load_speech_qa_dataset(
             "test_json": test_json if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
             "noisy_test_variant": noisy_test_variant if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
             "audio_merge_policy": audio_merge_policy if dataset_name == LOCAL_SPOKEN_SQUAD_DATASET_NAME else None,
+            "include_choices_in_prompt": bool(include_choices_in_prompt),
+            "subtask_column": str(subtask_column or "task_name"),
         },
     )
 
@@ -839,6 +914,7 @@ class SpeechQACollator:
     sampling_rate: int
     include_transcript: bool = True
     include_context: bool = False
+    include_choices_in_prompt: bool = False
 
     def _select_label(self, feature: Dict[str, Any]) -> str:
         if "label_text" in feature and feature["label_text"]:
@@ -853,10 +929,25 @@ class SpeechQACollator:
         question = str(feature.get("question", "")).strip()
         transcript = str(feature.get("transcript", "") or "").strip()
         context = str(feature.get("context", "") or "").strip()
+        labels = ("A", "B", "C", "D")
+        choice_lines: List[str] = []
+        for label, key in zip(labels, CHOICE_COLUMNS):
+            choice_value = str(feature.get(key, "") or "").strip()
+            if choice_value:
+                choice_lines.append(f"{label}. {choice_value}")
 
-        instruction = "Copy the shortest exact answer span from the audio. Output only those words."
-        if question:
-            instruction += f"\nQuestion: {question}"
+        instruction = (
+            "You are answering a multiple-choice question from audio.\n"
+            "Select the single best option using only audio evidence.\n"
+            "Respond with exactly one uppercase letter: A, B, C, or D.\n"
+            "Do not output any other text."
+        )
+        instruction += f"\nQuestion: {question}" if question else "\nQuestion:"
+        if self.include_choices_in_prompt:
+            if choice_lines:
+                instruction += "\nChoices:\n" + "\n".join(choice_lines)
+            elif context:
+                instruction += f"\nChoices:\n{context}"
         if transcript and self.include_transcript:
             instruction += f"\nTranscript: {transcript}"
         if context and self.include_context:
@@ -923,9 +1014,13 @@ class SpeechQACollator:
             input_ids = inputs["input_ids"][i]
             label_length = len(label_tokens)
 
-            # Search for the label tokens in the sequence
+            # Search for the label tokens in the sequence.
+            #
+            # For MMSU letter targets (A/B/C/D), these tokens also appear in the
+            # prompt's choices block. Use the last match to align with the
+            # assistant answer appended at the end of the chat template.
             found = False
-            for j in range(len(input_ids) - label_length + 1):
+            for j in range(len(input_ids) - label_length, -1, -1):
                 if torch.all(input_ids[j:j + label_length] == torch.tensor(label_tokens, device=input_ids.device)):
                     label_ids[i, :j] = -100
                     found = True
