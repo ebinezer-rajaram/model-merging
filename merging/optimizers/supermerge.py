@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 import torch
@@ -161,6 +164,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     magnitude_scope = str(params.get("magnitude_scope", "per_layer")).strip().lower()
     magnitude_parameterization = str(params.get("magnitude_parameterization", "linear")).strip().lower()
     magnitude_init = float(params.get("magnitude_init", 1.0))
+    learn_magnitude = bool(params.get("learn_magnitude", True))
     if normalize_coefficients and coefficient_parameterization == "simplex_softmax_scaled":
         print(
             "[supermerge] coefficient_parameterization='simplex_softmax_scaled' ignores "
@@ -185,6 +189,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         params.get("early_stopping_threshold", params.get("early_stopping_min_delta", 0.0))
     )
     restore_best_checkpoint = bool(params.get("restore_best_checkpoint", False))
+    checkpoint_on_heldout_eval = bool(params.get("checkpoint_on_heldout_eval", True))
+    resume_checkpoint_raw = params.get("resume_checkpoint")
+    checkpoint_dir_raw = params.get("checkpoint_dir")
     min_optimizer_steps_before_early_stop = int(params.get("min_optimizer_steps_before_early_stop", 20))
     early_stopping_warmup_steps = int(params.get("early_stopping_warmup_steps", 20))
     eval_subset = params.get("eval_subset")
@@ -262,6 +269,8 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         raise ValueError("optimizer.params.min_optimizer_steps_before_early_stop must be >= 0.")
     if early_stopping_warmup_steps < 0:
         raise ValueError("optimizer.params.early_stopping_warmup_steps must be >= 0.")
+    if resume_checkpoint_raw is not None and not str(resume_checkpoint_raw).strip():
+        raise ValueError("optimizer.params.resume_checkpoint must be a non-empty path when provided.")
     if coefficient_parameterization not in {"tanh_alpha", "simplex_softmax_scaled"}:
         raise ValueError(
             "supermerge exact mode requires "
@@ -316,6 +325,27 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     restore_best_checkpoint_effective = (
         heldout_eval_cfg.restore_best_checkpoint if heldout_enabled and heldout_eval_cfg is not None else restore_best_checkpoint
     )
+    checkpoint_dir: Optional[Path] = None
+    if checkpoint_on_heldout_eval:
+        if checkpoint_dir_raw is not None:
+            checkpoint_dir = Path(str(checkpoint_dir_raw))
+            if not checkpoint_dir.is_absolute():
+                checkpoint_dir = PACKAGE_ROOT / checkpoint_dir
+        elif heldout_enabled:
+            task_combo = "_".join(sorted(tasks))
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_dir = (
+                PACKAGE_ROOT
+                / "artifacts"
+                / "merged"
+                / context.method
+                / task_combo
+                / "checkpoints"
+                / f"run_supermerge_{variant}_{timestamp}"
+            )
+        if checkpoint_dir is not None:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[supermerge] checkpoint_dir={checkpoint_dir}")
     set_global_seed(seed)
     _validate_selection_split(split=split, enforce_validation_only_selection=enforce_validation_only_selection)
     if heldout_enabled and merge_impl == "functional_clone_legacy":
@@ -456,9 +486,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         init_value = init_lambda
     alpha_default: Optional[torch.nn.Parameter] = None
     alpha_layer: Optional[torch.nn.Parameter] = None
-    magnitude_task: Optional[torch.nn.Parameter] = None
-    magnitude_default: Optional[torch.nn.Parameter] = None
-    magnitude_layer: Optional[torch.nn.Parameter] = None
+    magnitude_task: Optional[torch.Tensor] = None
+    magnitude_default: Optional[torch.Tensor] = None
+    magnitude_layer: Optional[torch.Tensor] = None
     if variant == "layer_wise":
         # In layer-wise mode, task coefficients act as the global default anchor.
         # Share storage so task/default remain consistent and gradients are observable.
@@ -475,32 +505,50 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     if coefficient_parameterization == "simplex_softmax_scaled":
         if variant == "layer_wise":
             if magnitude_scope == "per_task":
-                magnitude_default = torch.nn.Parameter(
-                    torch.full((num_adapters,), magnitude_init, device=device)
-                )
-                magnitude_layer = torch.nn.Parameter(
-                    torch.full((len(layer_indices), num_adapters), magnitude_init, device=device)
-                )
+                if learn_magnitude:
+                    magnitude_default = torch.nn.Parameter(
+                        torch.full((num_adapters,), magnitude_init, device=device)
+                    )
+                    magnitude_layer = torch.nn.Parameter(
+                        torch.full((len(layer_indices), num_adapters), magnitude_init, device=device)
+                    )
+                else:
+                    magnitude_default = torch.full((num_adapters,), magnitude_init, device=device)
+                    magnitude_layer = torch.full((len(layer_indices), num_adapters), magnitude_init, device=device)
             elif magnitude_scope == "global":
-                magnitude_default = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+                if learn_magnitude:
+                    magnitude_default = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+                else:
+                    magnitude_default = torch.full((1,), magnitude_init, device=device)
                 magnitude_layer = None
             else:
                 # per_layer: one scalar per layer plus a scalar default fallback.
-                magnitude_default = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
-                magnitude_layer = torch.nn.Parameter(
-                    torch.full((len(layer_indices), 1), magnitude_init, device=device)
-                )
+                if learn_magnitude:
+                    magnitude_default = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+                    magnitude_layer = torch.nn.Parameter(
+                        torch.full((len(layer_indices), 1), magnitude_init, device=device)
+                    )
+                else:
+                    magnitude_default = torch.full((1,), magnitude_init, device=device)
+                    magnitude_layer = torch.full((len(layer_indices), 1), magnitude_init, device=device)
             magnitude_task = magnitude_default
-            if magnitude_default is not None:
+            if learn_magnitude and magnitude_default is not None:
                 optim_params.append(magnitude_default)
-            if magnitude_layer is not None:
+            if learn_magnitude and magnitude_layer is not None:
                 optim_params.append(magnitude_layer)
         else:
             if magnitude_scope == "per_task":
-                magnitude_task = torch.nn.Parameter(torch.full((num_adapters,), magnitude_init, device=device))
+                if learn_magnitude:
+                    magnitude_task = torch.nn.Parameter(torch.full((num_adapters,), magnitude_init, device=device))
+                else:
+                    magnitude_task = torch.full((num_adapters,), magnitude_init, device=device)
             else:
-                magnitude_task = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
-            optim_params.append(magnitude_task)
+                if learn_magnitude:
+                    magnitude_task = torch.nn.Parameter(torch.full((1,), magnitude_init, device=device))
+                else:
+                    magnitude_task = torch.full((1,), magnitude_init, device=device)
+            if learn_magnitude:
+                optim_params.append(magnitude_task)
 
     optimizer = torch.optim.Adam(optim_params, lr=lr, betas=betas)
     task_iters: Dict[str, Optional[Iterator[Any]]] = {task: None for task in tasks}
@@ -548,6 +596,87 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
     fused_linear_handles = []
     fused_lora_handles = []
     heldout_evaluator: Optional[PeriodicHeldoutEvaluator] = None
+    resumed_from_checkpoint = False
+    resume_checkpoint_path: Optional[str] = None
+
+    def _tensor_cpu(value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+        return value.detach().to("cpu").clone()
+
+    def _copy_tensor_(target: Optional[torch.Tensor], source: Optional[torch.Tensor], name: str) -> None:
+        if target is None or source is None:
+            return
+        if tuple(target.shape) != tuple(source.shape):
+            raise ValueError(
+                f"resume checkpoint shape mismatch for '{name}': "
+                f"current={tuple(target.shape)} checkpoint={tuple(source.shape)}"
+            )
+        with torch.no_grad():
+            target.copy_(source.to(device=target.device, dtype=target.dtype))
+
+    def _save_training_checkpoint(
+        *,
+        filename: str,
+        best_step: Optional[int] = None,
+    ) -> Optional[Path]:
+        if checkpoint_dir is None:
+            return None
+        checkpoint_path = checkpoint_dir / filename
+        payload = {
+            "step": int(steps_completed),
+            "optimizer_step": int(optimizer_steps_completed),
+            "best_step": (None if best_step is None else int(best_step)),
+            "variant": variant,
+            "tasks": list(tasks),
+            "alpha_task": _tensor_cpu(alpha_task),
+            "alpha_default": _tensor_cpu(alpha_default),
+            "alpha_layer": _tensor_cpu(alpha_layer),
+            "magnitude_task": _tensor_cpu(magnitude_task),
+            "magnitude_default": _tensor_cpu(magnitude_default),
+            "magnitude_layer": _tensor_cpu(magnitude_layer),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "time": datetime.now().isoformat(),
+        }
+        torch.save(payload, checkpoint_path)
+        manifest = {
+            "latest_checkpoint": str(checkpoint_path),
+            "updated_at": datetime.now().isoformat(),
+            "step": int(steps_completed),
+            "optimizer_step": int(optimizer_steps_completed),
+            "best_step": (None if best_step is None else int(best_step)),
+        }
+        with (checkpoint_dir / "checkpoint_manifest.json").open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2)
+        return checkpoint_path
+
+    start_step = 0
+    if resume_checkpoint_raw is not None:
+        checkpoint_path = Path(str(resume_checkpoint_raw))
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = PACKAGE_ROOT / checkpoint_path
+        if not checkpoint_path.exists():
+            raise ValueError(f"optimizer.params.resume_checkpoint not found: {checkpoint_path}")
+        payload = torch.load(checkpoint_path, map_location="cpu")
+        _copy_tensor_(alpha_task, payload.get("alpha_task"), "alpha_task")
+        _copy_tensor_(alpha_default, payload.get("alpha_default"), "alpha_default")
+        _copy_tensor_(alpha_layer, payload.get("alpha_layer"), "alpha_layer")
+        _copy_tensor_(magnitude_task, payload.get("magnitude_task"), "magnitude_task")
+        _copy_tensor_(magnitude_default, payload.get("magnitude_default"), "magnitude_default")
+        _copy_tensor_(magnitude_layer, payload.get("magnitude_layer"), "magnitude_layer")
+        optimizer_state = payload.get("optimizer_state_dict")
+        if isinstance(optimizer_state, Mapping):
+            optimizer.load_state_dict(dict(optimizer_state))
+        start_step = int(payload.get("step", 0))
+        steps_completed = start_step
+        optimizer_steps_completed = int(payload.get("optimizer_step", 0))
+        resumed_from_checkpoint = True
+        resume_checkpoint_path = str(checkpoint_path)
+        print(
+            "[supermerge] resumed from checkpoint: "
+            f"path={checkpoint_path} step={steps_completed} update_step={optimizer_steps_completed}"
+        )
+
     coefficient_provider = TaskCoefficientProvider()
     init_task_coeffs, init_default_coeffs, init_layer_coeffs = _merge_coeffs(
         alpha_task=alpha_task,
@@ -645,9 +774,9 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             )
         step_iter: Iterable[int]
         if progress_bar and tqdm is not None:
-            step_iter = tqdm(range(steps), desc="supermerge", total=steps)
+            step_iter = tqdm(range(start_step, steps), desc="supermerge", total=max(0, steps - start_step))
         else:
-            step_iter = range(steps)
+            step_iter = range(start_step, steps)
         optimizer.zero_grad(set_to_none=True)
         for step in step_iter:
             num_tasks = len(tasks)
@@ -982,6 +1111,14 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                                 best_magnitude_default = magnitude_default.detach().clone()
                             if magnitude_layer is not None:
                                 best_magnitude_layer = magnitude_layer.detach().clone()
+                            _save_training_checkpoint(
+                                filename="best.pt",
+                                best_step=heldout_evaluator.best_update_step,
+                            )
+                        _save_training_checkpoint(
+                            filename="latest.pt",
+                            best_step=(heldout_evaluator.best_update_step if heldout_evaluator is not None else None),
+                        )
                         if bool(heldout_entry.get("should_stop", False)):
                             print(
                                 f"[supermerge] early stopping at step {step + 1}/{steps} "
@@ -1022,6 +1159,8 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
             unregister_fused_linear_modules(fused_linear_handles)
         if fused_lora_handles:
             unregister_fused_lora_linear_modules(fused_lora_handles)
+
+    _save_training_checkpoint(filename="final.pt", best_step=best_selected_update_step)
 
     last_task, last_default, last_layer = _merge_coeffs(
         alpha_task=alpha_task,
@@ -1138,6 +1277,7 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "magnitude_scope": magnitude_scope,
         "magnitude_parameterization": magnitude_parameterization,
         "magnitude_init": magnitude_init,
+        "learn_magnitude": learn_magnitude,
         "project_coefficients": project_coefficients,
         "coefficient_min": coefficient_min,
         "coefficient_max": coefficient_max,
@@ -1156,6 +1296,10 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
         "restore_best_checkpoint": restore_best_checkpoint,
         "restore_best_checkpoint_effective": restore_best_checkpoint_effective,
         "restored_best_checkpoint": restored_best_checkpoint,
+        "checkpoint_on_heldout_eval": checkpoint_on_heldout_eval,
+        "checkpoint_dir": (str(checkpoint_dir) if checkpoint_dir is not None else None),
+        "resumed_from_checkpoint": resumed_from_checkpoint,
+        "resume_checkpoint_path": resume_checkpoint_path,
         "objective": "supervised_cross_entropy",
         "exact_mode": True,
         "plus_plus": plus_plus,

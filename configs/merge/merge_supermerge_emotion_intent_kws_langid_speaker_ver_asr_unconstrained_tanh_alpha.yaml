@@ -13,11 +13,7 @@ optimizer:
     seed: 0
     lr: 1.0e-3
     init_lambda: 0.25
-    coefficient_parameterization: simplex_softmax_scaled
-    magnitude_scope: global
-    magnitude_parameterization: linear
-    magnitude_init: 3.906        # fixed global scale (with 6 tasks, simplex starts at 1/6 each => ~0.651 per task)
-    learn_magnitude: false
+    coefficient_parameterization: tanh_alpha
     normalize_coefficients: false
     betas: [0.9, 0.99]
     merge_impl: fused_lora_linear
@@ -83,7 +79,7 @@ search:
   type: grid
   grid: {}
 
-eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr]
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr, speech_qa]
 split: test
 save_merged: false
 constraint_nonnegative: false

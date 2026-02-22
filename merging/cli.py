@@ -30,15 +30,25 @@ def merge_adapters_cli(
     if not config and not effective_specs:
         raise ValueError("Provide --adapters or --config.")
 
+    merge_config = load_merge_config(config) if config else None
+    merge_spec = merge_config.to_merge_spec() if merge_config else None
+    save_merged = bool(merge_config.save_merged) if merge_config else True
+
+    if evaluate and not save_merged:
+        raise ValueError(
+            "Cannot use --evaluate when config has save_merged=false via `main.py merge`; "
+            "either set save_merged=true or run evaluation separately."
+        )
+
     merge_result = run_merge(
         adapter_specs=effective_specs if not config else [],
         method=method,
         lambda_weight=lambda_weight,
         merge_mode=merge_mode,
         output=output,
-        save_merged=True,
+        save_merged=save_merged,
         show_progress=True,
-        merge_spec=load_merge_config(config).to_merge_spec() if config else None,
+        merge_spec=merge_spec,
     )
     merged_path = merge_result.output_path
     task_names = merge_result.task_names
