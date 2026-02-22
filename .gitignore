@@ -111,3 +111,5 @@ temp/
 *.old
 *.pid
 *.sock
+
+analysis/
