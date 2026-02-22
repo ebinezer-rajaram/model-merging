@@ -180,8 +180,22 @@ python3 main.py merge-sweep --adapters asr emotion --method weighted --search-ty
 | `langid` | `configs/langid.yaml` | `google/fleurs` | Language ID across configurable language sets. |
 | `speaker_id` | `configs/speaker_id.yaml` | `speechcolab/voxceleb1` | Speaker identification with subset controls for scale. |
 | `speaker_ver` | `configs/speaker_ver.yaml` | `speechcolab/voxceleb1` | Speaker verification with positive/negative pair controls. |
-| `speech_qa` | `configs/speech_qa.yaml` | `local_spoken_squad` (`data/datasets/Spoken-SQuAD`) | Local Spoken-SQuAD loader (JSON + wav files) with optional noisy test variants. |
+| `speech_qa` | `configs/speech_qa.yaml` | `ddwang2000/MMSU` | MMSU-first Speech-QA setup for OOD evaluation, with optional local Spoken-SQuAD compatibility mode. |
 | `st` | `configs/st.yaml` | `fixie-ai/covost2` | Speech translation with configurable language pair/splits. |
+
+### Speech-QA (MMSU-First) Notes
+
+- Default `speech_qa` config evaluates on `ddwang2000/MMSU` in eval-first mode (`test_split: train`).
+- Use `dataset.max_test_samples` (or `dataset.max_total_samples`) to run subset-based OOD evaluation.
+- Keep `dataset.include_choices_in_prompt: false` for question-only prompts, or set it to `true` to include A-D options.
+- MMSU scoring uses free-form generation but primary evaluation is option-letter accuracy (`A/B/C/D`).
+- Speech-QA keeps SQuAD EM/F1 as secondary diagnostics for backward comparison.
+
+To switch back to local Spoken-SQuAD mode:
+
+1. Set `dataset.dataset_name: local_spoken_squad`.
+2. Set `dataset.validation_split: null`, `dataset.test_split: test` (or custom split policy).
+3. Keep local data fields (`data_dir`, `train_json`, `test_json`, `audio_root`) configured.
 
 ### Local Spoken-SQuAD Setup
 
@@ -221,6 +235,7 @@ For method internals and full merge framework notes, see `merging/merging.md`.
 ## Metrics Interpretation
 
 - Each task has task-specific primary metrics (for example, WER for ASR, accuracy/F1-style metrics for classification tasks).
+- For MMSU Speech-QA, primary metric is `accuracy` over option letters; EM/F1 are diagnostic only.
 - For merged evaluations, `interference_delta` captures transfer quality relative to reference baselines; higher is generally better.
 - Compare metrics at fixed split (`train`, `validation`, or `test`) to avoid invalid conclusions.
 
