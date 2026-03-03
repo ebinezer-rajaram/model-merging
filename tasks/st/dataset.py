@@ -71,6 +71,63 @@ LANGUAGE_NAMES = {
 }
 
 
+def _compute_valid_audio_indices(
+    ds: Dataset,
+    *,
+    audio_column_name: str,
+    split_name: str,
+    log_corrupted: bool,
+    validate_absolute_paths: bool,
+) -> List[int]:
+    """Return indices with usable audio content using a single Arrow column scan."""
+    audio_values = ds.data.column(audio_column_name).to_pylist()
+    id_values = ds.data.column("id").to_pylist() if "id" in ds.column_names else None
+
+    valid_indices: List[int] = []
+    for idx, audio_data in enumerate(audio_values):
+        try:
+            if isinstance(audio_data, dict):
+                audio_bytes = audio_data.get("bytes")
+                audio_path = audio_data.get("path")
+                audio_array = audio_data.get("array")
+
+                if (
+                    audio_bytes is not None
+                    and len(audio_bytes) == 0
+                    and not audio_path
+                    and audio_array is None
+                ):
+                    raise ValueError("empty audio bytes")
+
+                if validate_absolute_paths and audio_path:
+                    path = Path(audio_path)
+                    # Only validate existence for absolute paths; some datasets store relative paths.
+                    if path.is_absolute() and (not path.is_file() or path.stat().st_size == 0):
+                        raise ValueError("missing/empty audio file")
+
+                if (
+                    (audio_bytes is not None and len(audio_bytes) > 0)
+                    or audio_path
+                    or audio_array is not None
+                ):
+                    valid_indices.append(idx)
+                else:
+                    raise ValueError("missing audio content")
+            elif audio_data is not None:
+                valid_indices.append(idx)
+            else:
+                raise ValueError("missing audio content")
+        except Exception as e:
+            if log_corrupted:
+                sample_id = id_values[idx] if id_values is not None and idx < len(id_values) else None
+                sample_label = sample_id if sample_id is not None else f"index_{idx}"
+                print(
+                    f"⚠️  Found corrupted audio at {split_name}[{idx}] (id={sample_label}): {str(e)[:100]}"
+                )
+
+    return valid_indices
+
+
 def load_covost2_dataset(
     *,
     dataset_name: str = DEFAULT_DATASET_NAME,
@@ -147,28 +204,13 @@ def load_covost2_dataset(
     for split_name in list(dataset.keys()):
         before = len(dataset[split_name])
         ds = dataset[split_name]
-
-        # Manually build list of valid indices by checking raw bytes or paths
-        valid_indices = []
-        for idx in range(len(ds)):
-            try:
-                # Access the raw row data from Arrow table without decoding
-                row = ds.data.slice(idx, 1).to_pydict()
-                audio_data = row[audio_column_name][0]
-
-                # Check if bytes field exists and is non-empty
-                if isinstance(audio_data, dict):
-                    audio_bytes = audio_data.get("bytes")
-                    audio_path = audio_data.get("path")
-                    audio_array = audio_data.get("array")
-                    if (audio_bytes and len(audio_bytes) > 0) or audio_path or audio_array is not None:
-                        valid_indices.append(idx)
-                elif audio_data is not None:
-                    # If not a dict, assume it's valid
-                    valid_indices.append(idx)
-            except Exception:
-                # Skip problematic rows
-                continue
+        valid_indices = _compute_valid_audio_indices(
+            ds,
+            audio_column_name=audio_column_name,
+            split_name=split_name,
+            log_corrupted=False,
+            validate_absolute_paths=False,
+        )
 
         # Select only valid indices
         if len(valid_indices) < before:
@@ -221,55 +263,13 @@ def load_covost2_dataset(
     for split_name in list(dataset.keys()):
         before = len(dataset[split_name])
         ds = dataset[split_name]
-        valid_indices = []
-
-        for idx in range(len(ds)):
-            try:
-                row = ds.data.slice(idx, 1).to_pydict()
-                audio_data = row[audio_column_name][0]
-
-                if isinstance(audio_data, dict):
-                    audio_bytes = audio_data.get("bytes")
-                    audio_path = audio_data.get("path")
-                    audio_array = audio_data.get("array")
-
-                    if (
-                        audio_bytes is not None
-                        and len(audio_bytes) == 0
-                        and not audio_path
-                        and audio_array is None
-                    ):
-                        raise ValueError("empty audio bytes")
-
-                    if audio_path:
-                        path = Path(audio_path)
-                        # Only validate existence for absolute paths; some datasets store relative paths.
-                        if path.is_absolute():
-                            if not path.is_file() or path.stat().st_size == 0:
-                                raise ValueError("missing/empty audio file")
-
-                    if (
-                        (audio_bytes is not None and len(audio_bytes) > 0)
-                        or audio_path
-                        or audio_array is not None
-                    ):
-                        valid_indices.append(idx)
-                    else:
-                        raise ValueError("missing audio content")
-                elif audio_data is not None:
-                    valid_indices.append(idx)
-                else:
-                    raise ValueError("missing audio content")
-            except Exception as e:
-                sample_id = None
-                try:
-                    sample_id = row.get("id", [None])[0]
-                except Exception:
-                    sample_id = None
-                sample_label = sample_id if sample_id is not None else f"index_{idx}"
-                print(
-                    f"⚠️  Found corrupted audio at {split_name}[{idx}] (id={sample_label}): {str(e)[:100]}"
-                )
+        valid_indices = _compute_valid_audio_indices(
+            ds,
+            audio_column_name=audio_column_name,
+            split_name=split_name,
+            log_corrupted=True,
+            validate_absolute_paths=True,
+        )
 
         if len(valid_indices) < before:
             dataset[split_name] = ds.select(valid_indices)

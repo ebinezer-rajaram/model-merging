@@ -2,7 +2,7 @@
 
 task: st
 seed: 0
-language: en_zh-CN                    # Language pair (affects prompts and artifact directories). Format: {source_lang}_{target_lang}
+language: en_ar
 
 # Model Configuration
 model:
