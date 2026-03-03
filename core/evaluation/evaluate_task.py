@@ -72,6 +72,11 @@ from tasks.speaker_ver import (
     get_artifact_directories as get_speaker_ver_artifact_directories,
     get_config_path as get_speaker_ver_config_path,
 )
+from tasks.vocalsound import (
+    TASK_NAME as VOCALSOUND_TASK_NAME,
+    get_artifact_directories as get_vocalsound_artifact_directories,
+    get_config_path as get_vocalsound_config_path,
+)
 
 
 
@@ -156,6 +161,7 @@ def _resolve_adapter_path(
             KWS_TASK_NAME: get_kws_artifact_directories,
             LANGID_TASK_NAME: get_langid_artifact_directories,
             SPEAKER_VER_TASK_NAME: get_speaker_ver_artifact_directories,
+            VOCALSOUND_TASK_NAME: get_vocalsound_artifact_directories,
         }
 
         task_config_map = {
@@ -168,6 +174,7 @@ def _resolve_adapter_path(
             KWS_TASK_NAME: get_kws_config_path,
             LANGID_TASK_NAME: get_langid_config_path,
             SPEAKER_VER_TASK_NAME: get_speaker_ver_config_path,
+            VOCALSOUND_TASK_NAME: get_vocalsound_config_path,
         }
 
         if raw_path in task_artifact_map:
@@ -315,6 +322,7 @@ def _save_metrics_to_locations(
     trained_on_task: Optional[str] = None,
     merged_tasks: Optional[list[str]] = None,
     merged_method: Optional[str] = None,
+    merged_variant_tag: Optional[str] = None,
     eval_tag: Optional[str] = None,
     show_summary: bool = True,
 ) -> list[Path]:
@@ -351,7 +359,8 @@ def _save_metrics_to_locations(
         merged_eval_dir.mkdir(parents=True, exist_ok=True)
         label = adapter_label or merged_method or "merged"
         label_for_paths = f"{label}__{eval_tag}" if eval_tag else label
-        merged_filename = _apply_eval_tag(f"{task}_{label}_metrics.json")
+        variant_prefix = f"{merged_variant_tag}_" if merged_variant_tag else ""
+        merged_filename = _apply_eval_tag(f"{task}_{variant_prefix}{label}_metrics.json")
         merged_metrics_dir = merged_eval_dir / "per_task" / task
         merged_metrics_dir.mkdir(parents=True, exist_ok=True)
         merged_metrics_path = merged_metrics_dir / merged_filename
@@ -466,6 +475,9 @@ def evaluate(
     elif task == SPEAKER_VER_TASK_NAME:
         config_path = get_speaker_ver_config_path(PACKAGE_ROOT, config_name)
         artifact_dirs = get_speaker_ver_artifact_directories(PACKAGE_ROOT)
+    elif task == VOCALSOUND_TASK_NAME:
+        config_path = get_vocalsound_config_path(PACKAGE_ROOT, config_name)
+        artifact_dirs = get_vocalsound_artifact_directories(PACKAGE_ROOT)
     else:
         raise NotImplementedError(f"Evaluation for task '{task}' is not implemented yet.")
 
@@ -774,6 +786,7 @@ def evaluate(
         trained_on_task=trained_on_task,
         merged_tasks=merged_tasks,
         merged_method=merged_method,
+        merged_variant_tag=(language if task == ST_TASK_NAME else None),
         eval_tag=eval_tag,
         show_summary=show_summary,
     )

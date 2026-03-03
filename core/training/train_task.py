@@ -108,6 +108,14 @@ from tasks.speaker_ver import (
     load_speaker_ver_dataset,
     TASK_NAME as SPEAKER_VER_TASK_NAME,
 )
+from tasks.vocalsound import (
+    VocalSoundCollator,
+    compute_vocalsound_metrics,
+    get_artifact_directories as get_vocalsound_artifact_directories,
+    get_config_path as get_vocalsound_config_path,
+    load_vocalsound_dataset,
+    TASK_NAME as VOCALSOUND_TASK_NAME,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -774,6 +782,20 @@ def _build_speaker_ver_collator(
     )
 
 
+def _build_vocalsound_collator(
+    processor,
+    dataset_cfg: Dict[str, Any],
+    label_names: Sequence[str],
+    sampling_rate: int,
+):
+    del dataset_cfg
+    return VocalSoundCollator(
+        processor=processor,
+        sampling_rate=sampling_rate,
+        label_names=list(label_names or []),
+    )
+
+
 def _build_emotion_metrics(processor, label_names: Sequence[str], store_predictions: bool = False):
     return partial(
         compute_emotion_metrics,
@@ -818,6 +840,14 @@ def _build_kws_metrics(processor, label_names: Sequence[str]):
 def _build_speaker_ver_metrics(processor, label_names: Sequence[str]):
     return partial(
         compute_speaker_ver_metrics,
+        processor=processor,
+        label_names=list(label_names or []),
+    )
+
+
+def _build_vocalsound_metrics(processor, label_names: Sequence[str]):
+    return partial(
+        compute_vocalsound_metrics,
         processor=processor,
         label_names=list(label_names or []),
     )
@@ -953,6 +983,25 @@ CLASSIFICATION_TASK_SPECS: Dict[str, ClassificationTaskSpec] = {
         metrics_builder=_build_speaker_ver_metrics,
         keep_columns=("audio_a", "audio_b", "label", "duration_a", "duration_b"),
         default_adapter_subdir="qwen2_5_omni_lora_speaker_ver",
+    ),
+    VOCALSOUND_TASK_NAME: ClassificationTaskSpec(
+        task_name=VOCALSOUND_TASK_NAME,
+        get_config_path=get_vocalsound_config_path,
+        get_artifact_directories=get_vocalsound_artifact_directories,
+        dataset_loader=load_vocalsound_dataset,
+        loader_extra_keys=(
+            "train_manifest",
+            "validation_manifest",
+            "test_manifest",
+            "label_map_file",
+            "audio_root",
+            "path_key",
+            "label_key",
+        ),
+        collator_builder=_build_vocalsound_collator,
+        metrics_builder=_build_vocalsound_metrics,
+        keep_columns=("audio", "label", "duration", "label_name", "audio_path"),
+        default_adapter_subdir="qwen2_5_omni_lora_vocalsound",
     ),
 }
 
@@ -1495,6 +1544,11 @@ def run_speaker_ver_task(config_path: Path) -> None:
     run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[SPEAKER_VER_TASK_NAME])
 
 
+def run_vocalsound_task(config_path: Path) -> None:
+    """Run the VocalSound classification fine-tuning workflow."""
+    run_audio_classification_task(config_path, CLASSIFICATION_TASK_SPECS[VOCALSOUND_TASK_NAME])
+
+
 def run_speech_qa_task(config_path: Path) -> None:
     """Run the speech question answering fine-tuning workflow."""
     config = load_config(config_path)
@@ -1825,6 +1879,9 @@ def main() -> None:
     elif args.task == SPEAKER_VER_TASK_NAME:
         config_path = get_speaker_ver_config_path(PACKAGE_ROOT, args.config)
         run_speaker_ver_task(config_path)
+    elif args.task == VOCALSOUND_TASK_NAME:
+        config_path = get_vocalsound_config_path(PACKAGE_ROOT, args.config)
+        run_vocalsound_task(config_path)
     elif args.task == SPEECH_QA_TASK_NAME:
         config_path = get_speech_qa_config_path(PACKAGE_ROOT, args.config)
         run_speech_qa_task(config_path)

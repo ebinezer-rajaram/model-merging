@@ -1,0 +1,119 @@
+# VocalSound Classification Task Configuration
+
+task: vocalsound
+seed: 0
+
+# Model Configuration
+model:
+  path: data/models/Qwen2.5-Omni-3B
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.1
+    bias: none
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+      - audio_tower.proj
+    task_type: CAUSAL_LM
+
+# Dataset Configuration
+dataset:
+  # Source (official local VocalSound bundle)
+  data_dir: data/datasets/vocalsound
+  train_manifest: vocalsound_train_data.json
+  validation_manifest: vocalsound_valid_data.json
+  test_manifest: vocalsound_eval_data.json
+  label_map_file: class_labels_indices_vs.csv
+  audio_root: null
+  path_key: null
+  label_key: null
+  # Processing
+  seed: 0
+  num_proc: auto
+  cache_splits: true
+  force_rebuild: false
+  # Sample limits
+  max_train_samples: null
+  max_validation_samples: null
+  max_test_samples: null
+  # Audio filtering
+  max_duration: 8.0
+  min_duration: 0.1
+
+# Loss Configuration
+loss:
+  type: default
+
+# Training Configuration
+training:
+  # Compute & batching
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 24
+  gradient_accumulation_steps: 1
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  # Optimization
+  learning_rate: 3e-05
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  # Schedule
+  num_train_epochs: 3
+  eval_strategy: steps
+  eval_steps: 100
+  save_strategy: steps
+  save_steps: 100
+  initial_eval: true
+  # Checkpointing
+  save_total_limit: 3
+  resume_from_checkpoint: null
+  # Early stopping
+  early_stopping_patience: 3
+  early_stopping_threshold: 0.001
+  load_best_model_at_end: true
+  metric_for_best_model: eval_accuracy
+  greater_is_better: true
+  # Data loading
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 4
+  group_by_length: true
+  length_column_name: duration
+  balanced_sampling: null
+  sampling_method: sqrt_inverse
+  # Evaluation
+  max_eval_samples: null
+  shuffle_eval_subset: false
+  eval_accumulation_steps: 4
+  remove_unused_columns: false
+  # Logging
+  logging_steps: 25
+  report_to:
+    - tensorboard
+    - wandb
+  # Generation
+  generation_kwargs:
+    max_new_tokens: 4
+    do_sample: false
+    num_beams: 1
+
+# Artifacts Configuration
+artifacts:
+  adapter_subdir: qwen2_5_omni_lora_vocalsound
+
+# Metrics Configuration
+metrics:
+  history_csv: vocalsound_training_history.csv
+  loss_plot: vocalsound_loss_accuracy.png
+  confusion_matrix: vocalsound_confusion_matrix.png
+  normalize_confusion_matrix: true

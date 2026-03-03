@@ -142,7 +142,7 @@ class MetricsConfig(BaseModel):
 class TaskConfig(BaseModel):
     """Complete task configuration."""
 
-    task: str = Field(description="Task name (asr, emotion, intent, speaker_id, speech_qa, st, kws, langid, speaker_ver)")
+    task: str = Field(description="Task name (asr, emotion, intent, speaker_id, speech_qa, st, kws, langid, speaker_ver, vocalsound)")
     seed: int = Field(default=0, ge=0, description="Random seed for reproducibility")
     language: Optional[str] = Field(
         default=None,
@@ -162,7 +162,7 @@ class TaskConfig(BaseModel):
     @classmethod
     def validate_task_name(cls, v: str) -> str:
         """Validate task name is one of the supported tasks."""
-        valid_tasks = {"asr", "emotion", "intent", "speaker_id", "speech_qa", "st", "kws", "langid", "speaker_ver"}
+        valid_tasks = {"asr", "emotion", "intent", "speaker_id", "speech_qa", "st", "kws", "langid", "speaker_ver", "vocalsound"}
         if v not in valid_tasks:
             raise ValueError(f"Task must be one of {valid_tasks}, got: {v}")
         return v

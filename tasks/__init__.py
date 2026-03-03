@@ -10,4 +10,5 @@ __all__ = [
     "speaker_ver",
     "speech_qa",
     "st",
+    "vocalsound",
 ]

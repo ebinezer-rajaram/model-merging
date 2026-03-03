@@ -43,6 +43,7 @@ TASK_REGISTRY = {
     "st": "tasks.st",
     "langid": "tasks.langid",
     "kws": "tasks.kws",
+    "vocalsound": "tasks.vocalsound",
 }
 
 

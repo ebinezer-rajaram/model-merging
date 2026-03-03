@@ -18,6 +18,7 @@ TASK_METRICS: Dict[str, Tuple[str, bool]] = {
     "langid": ("accuracy", True),
     "speaker_id": ("accuracy", True),
     "speaker_ver": ("accuracy", True),
+    "vocalsound": ("accuracy", True),
 }
 
 

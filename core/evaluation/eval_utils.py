@@ -53,6 +53,16 @@ CLASSIFICATION_EVAL_KEYS: Tuple[str, ...] = (
     "languages",
 )
 
+VOCALSOUND_EVAL_KEYS: Tuple[str, ...] = CLASSIFICATION_EVAL_KEYS + (
+    "train_manifest",
+    "validation_manifest",
+    "test_manifest",
+    "label_map_file",
+    "audio_root",
+    "path_key",
+    "label_key",
+)
+
 SPEAKER_EXTRA_EVAL_KEYS: Tuple[str, ...] = (
     "max_speakers",
     "max_samples_per_speaker",
@@ -611,6 +621,9 @@ def _build_generic_eval_setup(
 
     # Create metrics function
     metrics_kwargs = {"processor": processor, **task_config.metrics_params}
+    # Pass ST language pair to metrics so BLEU uses correct tokenization (e.g., zh for Chinese targets).
+    if "translation" in task_config.required_columns and "language" in cfg:
+        metrics_kwargs["target_lang"] = cfg["language"]
     if label_names is not None and "label_names" not in metrics_kwargs:
         metrics_kwargs["label_names"] = list(label_names or [])
 
@@ -717,6 +730,12 @@ def _build_generic_eval_setup(
 
 def _asr_post_load_hook(dataset: Any, dataset_cfg: Dict[str, Any], split: str) -> Any:
     """Filter ASR dataset by duration if specified."""
+    # ST loader already applies duration filtering with disk caching.
+    # Re-running dataset.filter(...) here duplicates work and is slow.
+    # Set `dataset.skip_post_load_duration_filter=false` to force this hook.
+    if bool(dataset_cfg.get("skip_post_load_duration_filter", True)):
+        return dataset
+
     max_duration = dataset_cfg.get("max_duration")
     min_duration = dataset_cfg.get("min_duration")
 
@@ -1009,6 +1028,28 @@ def _get_speaker_ver_task_config() -> TaskConfig:
     )
 
 
+def _get_vocalsound_task_config() -> TaskConfig:
+    """Create VocalSound classification task configuration."""
+    from tasks.vocalsound import (
+        VocalSoundCollator,
+        compute_vocalsound_metrics,
+        load_vocalsound_dataset,
+    )
+
+    return TaskConfig(
+        dataset_loader=load_vocalsound_dataset,
+        loader_config_keys=VOCALSOUND_EVAL_KEYS,
+        has_label_names=True,
+        collator_class=VocalSoundCollator,
+        collator_params={},
+        compute_metrics_fn=compute_vocalsound_metrics,
+        metrics_params={},
+        required_columns=("audio", "label"),
+        optional_columns=("duration", "label_name", "audio_path"),
+        post_load_hook=_classification_post_load_hook,
+    )
+
+
 def _register_default_tasks() -> None:
     """Register built-in task builders.
 
@@ -1100,6 +1141,16 @@ def _register_default_tasks() -> None:
         register_eval_task(
             "speaker_ver",
             lambda **kwargs: _build_generic_eval_setup(_get_speaker_ver_task_config(), **kwargs),
+            overwrite=True,
+        )
+    except Exception:
+        pass
+
+    # Register VocalSound
+    try:
+        register_eval_task(
+            "vocalsound",
+            lambda **kwargs: _build_generic_eval_setup(_get_vocalsound_task_config(), **kwargs),
             overwrite=True,
         )
     except Exception:

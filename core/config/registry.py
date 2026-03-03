@@ -78,6 +78,12 @@ TASK_REGISTRY = {
         artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
         default_adapter_subdir="qwen2_5_omni_lora_speaker_ver",
     ),
+    "vocalsound": TaskInfo(
+        name="vocalsound",
+        default_config_file="vocalsound.yaml",
+        artifact_subdirs=["adapters", "vectors", "metrics", "models", "datasets"],
+        default_adapter_subdir="qwen2_5_omni_lora_vocalsound",
+    ),
 }
 
 
