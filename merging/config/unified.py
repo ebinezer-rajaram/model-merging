@@ -27,6 +27,7 @@ _ALLOWED_TOP_LEVEL_KEYS = {
     "eval_subset",
     "output_dir",
     "compute_missing_interference_baselines",
+    "post_sweep_eval",
 }
 
 _LEGACY_TOP_LEVEL_KEYS = {
@@ -85,6 +86,7 @@ class MergeConfig:
     eval_subset: Optional[Dict[str, Any]] = None
     output_dir: Optional[Path] = None
     compute_missing_interference_baselines: bool = True
+    post_sweep_eval: Optional[Dict[str, Any]] = None
 
     def to_merge_spec(self) -> MergeSpec:
         return MergeSpec(
@@ -275,6 +277,21 @@ def normalize_merge_config(payload: Mapping[str, Any]) -> MergeConfig:
     if eval_subset is not None and not isinstance(eval_subset, Mapping):
         raise ValueError("eval_subset must be a mapping when provided.")
 
+    post_sweep_eval = payload.get("post_sweep_eval")
+    if post_sweep_eval is not None:
+        if not isinstance(post_sweep_eval, Mapping):
+            raise ValueError("post_sweep_eval must be a mapping when provided.")
+        post_sweep_eval = dict(post_sweep_eval)
+        if "split" in post_sweep_eval:
+            post_split = str(post_sweep_eval["split"])
+            if post_split not in {"train", "validation", "test"}:
+                raise ValueError("post_sweep_eval.split must be one of: train, validation, test.")
+            post_sweep_eval["split"] = post_split
+        if "eval_tasks" in post_sweep_eval:
+            if not isinstance(post_sweep_eval["eval_tasks"], list):
+                raise ValueError("post_sweep_eval.eval_tasks must be a list when provided.")
+            post_sweep_eval["eval_tasks"] = [str(x) for x in post_sweep_eval["eval_tasks"]]
+
     output_dir = payload.get("output_dir")
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -297,6 +314,7 @@ def normalize_merge_config(payload: Mapping[str, Any]) -> MergeConfig:
         eval_subset=dict(eval_subset) if isinstance(eval_subset, Mapping) else None,
         output_dir=output_dir,
         compute_missing_interference_baselines=bool(payload.get("compute_missing_interference_baselines", True)),
+        post_sweep_eval=post_sweep_eval,
     )
 
 

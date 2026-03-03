@@ -33,6 +33,7 @@ class SweepConfig:
     compute_missing_interference_baselines: bool = True
     constraint_nonnegative: bool = True
     output_dir: Optional[Path] = None
+    post_sweep_eval: Optional[Dict[str, Any]] = None
 
     def to_merge_config(self) -> MergeConfig:
         payload: Dict[str, Any] = {
@@ -47,6 +48,9 @@ class SweepConfig:
             "eval_subset": dict(self.eval_subset) if isinstance(self.eval_subset, Mapping) else None,
             "output_dir": str(self.output_dir) if self.output_dir is not None else None,
             "compute_missing_interference_baselines": self.compute_missing_interference_baselines,
+            "post_sweep_eval": (
+                dict(self.post_sweep_eval) if isinstance(self.post_sweep_eval, Mapping) else None
+            ),
         }
         if self.grid is not None:
             payload["grid"] = dict(self.grid)
@@ -86,6 +90,7 @@ def load_sweep_config(path: Path) -> SweepConfig:
         compute_missing_interference_baselines=config.compute_missing_interference_baselines,
         constraint_nonnegative=config.constraint_nonnegative,
         output_dir=config.output_dir,
+        post_sweep_eval=(dict(config.post_sweep_eval) if config.post_sweep_eval is not None else None),
     )
 
 
@@ -140,6 +145,66 @@ def _optimizer_mapping(spec: Optional[OptimizerSpec | Dict[str, Any]]) -> Option
     if isinstance(spec, dict):
         return dict(spec)
     return {"type": spec.type, "params": dict(spec.params)}
+
+
+def _run_post_sweep_eval_for_best(
+    *,
+    config: MergeConfig,
+    best_params: Dict[str, Any],
+    lambda_policy: Optional[Dict[str, Any]],
+    optimizer: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    post_cfg = config.post_sweep_eval
+    if not isinstance(post_cfg, Mapping) or not bool(post_cfg.get("enabled", False)):
+        return {"enabled": False}
+
+    split = str(post_cfg.get("split", "test"))
+    eval_tasks_raw = post_cfg.get("eval_tasks")
+    eval_tasks: Optional[List[str]] = None
+    if isinstance(eval_tasks_raw, list):
+        eval_tasks = [str(task) for task in eval_tasks_raw]
+    elif config.eval_tasks is not None:
+        eval_tasks = list(config.eval_tasks)
+
+    save_merged = bool(post_cfg.get("save_merged", True))
+    print(
+        "\n🚀 Running post-sweep full evaluation "
+        f"(split={split}, save_merged={save_merged}) "
+        f"for best params: {best_params}"
+    )
+
+    method_impl = get_merge_method(config.method)
+    effective_params = normalize_params(method_impl, params=best_params)
+    if lambda_policy is not None:
+        effective_params["lambda_policy"] = lambda_policy
+    if optimizer is not None:
+        effective_params["optimizer"] = optimizer
+    method_impl.validate(len(config.adapters), effective_params)
+
+    results = evaluate_merged_adapter(
+        adapter_path=None,
+        method=config.method,
+        task_names=config.adapters,
+        params=effective_params,
+        eval_tasks=eval_tasks,
+        split=split,
+        save_merged=save_merged,
+        save_results=True,
+        show_summary=True,
+        merge_mode=config.merge_mode,
+        compute_missing_interference_baselines=config.compute_missing_interference_baselines,
+        eval_subset=None,
+    )
+    score, score_details = _score_min_interference(results, config.constraint_nonnegative)
+    return {
+        "enabled": True,
+        "split": split,
+        "save_merged": save_merged,
+        "params": dict(best_params),
+        "score": float(score),
+        "score_details": score_details,
+        "results": results,
+    }
 
 
 def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
@@ -199,6 +264,7 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
         "grid": search.get("grid", {}),
         "search": search,
         "constraint_nonnegative": config.constraint_nonnegative,
+        "post_sweep_eval": None,
         "best_index": best_idx,
         "best_score": best_score,
         "runs": runs,
@@ -264,5 +330,19 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
     if best_idx is not None:
         best_params = runs[best_idx]["params"]
         print(f"🏆 Best params: {best_params} (score={best_score:.4f})")
+        try:
+            summary["post_sweep_eval"] = _run_post_sweep_eval_for_best(
+                config=config,
+                best_params=best_params,
+                lambda_policy=lambda_policy,
+                optimizer=optimizer,
+            )
+        except Exception as exc:
+            summary["post_sweep_eval"] = {
+                "enabled": True,
+                "error": str(exc),
+            }
+            print(f"❌ Post-sweep evaluation failed: {exc}")
+        _atomic_write_json(summary_path, summary)
 
     return summary

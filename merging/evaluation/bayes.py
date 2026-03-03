@@ -31,7 +31,13 @@ from merging.config.unified import MergeConfig
 from merging.engine.registry import get_merge_method, normalize_params
 from merging.runtime.utils import PACKAGE_ROOT
 from merging.evaluation.evaluate import evaluate_merged_adapter
-from merging.evaluation.sweep import _atomic_write_json, _lambda_policy_mapping, _optimizer_mapping, _score_min_interference
+from merging.evaluation.sweep import (
+    _atomic_write_json,
+    _lambda_policy_mapping,
+    _optimizer_mapping,
+    _run_post_sweep_eval_for_best,
+    _score_min_interference,
+)
 
 
 _FLOAT_KINDS = {"float", "continuous"}
@@ -340,6 +346,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         "grid": search.get("grid", {}),
         "search": search,
         "constraint_nonnegative": config.constraint_nonnegative,
+        "post_sweep_eval": None,
         "best_index": best_idx,
         "best_score": best_score,
         "runs": runs,
@@ -641,5 +648,19 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
     if best_idx is not None:
         best_params = runs[best_idx]["params"]
         print(f"🏆 Best params: {best_params} (score={best_score:.4f})")
+        try:
+            summary["post_sweep_eval"] = _run_post_sweep_eval_for_best(
+                config=config,
+                best_params=best_params,
+                lambda_policy=lambda_policy,
+                optimizer=optimizer,
+            )
+        except Exception as exc:
+            summary["post_sweep_eval"] = {
+                "enabled": True,
+                "error": str(exc),
+            }
+            print(f"❌ Post-sweep evaluation failed: {exc}")
+        _flush_summary()
 
     return summary

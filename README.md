@@ -99,6 +99,9 @@ python3 main.py evaluate --task asr --config asr.yaml --split validation
 
 # Run merge from config
 python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
+
+# Train VocalSound adapter
+python3 main.py train --task vocalsound --config vocalsound.yaml
 ```
 
 ## Core CLI Workflows
@@ -182,6 +185,24 @@ python3 main.py merge-sweep --adapters asr emotion --method weighted --search-ty
 | `speaker_ver` | `configs/speaker_ver.yaml` | `speechcolab/voxceleb1` | Speaker verification with positive/negative pair controls. |
 | `speech_qa` | `configs/speech_qa.yaml` | `ddwang2000/MMSU` | MMSU-first Speech-QA setup for OOD evaluation, with optional local Spoken-SQuAD compatibility mode. |
 | `st` | `configs/st.yaml` | `fixie-ai/covost2` | Speech translation with configurable language pair/splits. |
+| `vocalsound` | `configs/vocalsound.yaml` | local VocalSound bundle | Human vocal sound classification from local manifest + WAV files. |
+
+### VocalSound Local Setup
+
+Use the official VocalSound local bundle under:
+
+- `data/datasets/vocalsound/vocalsound_train_data.json`
+- `data/datasets/vocalsound/vocalsound_valid_data.json`
+- `data/datasets/vocalsound/vocalsound_eval_data.json`
+- `data/datasets/vocalsound/class_labels_indices_vs.csv`
+
+Optional compatibility files are also supported:
+
+- `data/datasets/vocalsound/datafiles/tr.json`
+- `data/datasets/vocalsound/datafiles/val.json`
+- `data/datasets/vocalsound/datafiles/te.json`
+
+If audio paths in manifests are relative, they are resolved against `dataset.audio_root` (if set) and then the manifest directory.
 
 ### Speech-QA (MMSU-First) Notes
 
@@ -215,12 +236,16 @@ Current valid merge config files in this repo:
 
 - `configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml`
 - `configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml`
+- `configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
+- `configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
 
 Use them directly with `merge` and `merge-sweep`:
 
 ```bash
 python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
 python3 main.py merge-sweep --config configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
+python3 main.py merge-sweep --config configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
 ```
 
 For method internals and full merge framework notes, see `merging/merging.md`.

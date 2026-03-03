@@ -107,6 +107,22 @@ def parse_args() -> argparse.Namespace:
     eval_merged_parser = subparsers.add_parser("evaluate-merged", help="Run evaluation for a merged adapter.")
     eval_merged_parser.add_argument("--adapter-path", default=None, help="Path to merged adapter run/base directory.")
     eval_merged_parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional merge config YAML used to source method/tasks/params for checkpoint replay.",
+    )
+    eval_merged_parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Path to a SuperMerge checkpoint file (.pt) to evaluate directly.",
+    )
+    eval_merged_parser.add_argument(
+        "--optimizer-steps",
+        type=int,
+        default=None,
+        help="Override optimizer steps for checkpoint replay (defaults to checkpoint's optimizer_step).",
+    )
+    eval_merged_parser.add_argument(
         "--method",
         default=None,
         choices=tuple(merge_methods),
@@ -375,6 +391,9 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
             "eval_subset": (dict(config.eval_subset) if config.eval_subset is not None else None),
             "output_dir": str(config.output_dir) if config.output_dir is not None else None,
             "compute_missing_interference_baselines": config.compute_missing_interference_baselines,
+            "post_sweep_eval": (
+                dict(config.post_sweep_eval) if config.post_sweep_eval is not None else None
+            ),
         }
         if config.lambda_policy is not None:
             config_dict["lambda_policy"] = {
