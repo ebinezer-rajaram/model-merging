@@ -248,6 +248,11 @@ class CustomTrainer(Trainer):
 
         # Use custom sampler
         from torch.utils.data import BatchSampler
+        num_workers = (
+            int(self.args.dataloader_num_workers)
+            if self.args.dataloader_num_workers is not None
+            else 0
+        )
 
         if isinstance(self.custom_sampler, BatchSampler):
             # Batch sampler - handles batching internally
@@ -255,7 +260,7 @@ class CustomTrainer(Trainer):
                 self.train_dataset,
                 batch_sampler=self.custom_sampler,
                 collate_fn=self.data_collator,
-                num_workers=self.args.dataloader_num_workers,
+                num_workers=num_workers,
                 pin_memory=self.args.dataloader_pin_memory,
             )
         else:
@@ -265,7 +270,7 @@ class CustomTrainer(Trainer):
                 batch_size=self.args.per_device_train_batch_size,
                 sampler=self.custom_sampler,
                 collate_fn=self.data_collator,
-                num_workers=self.args.dataloader_num_workers,
+                num_workers=num_workers,
                 pin_memory=self.args.dataloader_pin_memory,
                 drop_last=self.args.dataloader_drop_last,
             )

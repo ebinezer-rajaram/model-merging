@@ -11,6 +11,16 @@ from .schemas import (
     TaskConfig,
 )
 from .loader import load_task_config, get_config_path
+from .multitask_schema import (
+    MultiTaskArtifactsConfig,
+    MultiTaskConfig,
+    MultiTaskLoggingConfig,
+    MultiTaskMetricsConfig,
+    MultiTaskSamplingConfig,
+    MultiTaskSpec,
+    MultiTaskTrainingConfig,
+    parse_multitask_config,
+)
 from .registry import TASK_REGISTRY, get_task_info
 
 __all__ = [
@@ -24,6 +34,14 @@ __all__ = [
     "TaskConfig",
     "load_task_config",
     "get_config_path",
+    "MultiTaskConfig",
+    "MultiTaskArtifactsConfig",
+    "MultiTaskLoggingConfig",
+    "MultiTaskMetricsConfig",
+    "MultiTaskSamplingConfig",
+    "MultiTaskSpec",
+    "MultiTaskTrainingConfig",
+    "parse_multitask_config",
     "TASK_REGISTRY",
     "get_task_info",
 ]

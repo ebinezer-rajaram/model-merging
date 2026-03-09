@@ -27,6 +27,7 @@ class TrainingConfig:
 
     # Training duration
     num_train_epochs: int
+    max_steps: int
 
     # Logging and checkpointing
     logging_steps: int
@@ -116,6 +117,7 @@ def parse_training_config(
     num_train_epochs = training_cfg.get(
         "num_train_epochs", defaults.get("num_train_epochs", 5)
     )
+    max_steps = int(training_cfg.get("max_steps", defaults.get("max_steps", -1)))
     warmup_ratio = training_cfg.get(
         "warmup_ratio", defaults.get("warmup_ratio", 0.05)
     )
@@ -126,7 +128,10 @@ def parse_training_config(
         max(1, num_train_examples)
         / (per_device_train_batch_size * gradient_accumulation_steps * max(1, world_size))
     )
-    total_training_steps = max(1, updates_per_epoch * max(1, int(num_train_epochs)))
+    if max_steps is not None and int(max_steps) > 0:
+        total_training_steps = int(max_steps)
+    else:
+        total_training_steps = max(1, updates_per_epoch * max(1, int(num_train_epochs)))
     warmup_steps = max(1, int(total_training_steps * float(warmup_ratio)))
 
     # Generation kwargs
@@ -147,6 +152,7 @@ def parse_training_config(
         warmup_ratio=warmup_ratio,
         warmup_steps=warmup_steps,
         num_train_epochs=num_train_epochs,
+        max_steps=max_steps,
         logging_steps=training_cfg.get(
             "logging_steps", defaults.get("logging_steps", 50)
         ),
@@ -259,6 +265,7 @@ def build_training_arguments(
         lr_scheduler_type=config.lr_scheduler_type,
         warmup_steps=config.warmup_steps,
         num_train_epochs=config.num_train_epochs,
+        max_steps=config.max_steps,
         logging_steps=config.logging_steps,
         save_strategy=config.save_strategy,
         save_steps=config.save_steps,

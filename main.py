@@ -6,6 +6,7 @@ from pathlib import Path
 
 import core.evaluation.evaluate_task as evaluate_task
 from core.training.train_task import main as train_task_main
+from core.training.train_multitask import main as train_multitask_main
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,6 +20,9 @@ def parse_args() -> argparse.Namespace:
     train_parser = subparsers.add_parser("train", help="Run task training.")
     train_parser.add_argument("--task", default="asr", help="Task name to run.")
     train_parser.add_argument("--config", default=None, help="Config filename override.")
+
+    mtl_parser = subparsers.add_parser("mtl", help="Run joint multi-task training.")
+    mtl_parser.add_argument("--config", required=True, help="MTL config path.")
 
     merge_parser = subparsers.add_parser("merge", help="Merge trained adapters.")
     merge_parser.add_argument(
@@ -272,6 +276,15 @@ def dispatch_train(args: argparse.Namespace) -> None:
     train_task_main()
 
 
+def dispatch_mtl(args: argparse.Namespace) -> None:
+    """Invoke the multi-task training workflow."""
+    argv = ["train_multitask.py"]
+    if args.config:
+        argv.extend(["--config", args.config])
+    sys.argv = argv
+    train_multitask_main()
+
+
 def dispatch_merge(args: argparse.Namespace) -> None:
     """Invoke the merge workflow."""
     from merging.cli import merge_from_args
@@ -453,6 +466,8 @@ def main() -> None:
     args = parse_args()
     if args.command == "train":
         dispatch_train(args)
+    elif args.command == "mtl":
+        dispatch_mtl(args)
     elif args.command == "merge":
         dispatch_merge(args)
     elif args.command == "evaluate":
