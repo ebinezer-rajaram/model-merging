@@ -1,4 +1,4 @@
-adapters: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+adapters: [emotion, intent, kws, langid, speaker_ver, vocalsound]
 method: weighted_delta_n
 merge_mode: common
 
@@ -6,7 +6,7 @@ optimizer:
   type: supermerge
   params:
     variant: layer_wise
-    tasks: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+    tasks: [emotion, intent, kws, langid, speaker_ver, vocalsound]
     split: train
     steps: 8000
     batch_size: 4
@@ -33,8 +33,8 @@ optimizer:
     logging_steps: 50
     log_label_token_stats: false
     log_alpha_grad_stats: false
-    log_coefficients_during_training: true
-    log_layer_coefficients_full: true
+    log_coefficients_during_training: false
+    log_layer_coefficients_full: false
     entropy_rolling_window: 4
     dataloader_num_workers: 8
     dataloader_pin_memory: true

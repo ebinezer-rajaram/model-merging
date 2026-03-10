@@ -1,0 +1,42 @@
+adapters: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+method: uniform_scalar_delta
+merge_mode: common
+
+# Phase 1: Bayesian search to pick the best scale.
+# Objective is computed from validation evaluations below.
+search:
+  type: bayes
+  budget: 16
+  init_points: 6
+  inject_zero_baseline: true
+  initial_points: [{scale: 0.25}, {scale: 0.5}, {scale: 0.75}, {scale: 1.0}, {scale: 1.25}, {scale: 1.5}]
+  seed: 42
+  space:
+    scale:
+      type: float
+      min: 0.0
+      max: 1.5
+
+# Phase 1 evaluation scope (used during optimization only).
+split: validation
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, vocalsound]
+
+# Speed-up for optimization runs on validation.
+eval_subset:
+  enabled: true
+  seed: 0
+  shuffle: true
+  stratified: true
+  max_samples: 1000
+
+# Keep sweep runs lightweight.
+save_merged: false
+constraint_nonnegative: false
+
+# Phase 2: After sweep, run one final eval on best params.
+# This is independent from phase-1 validation settings above.
+post_sweep_eval:
+  enabled: true
+  split: test
+  save_merged: false
+  eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound, speech_qa]

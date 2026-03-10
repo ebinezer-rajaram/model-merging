@@ -50,7 +50,7 @@ training:
 
   # Checkpointing
   save_total_limit: 3
-  resume_from_checkpoint: null        # null | auto | explicit path
+  resume_from_checkpoint: null       # null | auto | explicit path
   load_best_model_at_end: true
   metric_for_best_model: eval_mtl_arithmetic_mean_interference_delta
   greater_is_better: true
