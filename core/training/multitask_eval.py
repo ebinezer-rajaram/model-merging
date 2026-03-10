@@ -441,7 +441,7 @@ class MultiTaskEvaluator:
     def _primary_metric_name_for_task(task: str) -> str:
         if task == "asr":
             return "wer"
-        if task in {"emotion", "intent", "kws", "langid", "speaker_ver", "vocalsound"}:
+        if task in {"emotion", "intent", "kws", "langid", "speaker_id", "speaker_ver", "vocalsound"}:
             return "accuracy"
         return "interference_delta"
 

@@ -61,6 +61,25 @@ class SweepConfig:
         return normalize_merge_config(payload)
 
 
+def _maybe_regen_plot(summary_path: Path) -> None:
+    """Regenerate the sweep interference plot after each eval point. Silently skips on any error."""
+    try:
+        from merging.evaluation.sweep_plot import extract_points, plot_sweep
+
+        sweep = json.loads(summary_path.read_text())
+        points = extract_points(sweep)
+        if not points:
+            return
+        task_combo = summary_path.parent.parent.name
+        stem = summary_path.stem
+        out_path = summary_path.parent / f"interference_vs_lambda_{task_combo}_{stem}.png"
+        method = sweep.get("method", "unknown")
+        title = f"Sweep: {method} | {task_combo} ({len(points)} pts)"
+        plot_sweep(points, title=title, output_path=out_path)
+    except Exception:
+        pass
+
+
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w") as handle:
@@ -316,10 +335,12 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
             summary["best_index"] = best_idx
             summary["best_score"] = best_score
             _atomic_write_json(summary_path, summary)
+            _maybe_regen_plot(summary_path)
     except KeyboardInterrupt:
         summary["best_index"] = best_idx
         summary["best_score"] = best_score
         _atomic_write_json(summary_path, summary)
+        _maybe_regen_plot(summary_path)
         print(f"\n⏹️  Sweep interrupted. Partial summary saved to {summary_path}")
         if best_idx is not None and runs:
             best_params = runs[best_idx]["params"]

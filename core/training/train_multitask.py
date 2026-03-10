@@ -59,6 +59,7 @@ class BootstrappedTask:
     train_setup: Any
     eval_setup: Any
     generation_kwargs: Dict[str, Any]
+    test_setup: Any = None
 
 
 class MultiTaskCollator:
@@ -170,12 +171,20 @@ def _load_bootstrapped_tasks(
 
         generation_kwargs = dict(task_cfg.get("training", {}).get("generation_kwargs", {}))
 
+        test_setup = None
+        if cfg.training.selection_split != "test":
+            try:
+                test_setup = prepare_task_for_evaluation(task, processor, split="test", config=task_cfg)
+            except Exception as exc:
+                print(f"   ⚠️  {task}: no test split available ({exc})")
+
         tasks[task] = BootstrappedTask(
             name=task,
             config=task_cfg,
             train_setup=train_setup,
             eval_setup=eval_setup,
             generation_kwargs=generation_kwargs,
+            test_setup=test_setup,
         )
         try:
             train_size = len(train_setup.dataset)
@@ -185,9 +194,14 @@ def _load_bootstrapped_tasks(
             eval_size = len(eval_setup.dataset)
         except Exception:
             eval_size = -1
+        try:
+            test_size = len(test_setup.dataset) if test_setup is not None else "n/a"
+        except Exception:
+            test_size = "n/a"
         print(
             f"   ✅ {task}: train_samples={train_size}, "
-            f"{cfg.training.selection_split}_samples={eval_size}"
+            f"{cfg.training.selection_split}_samples={eval_size}, "
+            f"test_samples={test_size}"
         )
 
     return tasks
@@ -246,6 +260,7 @@ def _copy_mtl_metrics_to_subdirs(run_manager: RunManager, metrics_dir: Path) -> 
         "mtl_per_task_interference_delta.png",
         "mtl_per_task_primary_metric.png",
         "validation_metrics.json",
+        "test_metrics.json",
         "metrics.json",
         "training_history.csv",
     ]
@@ -289,6 +304,7 @@ def run_multitask_training(config_path: Path) -> None:
 
     train_datasets = {task: tasks[task].train_setup.dataset for task in task_names}
     eval_setups = {task: tasks[task].eval_setup for task in task_names}
+    test_setups = {task: tasks[task].test_setup for task in task_names if tasks[task].test_setup is not None}
     collators = {task: tasks[task].train_setup.data_collator for task in task_names}
     generation_kwargs = {task: tasks[task].generation_kwargs for task in task_names}
     train_weights = {entry.name: float(entry.train_weight) for entry in cfg.tasks}
@@ -377,7 +393,12 @@ def run_multitask_training(config_path: Path) -> None:
         f"tasks={task_names}, temperature={cfg.training.sampling.temperature}, "
         f"selection={cfg.training.selection_criterion}/{cfg.training.selection_split}"
     )
-    trainer.train(resume_from_checkpoint=train_config.resume_from_checkpoint)
+    from core.training.training_loop import resolve_checkpoint_path
+    checkpoint_path = resolve_checkpoint_path(
+        train_config.resume_from_checkpoint,
+        paths["output_dir"],
+    )
+    trainer.train(resume_from_checkpoint=checkpoint_path)
 
     print("🎯 Running final multi-task evaluation...")
     final_metrics = evaluator.evaluate(
@@ -386,6 +407,33 @@ def run_multitask_training(config_path: Path) -> None:
         global_step=int(trainer.state.global_step),
     )
     trainer.log(final_metrics.metrics)
+
+    test_metrics_flat: Dict[str, Any] = {}
+    if test_setups:
+        print(f"🧪 Running final test-split evaluation on {len(test_setups)}/{len(task_names)} tasks...")
+        test_evaluator = MultiTaskEvaluator(
+            tasks=list(test_setups.keys()),
+            eval_setups=test_setups,
+            task_generation_kwargs=generation_kwargs,
+            split="test",
+            batch_size=int(training_args.per_device_eval_batch_size),
+            compute_missing_interference_baselines=bool(cfg.training.compute_missing_interference_baselines),
+            metrics_dir=paths["metrics"],
+            selection_criterion=cfg.training.selection_criterion,
+            use_cache=False,
+            eval_subset=None,
+            wandb_project=None,
+            auto_plot=False,
+        )
+        test_result = test_evaluator.evaluate(
+            model=trainer.model,
+            processor=processor,
+            global_step=int(trainer.state.global_step),
+        )
+        test_metrics_flat = test_result.metrics
+        trainer.log(test_metrics_flat)
+    else:
+        print("⚠️  No test splits available for any task — skipping test evaluation.")
 
     run_manager = RunManager(
         adapter_dir=paths["output_dir"],
@@ -417,6 +465,10 @@ def run_multitask_training(config_path: Path) -> None:
     final_metrics_flat = final_metrics.metrics
     with (run_dir / "validation_metrics.json").open("w") as handle:
         json.dump(final_metrics_flat, handle, indent=2)
+
+    if test_metrics_flat:
+        with (run_dir / "test_metrics.json").open("w") as handle:
+            json.dump(test_metrics_flat, handle, indent=2)
 
     run_manager.register_run(
         run_dir=run_dir,

@@ -66,6 +66,120 @@ except Exception:  # pragma: no cover - optional dependency
 _PLUS_PLUS_VARIANTS = {"task_wise_plus_plus", "layer_wise_plus_plus", "plusplus", "plus_plus"}
 
 
+def _supermerge_plot_metric_lines(
+    *,
+    steps: List[int],
+    series_by_name: Dict[str, List],
+    plot_path: Path,
+    title: str,
+    ylabel: str,
+) -> None:
+    """Plot named series vs update_step. Silently skips on any error."""
+    import math as _math
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    if not series_by_name:
+        return
+    fig, ax = plt.subplots(1, 1, figsize=(11, 5))
+    colors = plt.cm.tab10.colors
+    plotted = 0
+    for name, values in sorted(series_by_name.items()):
+        pts = [
+            (s, v)
+            for s, v in zip(steps, values)
+            if isinstance(v, (int, float)) and not _math.isnan(float(v))
+        ]
+        if not pts:
+            continue
+        ax.plot(
+            [p[0] for p in pts],
+            [float(p[1]) for p in pts],
+            linewidth=2,
+            alpha=0.9,
+            color=colors[plotted % len(colors)],
+            label=name,
+        )
+        plotted += 1
+    if plotted == 0:
+        plt.close(fig)
+        return
+    ax.set_title(title)
+    ax.set_xlabel("Update Step")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(plot_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _maybe_regen_heldout_plot(
+    history_jsonl_path: Path,
+    plot_dir: Path,
+    tasks: List[str],
+) -> None:
+    """Regenerate per-task and aggregate heldout interference plots. Best-effort."""
+    try:
+        if not history_jsonl_path.exists():
+            return
+        steps: List[int] = []
+        ibt_series: Dict[str, List] = {t: [] for t in tasks}
+        agg_series: Dict[str, List] = {
+            "arithmetic_mean": [],
+            "geometric_mean": [],
+            "selection_score": [],
+        }
+        with history_jsonl_path.open("r") as _fh:
+            for _line in _fh:
+                _line = _line.strip()
+                if not _line:
+                    continue
+                try:
+                    _entry = json.loads(_line)
+                except Exception:
+                    continue
+                _step = _entry.get("update_step")
+                if not isinstance(_step, (int, float)):
+                    continue
+                steps.append(int(_step))
+                _ibt = _entry.get("interference_by_task") or {}
+                for t in tasks:
+                    v = _ibt.get(t)
+                    ibt_series[t].append(float(v) if isinstance(v, (int, float)) else None)
+                agg_series["arithmetic_mean"].append(
+                    _entry.get("arithmetic_mean_interference_delta")
+                )
+                agg_series["geometric_mean"].append(
+                    _entry.get("geometric_mean_interference_delta")
+                )
+                agg_series["selection_score"].append(_entry.get("selection_score"))
+        if not steps:
+            return
+        _supermerge_plot_metric_lines(
+            steps=steps,
+            series_by_name={f"{t}_delta": ibt_series[t] for t in tasks},
+            plot_path=plot_dir / "heldout_per_task_interference_delta.png",
+            title="SuperMerge Heldout: Per-Task Interference Delta",
+            ylabel="Interference Delta",
+        )
+        _supermerge_plot_metric_lines(
+            steps=steps,
+            series_by_name={
+                "arithmetic_mean_delta": agg_series["arithmetic_mean"],
+                "geometric_mean_delta": agg_series["geometric_mean"],
+                "selection_score": agg_series["selection_score"],
+            },
+            plot_path=plot_dir / "heldout_aggregate_scores.png",
+            title="SuperMerge Heldout: Aggregate Scores",
+            ylabel="Score",
+        )
+    except Exception as exc:
+        print(f"[supermerge] Failed to regenerate heldout plot: {exc}")
+
+
 def _atanh_stable(x: float) -> float:
     clipped = float(min(1.0 - 1e-6, max(-1.0 + 1e-6, x)))
     return 0.5 * math.log((1.0 + clipped) / (1.0 - clipped))
@@ -1096,6 +1210,14 @@ def run_supermerge_optimizer(spec: MergeSpec, context: OptimizerContext) -> Opti
                             f"frontier={heldout_entry['frontier_size']} "
                             f"nondominated={heldout_entry['is_nondominated']}"
                         )
+                        if checkpoint_dir is not None:
+                            _heldout_jsonl = checkpoint_dir / "heldout_eval_history.jsonl"
+                            try:
+                                with _heldout_jsonl.open("a") as _fh:
+                                    _fh.write(json.dumps(heldout_entry, sort_keys=True) + "\n")
+                            except Exception as _exc:
+                                print(f"[supermerge] Failed to write heldout history: {_exc}")
+                            _maybe_regen_heldout_plot(_heldout_jsonl, checkpoint_dir, tasks)
                         if (
                             restore_best_checkpoint_effective
                             and heldout_evaluator.best_update_step == optimizer_steps_completed

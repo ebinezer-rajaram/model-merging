@@ -357,6 +357,8 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         summary["best_index"] = best_idx
         summary["best_score"] = best_score
         _atomic_write_json(summary_path, summary)
+        from merging.evaluation.sweep import _maybe_regen_plot
+        _maybe_regen_plot(summary_path)
 
     def _record_run(params: Dict[str, Any], results: Dict[str, Dict] | None, score: float, details: Dict[str, Any]) -> None:
         nonlocal best_idx, best_score, best_tiebreak

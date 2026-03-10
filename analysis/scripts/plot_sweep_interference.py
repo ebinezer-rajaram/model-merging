@@ -14,21 +14,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import subprocess
 import tempfile
 
+from merging.evaluation.sweep_plot import SweepPoint, extract_points  # noqa: F401
+
 
 SWEEP_NAME_RE = re.compile(r"^sweep_(\d{8})_(\d{6})\.json$")
-
-
-@dataclass(frozen=True)
-class SweepPoint:
-    lambda_value: float
-    min_interference_delta: float | None
-    mean_interference_delta: float | None
 
 
 def _load_json(path: Path) -> dict:
@@ -61,49 +55,6 @@ def find_latest_sweep(sweeps_dir: Path) -> Path:
         return (0, path.stat().st_mtime)
 
     return max(candidates, key=sort_key)
-
-
-def extract_points(sweep: dict) -> list[SweepPoint]:
-    points: list[SweepPoint] = []
-    for run in sweep.get("runs", []):
-        params = run.get("params") or {}
-        lambda_value = params.get("lambda")
-        if lambda_value is None:
-            lambda_value = params.get("scale")
-        if lambda_value is None:
-            continue
-
-        score_details = run.get("score_details") or {}
-        min_delta = score_details.get("min_interference_delta")
-        mean_delta = score_details.get("mean_interference_delta")
-
-        # Fallbacks (some older sweeps may only store `score`).
-        if min_delta is None and isinstance(run.get("score"), (int, float)):
-            min_delta = float(run["score"])
-
-        # If mean is not explicitly stored, derive it from per-task interference deltas.
-        if mean_delta is None:
-            per_task = []
-            results = run.get("results") or {}
-            if isinstance(results, dict):
-                for metrics in results.values():
-                    if not isinstance(metrics, dict):
-                        continue
-                    delta = metrics.get("interference_delta")
-                    if isinstance(delta, (int, float)):
-                        per_task.append(float(delta))
-            if per_task:
-                mean_delta = sum(per_task) / len(per_task)
-
-        points.append(
-            SweepPoint(
-                lambda_value=float(lambda_value),
-                min_interference_delta=None if min_delta is None else float(min_delta),
-                mean_interference_delta=None if mean_delta is None else float(mean_delta),
-            )
-        )
-
-    return sorted(points, key=lambda p: p.lambda_value)
 
 
 def _pick_best_lambda(points: list[SweepPoint]) -> float | None:
@@ -324,6 +275,32 @@ def _plot_with_matplotlib(
         )
         legend_handles.append(best)
         legend_labels.append(f"Best λ={best_x:.3g}")
+
+    all_tasks = sorted({t for p in points if p.per_task_deltas for t in p.per_task_deltas})
+    try:
+        tab20 = plt.cm.tab20.colors
+    except Exception:
+        tab20 = [
+            "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+            "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5",
+        ]
+    for i, task in enumerate(all_tasks):
+        task_ys = [p.per_task_deltas.get(task) if p.per_task_deltas else None for p in points]
+        if not any(v is not None for v in task_ys):
+            continue
+        line_task = ax.plot(
+            xs,
+            task_ys,
+            marker=".",
+            markersize=3,
+            linewidth=1.3,
+            linestyle="--",
+            label=f"{task} Δ",
+            color=tab20[(i + 4) % len(tab20)],
+            alpha=0.70,
+        )[0]
+        legend_handles.append(line_task)
+        legend_labels.append(f"{task} Δ")
 
     ax.set_title("")
     ax.set_xlabel("λ")

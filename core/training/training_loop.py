@@ -10,12 +10,44 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from datasets import Dataset
+from transformers import TrainerCallback
 
 from core.data.io_utils import ensure_dir
 from core.evaluation.plotting import plot_confusion_matrix, plot_loss_and_wer
 
 from .run_manager import RunManager
 from .trainer import CustomTrainer, save_artifacts, save_history_to_csv
+
+
+class PlotRefreshCallback(TrainerCallback):
+    """Regenerates the loss/metric plot after each eval step during training.
+
+    Follows the MTL pattern of _refresh_plots_best_effort(): silently skips
+    on any error, never interrupts training.
+    """
+
+    def __init__(
+        self,
+        *,
+        trainer_ref: "CustomTrainer",
+        history_csv_path: Path,
+        loss_plot_path: Path,
+        extra_rows: List[Dict[str, Any]],
+    ) -> None:
+        self._trainer_ref = trainer_ref
+        self._history_csv_path = history_csv_path
+        self._loss_plot_path = loss_plot_path
+        self._extra_rows = extra_rows
+
+    def on_evaluate(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        try:
+            rows = save_history_to_csv(
+                self._trainer_ref, self._history_csv_path, extra_rows=self._extra_rows
+            )
+            if rows:
+                plot_loss_and_wer(self._history_csv_path, self._loss_plot_path)
+        except Exception as exc:
+            print(f"[PlotRefreshCallback] Failed to refresh plot: {exc}")
 
 
 def find_latest_checkpoint(output_dir: str | Path) -> Optional[str]:
@@ -266,6 +298,13 @@ def run_training_with_evaluation(
 
     # Training
     print("🚀 Starting LoRA fine-tuning...")
+    if loss_plot_path is not None:
+        trainer.add_callback(PlotRefreshCallback(
+            trainer_ref=trainer,
+            history_csv_path=history_csv_path,
+            loss_plot_path=loss_plot_path,
+            extra_rows=list(seed_history_rows),
+        ))
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Final evaluation on full validation dataset
