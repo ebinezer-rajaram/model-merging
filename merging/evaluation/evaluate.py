@@ -215,7 +215,7 @@ def evaluate_merged_adapter(
                     cache_ok = False
                     break
                 cached[task] = metrics
-                maybe_add_interference_delta(task, cached[task], split, show_summary, eval_tag=eval_tag)
+                maybe_add_interference_delta(task, cached[task], split, show_summary, eval_subset=eval_subset)
             if cache_ok:
                 cached_endpoint_results = cached
                 if show_summary:
@@ -269,7 +269,7 @@ def evaluate_merged_adapter(
                         eval_subset=eval_subset,
                     )
                     results[task] = result.metrics
-                    maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
+                    maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
 
                     if show_summary:
                         print(f"✅ {task} evaluation complete:")
@@ -367,6 +367,16 @@ def evaluate_merged_adapter(
                 summary=summary,
                 run_path=output_path,
             )
+
+            # Write standardised experiment_summary.json alongside eval_results.
+            if not eval_tag:  # skip subset evals
+                _write_merge_experiment_summary(
+                    results_path=results_path,
+                    summary=summary,
+                    metadata=metadata,
+                    source_tasks=source_tasks,
+                    split=split,
+                )
 
         return results
 
@@ -470,7 +480,7 @@ def evaluate_merged_adapter(
                 eval_subset=eval_subset,
             )
             results[task] = result.metrics
-            maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
+            maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")
@@ -534,6 +544,16 @@ def evaluate_merged_adapter(
             output_dir=merged_run_path,
             show_summary=show_summary,
         )
+
+        # Write standardised experiment_summary.json alongside eval_results.
+        if not eval_tag:  # skip subset evals
+            _write_merge_experiment_summary(
+                results_path=eval_results_path,
+                summary=summary,
+                metadata=metadata,
+                source_tasks=source_tasks,
+                split=split,
+            )
 
     return results
 
@@ -680,7 +700,7 @@ def _evaluate_saved_merged(
                 eval_subset=eval_subset,
             )
             results[task] = result.metrics
-            maybe_add_interference_delta(task, results[task], split, show_summary, eval_tag=eval_tag)
+            maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
 
             if show_summary:
                 print(f"✅ {task} evaluation complete:")
@@ -736,6 +756,79 @@ def _evaluate_saved_merged(
         )
 
     return results
+
+
+def _write_merge_experiment_summary(
+    results_path: Path,
+    summary: Dict[str, Any],
+    metadata: Dict[str, Any],
+    source_tasks: List[str],
+    split: str,
+) -> None:
+    """Write per-sweep-point and combo-root experiment summaries for a merge eval."""
+    try:
+        from core.output.summary_writer import write_experiment_summary, build_selection
+
+        merge_method = metadata.get("merge_method") or "merged"
+        merge_lambda = metadata.get("lambda")
+        merge_tag = summary.get("merge_tag")
+
+        # Build per-task results dict in {task: {split: metrics}} format.
+        results: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for task, task_metrics in (summary.get("results") or {}).items():
+            if isinstance(task_metrics, dict):
+                results[task] = {split: dict(task_metrics)}
+
+        merge_info = {
+            "lambda": merge_lambda,
+            "merge_tag": merge_tag,
+            "params": metadata.get("params") or {},
+        }
+
+        _summary_kwargs = dict(
+            experiment_type="merge",
+            run_id=None,
+            timestamp=summary.get("timestamp"),
+            config_name=merge_tag,
+            source_tasks=sorted(source_tasks),
+            method=merge_method,
+            results=results,
+            adapter_path=None,
+            is_latest=None,
+            hyperparameters=None,
+            merge_info=merge_info,
+            mtl_aggregate=None,
+            selection=build_selection(
+                policy="sweep_point",
+                metric_name=None,
+                metric_value=None,
+                ranked_by_split=None,
+            ),
+            source_files=[results_path.name],
+        )
+
+        # Per-sweep-point summary: summary_lambda{value:.6g}.json in the split dir.
+        if merge_lambda is not None:
+            summary_name = f"summary_lambda{merge_lambda:.6g}.json"
+        else:
+            summary_name = "summary.json"
+        sweep_output_path = results_path.parent / summary_name
+        write_experiment_summary(output_path=sweep_output_path, is_best=None, **_summary_kwargs)
+
+        # Combo-root experiment_summary.json — written for every eval (overwritten by each
+        # new sweep point; the last one written will reflect the most recent evaluation).
+        # The generate_outputs.py backfill script selects the true best afterwards.
+        combo_dir = results_path.parent.parent.parent  # eval/{split}/ → eval/ → combo/
+        write_experiment_summary(
+            output_path=combo_dir / "experiment_summary.json",
+            is_best=None,
+            **_summary_kwargs,
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Could not write experiment_summary.json for %s: %s", results_path, exc
+        )
 
 
 __all__ = ["evaluate_merged_adapter"]

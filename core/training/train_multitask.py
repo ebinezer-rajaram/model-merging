@@ -479,6 +479,146 @@ def run_multitask_training(config_path: Path) -> None:
 
     _copy_mtl_metrics_to_subdirs(run_manager, paths["metrics"])
 
+    # Write standardised experiment_summary.json for this MTL run.
+    try:
+        from core.output.summary_writer import (
+            write_experiment_summary,
+            build_hyperparameters,
+            build_selection,
+        )
+        import math as _math
+
+        _source_tasks = sorted(task_names)
+        _selection_criterion = str(cfg.training.selection_criterion).lower()
+        _sel_key = f"eval_mtl_{_selection_criterion}"
+
+        # Re-read the JSONL to find the best step (mirrors generate_outputs.py logic).
+        _jsonl_path = run_dir / "mtl_eval_history.jsonl"
+        _best_step = None
+        _best_val = None
+        _mtl_geom = None
+        _mtl_arith = None
+        _mtl_num = None
+        if _jsonl_path.exists():
+            _rows = []
+            with _jsonl_path.open() as _fh:
+                for _line in _fh:
+                    _line = _line.strip()
+                    if _line:
+                        try:
+                            _rows.append(json.loads(_line))
+                        except json.JSONDecodeError:
+                            pass
+            _best_row = None
+            for _row in _rows:
+                _rv = _row.get(_sel_key)
+                if _rv is None:
+                    continue
+                try:
+                    _rv = float(_rv)
+                except (TypeError, ValueError):
+                    continue
+                if not _math.isfinite(_rv):
+                    continue
+                if _best_val is None or _rv > _best_val:
+                    _best_val = _rv
+                    _best_row = _row
+            if _best_row is None and _rows:
+                _best_row = _rows[-1]
+            if _best_row is not None:
+                _best_step = _best_row.get("step") or _best_row.get("global_step")
+                def _rf(k):
+                    v = _best_row.get(k)
+                    try:
+                        f = float(v)
+                        return f if _math.isfinite(f) else None
+                    except (TypeError, ValueError):
+                        return None
+                _mtl_geom = _rf("eval_mtl_geometric_mean_interference_delta")
+                _mtl_arith = _rf("eval_mtl_arithmetic_mean_interference_delta")
+                _n = _best_row.get("eval_mtl_num_tasks_with_delta")
+                try:
+                    _mtl_num = int(_n) if _n is not None else None
+                except (TypeError, ValueError):
+                    _mtl_num = None
+
+        # Build per-task results dict from final_metrics_flat (validation) + test.
+        _EVAL_PFX = "eval_"
+        _results: Dict[str, Any] = {}
+        for _task in _source_tasks:
+            _task_entry: Dict[str, Any] = {}
+            _task_pfx = f"{_EVAL_PFX}{_task}_"
+            # Validation metrics from final_metrics_flat.
+            _val_metrics = {k[len(_task_pfx):]: v for k, v in final_metrics_flat.items()
+                            if k.startswith(_task_pfx)}
+            if _val_metrics:
+                _task_entry["validation"] = _val_metrics
+            # Test metrics.
+            if test_metrics_flat:
+                _tst_metrics = {k[len(_task_pfx):]: v for k, v in test_metrics_flat.items()
+                                if k.startswith(_task_pfx)}
+                if _tst_metrics:
+                    _task_entry["test"] = _tst_metrics
+            if _task_entry:
+                _results[_task] = _task_entry
+
+        _lora_cfg = raw_cfg.get("model", {}).get("lora", {}) or {}
+        _train_cfg = raw_cfg.get("training", {}) or {}
+        _samp_cfg = _train_cfg.get("sampling", {}) or {}
+        _hp = build_hyperparameters(
+            learning_rate=_train_cfg.get("learning_rate"),
+            lora_r=_lora_cfg.get("r"),
+            lora_alpha=_lora_cfg.get("alpha"),
+            num_train_epochs=_train_cfg.get("num_train_epochs"),
+            per_device_train_batch_size=_train_cfg.get("per_device_train_batch_size"),
+            sampling_temperature=_samp_cfg.get("temperature"),
+            selection_criterion=_selection_criterion,
+            num_tasks=len(_source_tasks),
+            max_steps=_train_cfg.get("max_steps"),
+        )
+
+        _is_best = (run_manager.get_best_run_path() == run_dir)
+        _is_latest = (run_manager.get_latest_run_path() == run_dir)
+
+        _summary_kwargs = dict(
+            experiment_type="mtl",
+            run_id=run_dir.name,
+            timestamp=None,
+            config_name=None,
+            source_tasks=_source_tasks,
+            method="mtl",
+            results=_results,
+            adapter_path=str(run_dir),
+            is_best=_is_best,
+            is_latest=_is_latest,
+            hyperparameters=_hp,
+            merge_info=None,
+            mtl_aggregate={
+                "best_step": int(_best_step) if _best_step is not None else None,
+                "geometric_mean_interference_delta": _mtl_geom,
+                "arithmetic_mean_interference_delta": _mtl_arith,
+                "num_tasks_with_delta": _mtl_num,
+            },
+            selection=build_selection(
+                policy="best_delta",
+                metric_name=_sel_key,
+                metric_value=_best_val,
+                ranked_by_split="validation",
+            ),
+            source_files=(
+                ["validation_metrics.json", "test_metrics.json"]
+                if test_metrics_flat
+                else ["validation_metrics.json"]
+            ),
+        )
+        # Run-level summary (per-run, inside adapter subdir).
+        write_experiment_summary(output_path=run_dir / "experiment_summary.json", **_summary_kwargs)
+        # Combo-root summary (top-level, visible) — only for the best run.
+        if _is_best:
+            write_experiment_summary(output_path=paths["base"] / "experiment_summary.json", **_summary_kwargs)
+    except Exception as _summary_exc:
+        print(f"⚠️ Could not write experiment_summary.json: {_summary_exc}")
+
     print(f"✅ Saved MTL run: {run_dir.name} (registered and ranked)")
     print(f"📈 Saved MTL history: {run_history_csv}")
 

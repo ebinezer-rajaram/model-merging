@@ -388,7 +388,7 @@ class PeriodicHeldoutEvaluator:
                     metrics,
                     self.config.split,
                     False,
-                    eval_tag=self.eval_tag,
+                    eval_subset=self.config.subset,
                 )
                 safe_metrics = self._sanitize_metrics(metrics)
                 per_task_metrics[task] = safe_metrics

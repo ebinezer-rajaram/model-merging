@@ -508,6 +508,73 @@ def run_training_with_evaluation(
         # Clean up intermediate checkpoints
         _cleanup_checkpoints(adapter_dir)
 
+        # Write standardised experiment_summary.json alongside all artifacts.
+        try:
+            from core.output.summary_writer import (
+                write_experiment_summary,
+                build_hyperparameters,
+                build_selection,
+            )
+            _task = (config or {}).get("task") or adapter_dir.parent.parent.name
+            _training_cfg = (config or {}).get("training", {})
+            _lora_cfg = (config or {}).get("model", {}).get("lora", {})
+            _hp = build_hyperparameters(
+                learning_rate=_training_cfg.get("learning_rate"),
+                lora_r=_lora_cfg.get("r"),
+                lora_alpha=_lora_cfg.get("alpha"),
+                num_train_epochs=_training_cfg.get("num_train_epochs"),
+                per_device_train_batch_size=_training_cfg.get("per_device_train_batch_size"),
+            )
+            # Determine is_best / is_latest by checking run_manager symlinks.
+            _is_best = (run_manager.get_best_run_path() == run_dir)
+            _is_latest = (run_manager.get_latest_run_path() == run_dir)
+            # Build results dict — test first (canonical), then validation.
+            _results: Dict[str, Any] = {_task: {}}
+            if test_metrics is not None:
+                _results[_task]["test"] = dict(test_metrics)
+            _results[_task]["validation"] = dict(final_eval_metrics)
+            _ranked_split = "test" if test_metrics is not None else "validation"
+            _ranked_metrics = test_metrics if test_metrics is not None else final_eval_metrics
+            _sel_value = _ranked_metrics.get(metric_for_ranking) if _ranked_metrics else None
+            if _sel_value is None and metric_for_ranking:
+                _sel_value = (_ranked_metrics or {}).get(
+                    metric_for_ranking.removeprefix("eval_")
+                )
+            _summary_kwargs = dict(
+                experiment_type="single_task",
+                run_id=run_dir.name,
+                timestamp=None,
+                config_name=run_dir.name,
+                source_tasks=[_task],
+                method=_task,
+                results=_results,
+                adapter_path=str(run_dir),
+                is_best=_is_best,
+                is_latest=_is_latest,
+                hyperparameters=_hp,
+                merge_info=None,
+                mtl_aggregate=None,
+                selection=build_selection(
+                    policy="best_run_metric",
+                    metric_name=metric_for_ranking or None,
+                    metric_value=_sel_value,
+                    ranked_by_split=_ranked_split,
+                ),
+                source_files=(
+                    ["validation_metrics.json", "test_metrics.json"]
+                    if test_metrics is not None
+                    else ["validation_metrics.json"]
+                ),
+            )
+            # Run-level summary (per-run, inside adapter subdir).
+            write_experiment_summary(output_path=run_dir / "experiment_summary.json", **_summary_kwargs)
+            # Task-root summary (top-level, visible) — only for the best run.
+            if _is_best:
+                _task_root = adapter_dir.parent  # artifacts/{task}/
+                write_experiment_summary(output_path=_task_root / "experiment_summary.json", **_summary_kwargs)
+        except Exception as _summary_exc:
+            print(f"⚠️ Could not write experiment_summary.json: {_summary_exc}")
+
         print(f"✅ Done: {run_dir.name} (registered and ranked)")
     else:
         # Legacy system (fallback)

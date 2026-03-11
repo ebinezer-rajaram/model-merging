@@ -261,7 +261,7 @@ class MultiTaskEvaluator:
                 metrics=metrics,
                 split=self.split,
                 show_summary=False,
-                eval_tag=self.eval_tag,
+                eval_subset=self.eval_subset,
             )
             per_task_metrics[task] = dict(metrics)
 

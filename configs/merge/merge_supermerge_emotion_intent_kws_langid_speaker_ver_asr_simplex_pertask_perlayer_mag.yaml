@@ -55,7 +55,7 @@ optimizer:
         max_samples: 500
         stratified: true
         stratify_by: label
-        shuffle: false
+        shuffle: true
         seed: 0
       compute_missing_interference_baselines: true
       pareto:

@@ -28,8 +28,44 @@ def compute_eval_subset_tag(eval_subset: Mapping[str, Any]) -> str:
 
     This tag is used to namespace metrics so that subset-based evaluations do not
     overwrite full-split metrics (e.g., base_model.json).
+
+    Only the effective task-level sampling parameters are hashed, so the tag is
+    stable across experiments that share the same per-task subset settings even if
+    their broader eval_subset configs differ (e.g. different per_task entries for
+    other tasks, different label_column defaults, etc.).
     """
     payload = json.dumps(dict(eval_subset), sort_keys=True, default=str).encode("utf-8")
+    digest = hashlib.md5(payload).hexdigest()[:10]
+    return f"subset_{digest}"
+
+
+def compute_task_eval_subset_tag(
+    *,
+    max_samples: Optional[int],
+    shuffle: bool,
+    seed: int,
+    stratified: bool,
+    label_column: Optional[str],
+) -> str:
+    """Return a stable tag derived only from the resolved per-task subset params.
+
+    Unlike compute_eval_subset_tag (which hashes the full eval_subset config and
+    therefore differs across experiments that share the same per-task settings but
+    have different global defaults), this function hashes only the parameters that
+    actually determine which samples are drawn for a specific task.  This ensures
+    that baseline metric files (base_model__subset_*.json, best_*_adapter__subset_*.json)
+    are shared and reused across all experiments that use the same effective subset.
+    """
+    payload = json.dumps(
+        {
+            "label_column": label_column,
+            "max_samples": max_samples,
+            "seed": seed,
+            "shuffle": shuffle,
+            "stratified": stratified,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
     digest = hashlib.md5(payload).hexdigest()[:10]
     return f"subset_{digest}"
 

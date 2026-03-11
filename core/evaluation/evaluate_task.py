@@ -17,6 +17,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 from core import (
     compute_base_cache_path,
     compute_eval_subset_tag,
+    compute_task_eval_subset_tag,
     print_metrics,
     resolve_merged_eval_dir,
     ensure_dir,
@@ -512,12 +513,11 @@ def evaluate(
     subset_label_column: Optional[str] = None
     subset_cache_path: Optional[Path] = None
     if eval_subset and bool(eval_subset.get("enabled", True)):
-        eval_tag = compute_eval_subset_tag(eval_subset)
         subset_shuffle = bool(eval_subset.get("shuffle", False))
         if "seed" in eval_subset and eval_subset["seed"] is not None:
             subset_seed = int(eval_subset["seed"])
         subset_stratified = bool(eval_subset.get("stratified", False))
-        subset_label_column = eval_subset.get("label_column")
+        subset_label_column = eval_subset.get("label_column") or eval_subset.get("stratify_by")
 
         per_task = eval_subset.get("per_task", {})
         task_override = per_task.get(task) if isinstance(per_task, dict) else None
@@ -537,6 +537,17 @@ def evaluate(
 
         if max_eval_samples is None and "max_samples" in eval_subset and eval_subset["max_samples"] is not None:
             max_eval_samples = int(eval_subset["max_samples"])
+
+        # Tag is derived from the resolved per-task parameters only, so it is
+        # stable across experiments that share the same effective subset settings
+        # regardless of differences in the broader eval_subset config.
+        eval_tag = compute_task_eval_subset_tag(
+            max_samples=max_eval_samples,
+            shuffle=subset_shuffle,
+            seed=subset_seed,
+            stratified=subset_stratified,
+            label_column=subset_label_column,
+        )
         if eval_tag is not None:
             subset_cache_path = _resolve_eval_subset_cache_path(
                 dataset_cfg=dataset_cfg,

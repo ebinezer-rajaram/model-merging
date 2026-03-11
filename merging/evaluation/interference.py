@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from core import compute_eval_subset_tag
+from core import compute_eval_subset_tag, compute_task_eval_subset_tag
 from merging.runtime.utils import PACKAGE_ROOT
 
 EPS = 1e-8
@@ -113,11 +113,14 @@ def maybe_compute_interference_baselines(
     # that only want to read or post-process metrics.
     from core.evaluation.evaluate_task import evaluate
 
-    eval_tag = compute_eval_tag_from_subset(eval_subset)
     for task in tasks:
         task_key = task.lower()
         if task_key not in TASK_METRICS:
             continue
+
+        # Use per-task stable tag so baseline files are shared across experiments
+        # with the same effective subset settings.
+        eval_tag = _resolve_task_eval_tag(task_key, eval_subset)
 
         metric_key, _ = TASK_METRICS[task_key]
         base_value = load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=eval_tag)
@@ -173,38 +176,79 @@ def maybe_compute_interference_baselines(
                 print(f"⚠️  Failed to compute best adapter metrics for {task_key}/{split}: {exc}")
 
 
+def _resolve_task_eval_tag(task: str, eval_subset: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Compute the per-task stable eval tag from a raw eval_subset config dict."""
+    if not eval_subset or not bool(eval_subset.get("enabled", True)):
+        return None
+    shuffle = bool(eval_subset.get("shuffle", False))
+    seed = int(eval_subset.get("seed", 0) or 0)
+    stratified = bool(eval_subset.get("stratified", False))
+    label_column = eval_subset.get("label_column") or eval_subset.get("stratify_by")
+    max_samples = eval_subset.get("max_samples")
+    if max_samples is not None:
+        max_samples = int(max_samples)
+
+    per_task = eval_subset.get("per_task", {})
+    task_override = per_task.get(task) if isinstance(per_task, dict) else None
+    if isinstance(task_override, (int, float)):
+        max_samples = int(task_override)
+    elif isinstance(task_override, dict):
+        if task_override.get("max_samples") is not None:
+            max_samples = int(task_override["max_samples"])
+        if task_override.get("shuffle") is not None:
+            shuffle = bool(task_override["shuffle"])
+        if task_override.get("seed") is not None:
+            seed = int(task_override["seed"])
+        if task_override.get("stratified") is not None:
+            stratified = bool(task_override["stratified"])
+        if task_override.get("label_column"):
+            label_column = task_override["label_column"]
+
+    return compute_task_eval_subset_tag(
+        max_samples=max_samples,
+        shuffle=shuffle,
+        seed=seed,
+        stratified=stratified,
+        label_column=label_column,
+    )
+
+
 def maybe_add_interference_delta(
     task: str,
     metrics: Dict[str, Any],
     split: str,
     show_summary: bool,
     *,
-    eval_tag: Optional[str],
+    eval_subset: Optional[Mapping[str, Any]] = None,
+    eval_tag: Optional[str] = None,
 ) -> None:
     task_key = task.lower()
     if task_key not in TASK_METRICS:
         return
+
+    # Prefer eval_subset (resolves a per-task stable tag) over a pre-computed eval_tag.
+    resolved_tag = _resolve_task_eval_tag(task_key, eval_subset) if eval_subset is not None else eval_tag
 
     metric_key, higher_is_better = TASK_METRICS[task_key]
     merged_value = metrics.get(metric_key)
     if not isinstance(merged_value, (int, float)):
         return
 
-    base_value = load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=eval_tag)
+    base_value = load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=resolved_tag)
     task_value = load_eval_metric(
         task_key,
         split,
         f"best_{task_key}_adapter.json",
         metric_key,
-        eval_tag=eval_tag,
+        eval_tag=resolved_tag,
     )
     if base_value is None or task_value is None:
         if show_summary:
             missing = []
             if base_value is None:
-                missing.append(with_eval_tag("base_model.json", eval_tag))
+                missing.append(with_eval_tag("base_model.json", resolved_tag))
             if task_value is None:
-                missing.append(with_eval_tag(f"best_{task_key}_adapter.json", eval_tag))
+                missing.append(with_eval_tag(f"best_{task_key}_adapter.json", resolved_tag))
             missing_str = ", ".join(missing)
             print(
                 f"⚠️  Skipping interference_delta for {task_key}/{split}: "
