@@ -1,12 +1,18 @@
 """Unified CLI entrypoint for speech merging workflows."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import core.evaluation.evaluate_task as evaluate_task
 from core.training.train_task import main as train_task_main
 from core.training.train_multitask import main as train_multitask_main
+
+
+def _configure_cuda_allocator_env() -> None:
+    """Set safer CUDA allocator defaults unless explicitly overridden."""
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def parse_args() -> argparse.Namespace:
@@ -358,6 +364,7 @@ def dispatch_evaluate_merged(args: argparse.Namespace) -> None:
     """Invoke the merged evaluation workflow."""
     from merging.evaluation.cli import evaluate_from_args
 
+    _configure_cuda_allocator_env()
     evaluate_from_args(args)
 
 
@@ -389,6 +396,7 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
     from merging.config.unified import load_merge_config, normalize_merge_config
     from merging.evaluation.sweep import run_sweep
 
+    _configure_cuda_allocator_env()
     if args.config:
         config = load_merge_config(Path(args.config))
         config_dict = {

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+
+import torch
 
 from merging.optimizers.registry import apply_optimizer_overrides, OptimizerContext, optimize_lambda_policy
 from merging.engine.registry import get_merge_method, normalize_params
@@ -31,6 +37,194 @@ from merging.evaluation.interference import (
     maybe_compute_interference_baselines,
 )
 from merging.optimizers.core.heldout_reporting import export_heldout_tracking_artifacts
+
+_OOM_RETRY_ENV_FLAG = "MERGE_EVAL_ENABLE_OOM_RETRY"
+
+
+def _is_cuda_oom_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "cuda out of memory" in message or "cudnn_status_alloc_failed" in message
+
+
+def _cleanup_cuda_memory(show_summary: bool = False) -> None:
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    if show_summary:
+        print("🧹 Cleared CUDA cache.")
+
+
+def _metric_key_for_task(task: str) -> Optional[str]:
+    task_key = task.lower()
+    if task_key in TASK_METRICS:
+        metric_key, _ = TASK_METRICS[task_key]
+        return metric_key
+    return None
+
+
+def _print_task_success_summary(task: str, metrics: Dict[str, Any]) -> None:
+    print(f"✅ {task} evaluation complete:")
+    metric_key = _metric_key_for_task(task)
+    if metric_key is not None:
+        metric_value = metrics.get(metric_key)
+        if isinstance(metric_value, (int, float)):
+            print(f"   {metric_key}: {metric_value:.4f}")
+    if "interference_delta" in metrics:
+        print(f"   interference_delta: {metrics['interference_delta']:.4f}")
+    for key, value in sorted(metrics.items())[:3]:
+        if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
+            print(f"   {key}: {value:.4f}")
+
+
+def _retry_task_in_subprocess(
+    *,
+    adapter_path: Path,
+    task: str,
+    split: str,
+    batch_size: Optional[int],
+    generate_confusion_matrix: bool,
+    compute_missing_interference_baselines: bool,
+    eval_subset: Optional[Dict[str, Any]],
+    show_summary: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    eval_tag: Optional[str] = None
+    if eval_subset and bool(eval_subset.get("enabled", True)):
+        eval_tag = compute_eval_subset_tag(eval_subset)
+
+    cmd = [
+        sys.executable,
+        str(PACKAGE_ROOT / "main.py"),
+        "evaluate-merged",
+        "--adapter-path",
+        str(adapter_path),
+        "--eval-tasks",
+        task,
+        "--split",
+        split,
+    ]
+    if batch_size is not None:
+        cmd.extend(["--batch-size", str(batch_size)])
+    if not generate_confusion_matrix:
+        cmd.append("--no-confusion-matrix")
+    if not compute_missing_interference_baselines:
+        cmd.append("--no-compute-interference-baselines")
+
+    env = os.environ.copy()
+    env[_OOM_RETRY_ENV_FLAG] = "0"
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(PACKAGE_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return None, f"retry subprocess failed to start: {exc}"
+
+    if show_summary and completed.stdout:
+        print(completed.stdout.rstrip())
+    if completed.returncode != 0:
+        stderr_msg = completed.stderr.strip() if completed.stderr else "no stderr"
+        return None, f"retry subprocess exited with code {completed.returncode}: {stderr_msg}"
+
+    suffix = f"__{eval_tag}" if eval_tag else ""
+    summary_path = adapter_path / f"eval_results_{split}{suffix}.json"
+    if not summary_path.exists():
+        return None, f"retry subprocess did not produce expected summary: {summary_path}"
+    try:
+        payload = json.loads(summary_path.read_text())
+    except Exception as exc:
+        return None, f"failed to parse retry summary JSON: {exc}"
+
+    task_metrics = payload.get("results", {}).get(task)
+    if not isinstance(task_metrics, dict):
+        return None, f"retry summary missing task metrics for '{task}'"
+    if "error" in task_metrics:
+        return None, f"retry task still failed: {task_metrics['error']}"
+    return dict(task_metrics), None
+
+
+def _evaluate_tasks_with_retry(
+    *,
+    tasks_to_eval: List[str],
+    split: str,
+    show_summary: bool,
+    eval_subset: Optional[Dict[str, Any]],
+    evaluate_once: Callable[[str], Dict[str, Any]],
+    allow_oom_retry: bool,
+    retry_adapter_path: Optional[Path],
+    batch_size: Optional[int],
+    generate_confusion_matrix: bool,
+    compute_missing_interference_baselines: bool,
+) -> Tuple[Dict[str, Dict], Dict[str, Dict[str, bool]], List[str]]:
+    results: Dict[str, Dict] = {}
+    task_status: Dict[str, Dict[str, bool]] = {}
+    failed_tasks: List[str] = []
+
+    for i, task in enumerate(tasks_to_eval, 1):
+        print(f"\n[{i}/{len(tasks_to_eval)}] Evaluating on {task}...")
+        status = {"retry_attempted": False, "retry_succeeded": False}
+        task_status[task] = status
+        try:
+            metrics = evaluate_once(task)
+            results[task] = metrics
+            maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
+            if show_summary:
+                _print_task_success_summary(task, results[task])
+        except Exception as exc:
+            print(f"❌ Failed to evaluate on {task}: {exc}")
+            retried_ok = False
+            if (
+                allow_oom_retry
+                and _is_cuda_oom_error(exc)
+                and retry_adapter_path is not None
+                and os.environ.get(_OOM_RETRY_ENV_FLAG, "1") != "0"
+            ):
+                status["retry_attempted"] = True
+                print(f"🔁 Retrying {task} in a fresh subprocess due to CUDA OOM...")
+                _cleanup_cuda_memory(show_summary=False)
+                retry_metrics, retry_error = _retry_task_in_subprocess(
+                    adapter_path=retry_adapter_path,
+                    task=task,
+                    split=split,
+                    batch_size=batch_size,
+                    generate_confusion_matrix=generate_confusion_matrix,
+                    compute_missing_interference_baselines=compute_missing_interference_baselines,
+                    eval_subset=eval_subset,
+                    show_summary=show_summary,
+                )
+                if retry_metrics is not None:
+                    results[task] = retry_metrics
+                    maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
+                    status["retry_succeeded"] = True
+                    retried_ok = True
+                    if show_summary:
+                        print(f"✅ {task} evaluation complete after retry:")
+                        _print_task_success_summary(task, results[task])
+                else:
+                    print(f"❌ Retry failed for {task}: {retry_error}")
+
+            if not retried_ok:
+                results[task] = {"error": str(exc)}
+                failed_tasks.append(task)
+        finally:
+            _cleanup_cuda_memory(show_summary=False)
+
+    return results, task_status, failed_tasks
 
 
 def _has_saved_adapter_files(path: Path) -> bool:
@@ -247,47 +441,62 @@ def evaluate_merged_adapter(
 
         print(f"\n📊 Evaluating {metadata.get('merge_method')} in-memory on {len(tasks_to_eval)} task(s) ({split} split)")
 
+        task_status: Dict[str, Dict[str, bool]] = {
+            task: {"retry_attempted": False, "retry_succeeded": False}
+            for task in tasks_to_eval
+        }
+        failed_tasks: List[str] = []
+
         if cached_endpoint_results is not None:
             results.update(cached_endpoint_results)
         else:
-            for i, task in enumerate(tasks_to_eval, 1):
-                print(f"\n[{i}/{len(tasks_to_eval)}] Evaluating on {task}...")
-                try:
-                    result = evaluate(
-                        task=task,
-                        adapter=None,
-                        split=split,
-                        batch_size=batch_size,
-                        trained_on_task=merge_tag,
-                        enable_cache=enable_cache,
-                        show_summary=show_summary,
-                        generate_confusion_matrix=generate_confusion_matrix,
-                        delta_weights=merged_delta,
-                        adapter_label=merge_tag,
-                        merged_tasks=source_tasks,
-                        merged_method=metadata.get("merge_method"),
-                        eval_subset=eval_subset,
-                    )
-                    results[task] = result.metrics
-                    maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
+            retry_adapter_path: Optional[Path] = None
+            if os.environ.get(_OOM_RETRY_ENV_FLAG, "1") != "0":
+                extra_params = {}
+                if metadata.get("lambda") is not None:
+                    extra_params["lambda"] = metadata.get("lambda")
+                if isinstance(metadata.get("optimizer"), Mapping):
+                    extra_params["optimizer"] = metadata.get("optimizer")
+                retry_adapter_path = run_output_path if run_output_path is not None else create_merge_output_path(
+                    method_name,
+                    source_tasks or task_names or [],
+                    extra_params if extra_params else None,
+                )
+                merge_metadata_path = retry_adapter_path / "merge_metadata.json"
+                if not merge_metadata_path.exists():
+                    with merge_metadata_path.open("w") as handle:
+                        json.dump(metadata, handle, indent=2)
 
-                    if show_summary:
-                        print(f"✅ {task} evaluation complete:")
-                        task_key = task.lower()
-                        metric_key = None
-                        if task_key in TASK_METRICS:
-                            metric_key, _ = TASK_METRICS[task_key]
-                            metric_value = result.metrics.get(metric_key)
-                            if isinstance(metric_value, (int, float)):
-                                print(f"   {metric_key}: {metric_value:.4f}")
-                        if "interference_delta" in result.metrics:
-                            print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
-                        for key, value in sorted(result.metrics.items())[:3]:
-                            if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
-                                print(f"   {key}: {value:.4f}")
-                except Exception as exc:
-                    print(f"❌ Failed to evaluate on {task}: {exc}")
-                    results[task] = {"error": str(exc)}
+            def _evaluate_once(task: str) -> Dict[str, Any]:
+                result = evaluate(
+                    task=task,
+                    adapter=None,
+                    split=split,
+                    batch_size=batch_size,
+                    trained_on_task=merge_tag,
+                    enable_cache=enable_cache,
+                    show_summary=show_summary,
+                    generate_confusion_matrix=generate_confusion_matrix,
+                    delta_weights=merged_delta,
+                    adapter_label=merge_tag,
+                    merged_tasks=source_tasks,
+                    merged_method=metadata.get("merge_method"),
+                    eval_subset=eval_subset,
+                )
+                return result.metrics
+
+            results, task_status, failed_tasks = _evaluate_tasks_with_retry(
+                tasks_to_eval=tasks_to_eval,
+                split=split,
+                show_summary=show_summary,
+                eval_subset=eval_subset,
+                evaluate_once=_evaluate_once,
+                allow_oom_retry=True,
+                retry_adapter_path=retry_adapter_path,
+                batch_size=batch_size,
+                generate_confusion_matrix=generate_confusion_matrix,
+                compute_missing_interference_baselines=compute_missing_interference_baselines,
+            )
 
         if save_results:
             summary = {
@@ -298,6 +507,7 @@ def evaluate_merged_adapter(
                 "source_tasks": source_tasks,
                 "evaluated_tasks": tasks_to_eval,
                 "results": results,
+                "task_status": task_status,
                 "merge_method": metadata.get("merge_method"),
             }
             if metadata.get("lambda") is not None:
@@ -377,6 +587,11 @@ def evaluate_merged_adapter(
                     source_tasks=source_tasks,
                     split=split,
                 )
+
+        if failed_tasks:
+            raise RuntimeError(
+                f"Merged evaluation failed for {len(failed_tasks)} task(s): {', '.join(failed_tasks)}"
+            )
 
         return results
 
@@ -463,42 +678,34 @@ def evaluate_merged_adapter(
 
     print(f"\n📊 Evaluating merged adapter on {len(tasks_to_eval)} task(s) ({split} split)")
 
-    for i, task in enumerate(tasks_to_eval, 1):
-        print(f"\n[{i}/{len(tasks_to_eval)}] Evaluating on {task}...")
-        try:
-            result = evaluate(
-                task=task,
-                adapter=str(merged_run_path),
-                split=split,
-                batch_size=batch_size,
-                trained_on_task=merge_tag,
-                enable_cache=enable_cache,
-                show_summary=show_summary,
-                generate_confusion_matrix=generate_confusion_matrix,
-                merged_tasks=source_tasks,
-                merged_method=metadata.get("merge_method"),
-                eval_subset=eval_subset,
-            )
-            results[task] = result.metrics
-            maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
+    def _evaluate_once(task: str) -> Dict[str, Any]:
+        result = evaluate(
+            task=task,
+            adapter=str(merged_run_path),
+            split=split,
+            batch_size=batch_size,
+            trained_on_task=merge_tag,
+            enable_cache=enable_cache,
+            show_summary=show_summary,
+            generate_confusion_matrix=generate_confusion_matrix,
+            merged_tasks=source_tasks,
+            merged_method=metadata.get("merge_method"),
+            eval_subset=eval_subset,
+        )
+        return result.metrics
 
-            if show_summary:
-                print(f"✅ {task} evaluation complete:")
-                task_key = task.lower()
-                metric_key = None
-                if task_key in TASK_METRICS:
-                    metric_key, _ = TASK_METRICS[task_key]
-                    metric_value = result.metrics.get(metric_key)
-                    if isinstance(metric_value, (int, float)):
-                        print(f"   {metric_key}: {metric_value:.4f}")
-                if "interference_delta" in result.metrics:
-                    print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
-                for key, value in sorted(result.metrics.items())[:3]:
-                    if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
-                        print(f"   {key}: {value:.4f}")
-        except Exception as exc:
-            print(f"❌ Failed to evaluate on {task}: {exc}")
-            results[task] = {"error": str(exc)}
+    results, task_status, failed_tasks = _evaluate_tasks_with_retry(
+        tasks_to_eval=tasks_to_eval,
+        split=split,
+        show_summary=show_summary,
+        eval_subset=eval_subset,
+        evaluate_once=_evaluate_once,
+        allow_oom_retry=True,
+        retry_adapter_path=merged_run_path,
+        batch_size=batch_size,
+        generate_confusion_matrix=generate_confusion_matrix,
+        compute_missing_interference_baselines=compute_missing_interference_baselines,
+    )
 
     if save_results:
         summary = {
@@ -509,6 +716,7 @@ def evaluate_merged_adapter(
             "source_tasks": source_tasks,
             "evaluated_tasks": tasks_to_eval,
             "results": results,
+            "task_status": task_status,
         }
         if eval_subset is not None:
             summary["eval_subset"] = eval_subset
@@ -554,6 +762,11 @@ def evaluate_merged_adapter(
                 source_tasks=source_tasks,
                 split=split,
             )
+
+    if failed_tasks:
+        raise RuntimeError(
+            f"Merged evaluation failed for {len(failed_tasks)} task(s): {', '.join(failed_tasks)}"
+        )
 
     return results
 
@@ -683,42 +896,34 @@ def _evaluate_saved_merged(
 
     print(f"\n📊 Evaluating saved merged adapter on {len(tasks_to_eval)} task(s) ({split} split)")
 
-    for i, task in enumerate(tasks_to_eval, 1):
-        print(f"\n[{i}/{len(tasks_to_eval)}] Evaluating on {task}...")
-        try:
-            result = evaluate(
-                task=task,
-                adapter=str(merged_run_path),
-                split=split,
-                batch_size=batch_size,
-                trained_on_task=merge_tag,
-                enable_cache=enable_cache,
-                show_summary=show_summary,
-                generate_confusion_matrix=generate_confusion_matrix,
-                merged_tasks=source_tasks,
-                merged_method=metadata.get("merge_method"),
-                eval_subset=eval_subset,
-            )
-            results[task] = result.metrics
-            maybe_add_interference_delta(task, results[task], split, show_summary, eval_subset=eval_subset)
+    def _evaluate_once(task: str) -> Dict[str, Any]:
+        result = evaluate(
+            task=task,
+            adapter=str(merged_run_path),
+            split=split,
+            batch_size=batch_size,
+            trained_on_task=merge_tag,
+            enable_cache=enable_cache,
+            show_summary=show_summary,
+            generate_confusion_matrix=generate_confusion_matrix,
+            merged_tasks=source_tasks,
+            merged_method=metadata.get("merge_method"),
+            eval_subset=eval_subset,
+        )
+        return result.metrics
 
-            if show_summary:
-                print(f"✅ {task} evaluation complete:")
-                task_key = task.lower()
-                metric_key = None
-                if task_key in TASK_METRICS:
-                    metric_key, _ = TASK_METRICS[task_key]
-                    metric_value = result.metrics.get(metric_key)
-                    if isinstance(metric_value, (int, float)):
-                        print(f"   {metric_key}: {metric_value:.4f}")
-                if "interference_delta" in result.metrics:
-                    print(f"   interference_delta: {result.metrics['interference_delta']:.4f}")
-                for key, value in sorted(result.metrics.items())[:3]:
-                    if isinstance(value, (int, float)) and key not in {metric_key, "interference_delta"}:
-                        print(f"   {key}: {value:.4f}")
-        except Exception as exc:
-            print(f"❌ Failed to evaluate on {task}: {exc}")
-            results[task] = {"error": str(exc)}
+    results, task_status, failed_tasks = _evaluate_tasks_with_retry(
+        tasks_to_eval=tasks_to_eval,
+        split=split,
+        show_summary=show_summary,
+        eval_subset=eval_subset,
+        evaluate_once=_evaluate_once,
+        allow_oom_retry=True,
+        retry_adapter_path=merged_run_path,
+        batch_size=batch_size,
+        generate_confusion_matrix=generate_confusion_matrix,
+        compute_missing_interference_baselines=True,
+    )
 
     if save_results:
         summary = {
@@ -729,6 +934,7 @@ def _evaluate_saved_merged(
             "source_tasks": source_tasks,
             "evaluated_tasks": tasks_to_eval,
             "results": results,
+            "task_status": task_status,
         }
         results_path = merged_run_path / f"eval_results_{split}.json"
         with results_path.open("w") as handle:
@@ -753,6 +959,11 @@ def _evaluate_saved_merged(
             metadata=metadata,
             summary=summary,
             run_path=merged_run_path,
+        )
+
+    if failed_tasks:
+        raise RuntimeError(
+            f"Merged evaluation failed for {len(failed_tasks)} task(s): {', '.join(failed_tasks)}"
         )
 
     return results

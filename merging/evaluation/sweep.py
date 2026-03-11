@@ -364,6 +364,8 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
                 "error": str(exc),
             }
             print(f"❌ Post-sweep evaluation failed: {exc}")
+            _atomic_write_json(summary_path, summary)
+            raise
         _atomic_write_json(summary_path, summary)
 
     return summary

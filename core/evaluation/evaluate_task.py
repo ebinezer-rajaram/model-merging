@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import random
@@ -11,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any
+
+import torch
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -90,6 +93,30 @@ class EvaluationResult:
     cache_used: bool = False
     cache_path: Optional[Path] = None
     save_path: Optional[Path] = None
+
+
+def _cleanup_evaluation_runtime(model: Any, processor: Any, eval_setup: Any) -> None:
+    """Best-effort cleanup for evaluation objects and CUDA allocator state."""
+    for obj in (eval_setup, processor, model):
+        try:
+            del obj
+        except Exception:
+            pass
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments for the evaluation script."""
@@ -560,6 +587,9 @@ def evaluate(
     cache_path: Optional[Path] = None
     cache_used = False
     metrics: Optional[Dict[str, Any]] = None
+    model: Any = None
+    processor: Any = None
+    eval_setup: Any = None
 
     if enable_cache and adapter_path is None:
         dataset_cfg_for_cache = dict(dataset_cfg)
@@ -782,6 +812,8 @@ def evaluate(
                 print(f"💾 Cached base metrics to {cache_path}")
             else:
                 print(f"💾 Cached base metrics to {cache_path}")
+
+    _cleanup_evaluation_runtime(model, processor, eval_setup)
 
     save_path: Optional[Path] = None
     saved_paths: list[Path] = []

@@ -663,6 +663,8 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
                 "error": str(exc),
             }
             print(f"❌ Post-sweep evaluation failed: {exc}")
+            _flush_summary()
+            raise
         _flush_summary()
 
     return summary
