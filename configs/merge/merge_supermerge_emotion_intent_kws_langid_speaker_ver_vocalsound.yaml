@@ -16,7 +16,7 @@ optimizer:
     coefficient_parameterization: simplex_softmax_scaled
     magnitude_scope: per_layer
     magnitude_parameterization: linear
-    magnitude_init: 4.097
+    magnitude_init: 3.414
     learn_magnitude: true
     normalize_coefficients: false
     betas: [0.9, 0.99]
