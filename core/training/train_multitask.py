@@ -271,11 +271,38 @@ def _copy_mtl_metrics_to_subdirs(run_manager: RunManager, metrics_dir: Path) -> 
         run_path = get_path()
         if run_path is None:
             continue
-        dest_dir = ensure_dir(metrics_dir / label)
+        dest_dir = metrics_dir / label
+        if dest_dir.is_symlink() or dest_dir.exists():
+            if dest_dir.is_symlink():
+                dest_dir.unlink(missing_ok=True)
+            elif dest_dir.is_dir():
+                shutil.rmtree(dest_dir)
+            else:
+                dest_dir.unlink(missing_ok=True)
+        dest_dir = ensure_dir(dest_dir)
         for fname in mtl_files:
             src = run_path / fname
             if src.exists():
                 shutil.copy(src, dest_dir / fname)
+
+
+def _publish_latest_mtl_metrics_snapshot(run_manager: RunManager, metrics_dir: Path) -> None:
+    """Keep top-level metrics files as a latest-run snapshot for backward compatibility."""
+    latest_run = run_manager.get_latest_run_path()
+    if latest_run is None:
+        return
+
+    snapshot_files = [
+        "mtl_eval_history.jsonl",
+        "mtl_eval_history.csv",
+        "mtl_selection_delta_trends.png",
+        "mtl_per_task_interference_delta.png",
+        "mtl_per_task_primary_metric.png",
+    ]
+    for fname in snapshot_files:
+        src = latest_run / fname
+        if src.exists():
+            shutil.copy(src, metrics_dir / fname)
 
 
 def _load_mtl_config(config_path: Path) -> tuple[MultiTaskConfig, Dict[str, Any]]:
@@ -358,6 +385,16 @@ def run_multitask_training(config_path: Path) -> None:
     )
     print(f"🧪 Task sampling probabilities (temperature={cfg.training.sampling.temperature}): {sampling_summary}")
 
+    run_manager = RunManager(
+        adapter_dir=paths["output_dir"],
+        metric_for_ranking=f"eval_mtl_{cfg.training.selection_criterion}",
+        greater_is_better=True,
+    )
+    run_dir = run_manager.create_run_directory()
+    print(f"📁 Created MTL run directory: {run_dir.name}")
+    metrics_run_dir = ensure_dir(paths["metrics"] / "runs" / run_dir.name)
+    print(f"📊 MTL run metrics directory: {metrics_run_dir}")
+
     evaluator = MultiTaskEvaluator(
         tasks=task_names,
         eval_setups=eval_setups,
@@ -365,7 +402,7 @@ def run_multitask_training(config_path: Path) -> None:
         split=cfg.training.selection_split,
         batch_size=int(training_args.per_device_eval_batch_size),
         compute_missing_interference_baselines=bool(cfg.training.compute_missing_interference_baselines),
-        metrics_dir=paths["metrics"],
+        metrics_dir=metrics_run_dir,
         selection_criterion=cfg.training.selection_criterion,
         use_cache=True,
         eval_subset=(dict(cfg.training.selection_eval_subset) if cfg.training.selection_eval_subset else None),
@@ -418,7 +455,7 @@ def run_multitask_training(config_path: Path) -> None:
             split="test",
             batch_size=int(training_args.per_device_eval_batch_size),
             compute_missing_interference_baselines=bool(cfg.training.compute_missing_interference_baselines),
-            metrics_dir=paths["metrics"],
+            metrics_dir=metrics_run_dir,
             selection_criterion=cfg.training.selection_criterion,
             use_cache=False,
             eval_subset=None,
@@ -435,15 +472,6 @@ def run_multitask_training(config_path: Path) -> None:
     else:
         print("⚠️  No test splits available for any task — skipping test evaluation.")
 
-    run_manager = RunManager(
-        adapter_dir=paths["output_dir"],
-        metric_for_ranking=f"eval_mtl_{cfg.training.selection_criterion}",
-        greater_is_better=True,
-    )
-
-    run_dir = run_manager.create_run_directory()
-    print(f"📁 Created MTL run directory: {run_dir.name}")
-
     run_history_csv = run_dir / "training_history.csv"
     save_history_to_csv(trainer, run_history_csv)
     save_artifacts(trainer, processor, run_dir)
@@ -458,7 +486,7 @@ def run_multitask_training(config_path: Path) -> None:
         "mtl_per_task_interference_delta.png",
         "mtl_per_task_primary_metric.png",
     ]:
-        src = paths["metrics"] / fname
+        src = metrics_run_dir / fname
         if src.exists():
             shutil.copy(src, run_dir / fname)
 
@@ -478,6 +506,7 @@ def run_multitask_training(config_path: Path) -> None:
     )
 
     _copy_mtl_metrics_to_subdirs(run_manager, paths["metrics"])
+    _publish_latest_mtl_metrics_snapshot(run_manager, paths["metrics"])
 
     # Write standardised experiment_summary.json for this MTL run.
     try:

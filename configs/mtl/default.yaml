@@ -15,9 +15,10 @@ model:
       - k_proj
       - v_proj
       - o_proj
-      - out_proj
-      - fc1
-      - fc2
+      - gate_proj
+      - up_proj
+      - down_proj
+      - audio_tower.proj
     task_type: CAUSAL_LM
 
 # Training Configuration
@@ -89,7 +90,7 @@ training:
     label_column: label
     per_task:
       asr:
-        max_samples: 500
+        max_samples: 1000
         stratified: false
       emotion:
         max_samples: 1000
@@ -131,9 +132,9 @@ tasks:
   - name: speaker_ver
     config: speaker_ver.yaml
     train_weight: 1.0
-  # - name: asr
-  #   config: asr.yaml
-  #   train_weight: 1.0
+  - name: asr
+    config: asr.yaml
+    train_weight: 1.0
   - name: vocalsound
     config: vocalsound.yaml
     train_weight: 1.0
