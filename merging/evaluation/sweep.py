@@ -15,6 +15,13 @@ from merging.config.unified import MergeConfig, LambdaPolicySpec, OptimizerSpec,
 from merging.evaluation.evaluate import evaluate_merged_adapter
 from merging.engine.registry import get_merge_method, normalize_params
 from merging.runtime.utils import PACKAGE_ROOT
+from merging.evaluation.continual_sweep import (
+    default_continual_sweep_dir,
+    evaluate_continual_point,
+    is_continual_method,
+    prepare_continual_context,
+    run_post_sweep_eval_for_best_continual,
+)
 
 
 @dataclass(frozen=True)
@@ -173,6 +180,18 @@ def _run_post_sweep_eval_for_best(
     lambda_policy: Optional[Dict[str, Any]],
     optimizer: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    if is_continual_method(config.method):
+        context = prepare_continual_context(config)
+        summary_dir = config.output_dir if config.output_dir is not None else default_continual_sweep_dir(config)
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        return run_post_sweep_eval_for_best_continual(
+            config=config,
+            context=context,
+            best_params=best_params,
+            summary_dir=summary_dir,
+            score_fn=_score_min_interference,
+        )
+
     post_cfg = config.post_sweep_eval
     if not isinstance(post_cfg, Mapping) or not bool(post_cfg.get("enabled", False)):
         return {"enabled": False}
@@ -239,6 +258,8 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
     search_type = str(search.get("type", "grid")).lower()
     lambda_policy = _lambda_policy_mapping(config.lambda_policy)
     optimizer = _optimizer_mapping(config.optimizer)
+    continual_mode = is_continual_method(config.method)
+    continual_context = prepare_continual_context(config) if continual_mode else None
 
     if search_type != "grid":
         from merging.evaluation.bayes import run_bayes_search
@@ -254,14 +275,17 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
     timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     summary_dir = config.output_dir
     if summary_dir is None:
-        summary_dir = (
-            PACKAGE_ROOT
-            / "artifacts"
-            / "merged"
-            / config.method
-            / "_".join(sorted(config.adapters))
-            / "sweeps"
-        )
+        if continual_mode:
+            summary_dir = default_continual_sweep_dir(config)
+        else:
+            summary_dir = (
+                PACKAGE_ROOT
+                / "artifacts"
+                / "merged"
+                / config.method
+                / "_".join(sorted(config.adapters))
+                / "sweeps"
+            )
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary_path = summary_dir / f"sweep_{timestamp}.json"
 
@@ -292,29 +316,40 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
 
     try:
         for idx, params in enumerate(params_grid, 1):
-            method_impl = get_merge_method(config.method)
-            effective_params = normalize_params(method_impl, params=params)
-            if lambda_policy is not None:
-                effective_params["lambda_policy"] = lambda_policy
-            if optimizer is not None:
-                effective_params["optimizer"] = optimizer
-            method_impl.validate(len(config.adapters), effective_params)
-
             print(f"\n[{idx}/{len(params_grid)}] Evaluating params: {params}")
-            results = evaluate_merged_adapter(
-                adapter_path=None,
-                method=config.method,
-                task_names=config.adapters,
-                params=effective_params,
-                eval_tasks=config.eval_tasks,
-                split=config.split,
-                save_merged=config.save_merged,
-                save_results=True,
-                show_summary=True,
-                merge_mode=config.merge_mode,
-                compute_missing_interference_baselines=config.compute_missing_interference_baselines,
-                eval_subset=config.eval_subset,
-            )
+            if continual_mode:
+                if continual_context is None:
+                    raise RuntimeError("Continual sweep context was not initialized.")
+                results, continual_meta = evaluate_continual_point(
+                    config=config,
+                    context=continual_context,
+                    params=params,
+                    run_index=idx,
+                    summary_dir=summary_dir,
+                )
+            else:
+                method_impl = get_merge_method(config.method)
+                effective_params = normalize_params(method_impl, params=params)
+                if lambda_policy is not None:
+                    effective_params["lambda_policy"] = lambda_policy
+                if optimizer is not None:
+                    effective_params["optimizer"] = optimizer
+                method_impl.validate(len(config.adapters), effective_params)
+                results = evaluate_merged_adapter(
+                    adapter_path=None,
+                    method=config.method,
+                    task_names=config.adapters,
+                    params=effective_params,
+                    eval_tasks=config.eval_tasks,
+                    split=config.split,
+                    save_merged=config.save_merged,
+                    save_results=True,
+                    show_summary=True,
+                    merge_mode=config.merge_mode,
+                    compute_missing_interference_baselines=config.compute_missing_interference_baselines,
+                    eval_subset=config.eval_subset,
+                )
+                continual_meta = None
 
             score, stats = _score_min_interference(results, config.constraint_nonnegative)
             run_entry = {
@@ -323,6 +358,8 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
                 "score_details": stats,
                 "results": results,
             }
+            if isinstance(continual_meta, Mapping):
+                run_entry["continual"] = dict(continual_meta)
             runs.append(run_entry)
 
             tiebreak = stats.get("mean_interference_delta", float("-inf"))

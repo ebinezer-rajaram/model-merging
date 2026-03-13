@@ -193,6 +193,14 @@ def _resolve_task_eval_tag(task: str, eval_subset: Optional[Mapping[str, Any]]) 
     if isinstance(task_override, (int, float)):
         max_samples = int(task_override)
     elif isinstance(task_override, dict):
+        if task_override.get("tag"):
+            forced_tag = str(task_override["tag"]).strip()
+            if forced_tag:
+                return forced_tag
+        if task_override.get("eval_tag"):
+            forced_tag = str(task_override["eval_tag"]).strip()
+            if forced_tag:
+                return forced_tag
         if task_override.get("max_samples") is not None:
             max_samples = int(task_override["max_samples"])
         if task_override.get("shuffle") is not None:

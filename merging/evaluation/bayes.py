@@ -38,6 +38,12 @@ from merging.evaluation.sweep import (
     _run_post_sweep_eval_for_best,
     _score_min_interference,
 )
+from merging.evaluation.continual_sweep import (
+    default_continual_sweep_dir,
+    evaluate_continual_point,
+    is_continual_method,
+    prepare_continual_context,
+)
 
 
 _FLOAT_KINDS = {"float", "continuous"}
@@ -312,15 +318,20 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
     started_at = datetime.now()
     timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     summary_dir = config.output_dir
+    continual_mode = is_continual_method(config.method)
+    continual_context = prepare_continual_context(config) if continual_mode else None
     if summary_dir is None:
-        summary_dir = (
-            PACKAGE_ROOT
-            / "artifacts"
-            / "merged"
-            / config.method
-            / "_".join(sorted(config.adapters))
-            / "sweeps"
-        )
+        if continual_mode:
+            summary_dir = default_continual_sweep_dir(config)
+        else:
+            summary_dir = (
+                PACKAGE_ROOT
+                / "artifacts"
+                / "merged"
+                / config.method
+                / "_".join(sorted(config.adapters))
+                / "sweeps"
+            )
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary_path = summary_dir / f"sweep_{timestamp}.json"
 
@@ -360,7 +371,14 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         from merging.evaluation.sweep import _maybe_regen_plot
         _maybe_regen_plot(summary_path)
 
-    def _record_run(params: Dict[str, Any], results: Dict[str, Dict] | None, score: float, details: Dict[str, Any]) -> None:
+    def _record_run(
+        params: Dict[str, Any],
+        results: Dict[str, Dict] | None,
+        score: float,
+        details: Dict[str, Any],
+        *,
+        continual_meta: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         nonlocal best_idx, best_score, best_tiebreak
         entry: Dict[str, Any] = {
             "params": dict(params),
@@ -368,6 +386,8 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
             "score_details": dict(details),
             "results": results or {},
         }
+        if isinstance(continual_meta, Mapping):
+            entry["continual"] = dict(continual_meta)
         runs.append(entry)
 
         tiebreak = details.get("mean_interference_delta", float("-inf"))
@@ -379,33 +399,45 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         _flush_summary()
 
     def _evaluate(params: Dict[str, Any]) -> None:
-        method_impl = get_merge_method(config.method)
         try:
-            effective_params = normalize_params(method_impl, params=params)
-            if lambda_policy is not None:
-                effective_params["lambda_policy"] = lambda_policy
-            if optimizer is not None:
-                effective_params["optimizer"] = optimizer
-            method_impl.validate(len(config.adapters), effective_params)
-            results = evaluate_merged_adapter(
-                adapter_path=None,
-                method=config.method,
-                task_names=config.adapters,
-                params=effective_params,
-                eval_tasks=config.eval_tasks,
-                split=config.split,
-                save_merged=config.save_merged,
-                save_results=True,
-                show_summary=True,
-                merge_mode=config.merge_mode,
-                compute_missing_interference_baselines=config.compute_missing_interference_baselines,
-                eval_subset=config.eval_subset,
-            )
+            if continual_mode:
+                if continual_context is None:
+                    raise RuntimeError("Continual sweep context was not initialized.")
+                results, continual_meta = evaluate_continual_point(
+                    config=config,
+                    context=continual_context,
+                    params=params,
+                    run_index=(len(runs) + 1),
+                    summary_dir=summary_dir,
+                )
+            else:
+                method_impl = get_merge_method(config.method)
+                effective_params = normalize_params(method_impl, params=params)
+                if lambda_policy is not None:
+                    effective_params["lambda_policy"] = lambda_policy
+                if optimizer is not None:
+                    effective_params["optimizer"] = optimizer
+                method_impl.validate(len(config.adapters), effective_params)
+                results = evaluate_merged_adapter(
+                    adapter_path=None,
+                    method=config.method,
+                    task_names=config.adapters,
+                    params=effective_params,
+                    eval_tasks=config.eval_tasks,
+                    split=config.split,
+                    save_merged=config.save_merged,
+                    save_results=True,
+                    show_summary=True,
+                    merge_mode=config.merge_mode,
+                    compute_missing_interference_baselines=config.compute_missing_interference_baselines,
+                    eval_subset=config.eval_subset,
+                )
+                continual_meta = None
             raw_score, score_details = _score_min_interference(results, config.constraint_nonnegative)
             score = raw_score if np.isfinite(raw_score) else invalid_score
             if not np.isfinite(score):
                 score = invalid_score
-            _record_run(params, results, float(score), score_details)
+            _record_run(params, results, float(score), score_details, continual_meta=continual_meta)
         except Exception as exc:
             _record_run(params, None, invalid_score, {"error": str(exc)})
 

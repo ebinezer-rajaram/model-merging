@@ -1,0 +1,29 @@
+adapters:
+  - artifacts/continual/materialized/6task_supermerge_20260311_130442
+  - asr
+method: continual
+merge_mode: common
+
+method_params:
+  energy_threshold: 0.99
+  store_dtype: float16
+  alpha: 1.0
+  lambda: 0.75
+  use_cache: false
+
+search:
+  type: grid
+  grid:
+    alpha: [1.0]
+    lambda: [0.75]
+
+split: test
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, vocalsound, asr, speech_qa]
+eval_subset:
+  enabled: false
+
+save_merged: false
+constraint_nonnegative: false
+
+post_sweep_eval:
+  enabled: false
