@@ -124,6 +124,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default=ASR_TASK_NAME, help="Task name to evaluate.")
     parser.add_argument("--config", default=None, help="Optional config filename override.")
     parser.add_argument("--adapter", default=None, help="Path to the adapter directory to evaluate (or task name for cross-task eval).")
+    parser.add_argument(
+        "--continual-artifact",
+        default=None,
+        help="Path to a continual compressed artifact directory to evaluate.",
+    )
     parser.add_argument("--run-id", default=None, help="Specific run ID to evaluate (e.g., run_20251109_143022). Defaults to 'best'.")
     parser.add_argument(
         "--split",
@@ -467,6 +472,8 @@ def evaluate(
     show_summary: bool = True,
     generate_confusion_matrix: bool = False,
     delta_weights: Optional[Dict[str, Any]] = None,
+    continual_artifact_path: Optional[str | Path] = None,
+    continual_runtime_strict: bool = False,
     adapter_label: Optional[str] = None,
     merged_tasks: Optional[list[str]] = None,
     merged_method: Optional[str] = None,
@@ -518,6 +525,18 @@ def evaluate(
     adapter_path, detected_trained_on_task = _resolve_adapter_path(adapter, run_id, trained_on_task)
     if delta_weights is not None and adapter_path is not None:
         raise ValueError("delta_weights cannot be used with adapter_path.")
+    if continual_artifact_path is not None and adapter_path is not None:
+        raise ValueError("continual_artifact_path cannot be used with adapter_path.")
+    if continual_artifact_path is not None and delta_weights is not None:
+        raise ValueError("continual_artifact_path cannot be used with delta_weights.")
+
+    resolved_continual_artifact_path: Optional[Path] = None
+    if continual_artifact_path is not None:
+        resolved_continual_artifact_path = Path(continual_artifact_path).expanduser()
+        if not resolved_continual_artifact_path.is_absolute():
+            resolved_continual_artifact_path = (PACKAGE_ROOT / resolved_continual_artifact_path).resolve()
+        if not resolved_continual_artifact_path.exists():
+            raise FileNotFoundError(f"Continual artifact path not found: {resolved_continual_artifact_path}")
 
     # Use detected task if not explicitly provided
     if detected_trained_on_task:
@@ -539,6 +558,7 @@ def evaluate(
     subset_stratified = False
     subset_label_column: Optional[str] = None
     subset_cache_path: Optional[Path] = None
+    forced_eval_tag: Optional[str] = None
     if eval_subset and bool(eval_subset.get("enabled", True)):
         subset_shuffle = bool(eval_subset.get("shuffle", False))
         if "seed" in eval_subset and eval_subset["seed"] is not None:
@@ -551,6 +571,10 @@ def evaluate(
         if isinstance(task_override, (int, float)):
             max_eval_samples = int(task_override)
         elif isinstance(task_override, dict):
+            if task_override.get("tag"):
+                forced_eval_tag = str(task_override["tag"]).strip() or None
+            elif task_override.get("eval_tag"):
+                forced_eval_tag = str(task_override["eval_tag"]).strip() or None
             if "max_samples" in task_override and task_override["max_samples"] is not None:
                 max_eval_samples = int(task_override["max_samples"])
             if "shuffle" in task_override and task_override["shuffle"] is not None:
@@ -568,13 +592,16 @@ def evaluate(
         # Tag is derived from the resolved per-task parameters only, so it is
         # stable across experiments that share the same effective subset settings
         # regardless of differences in the broader eval_subset config.
-        eval_tag = compute_task_eval_subset_tag(
-            max_samples=max_eval_samples,
-            shuffle=subset_shuffle,
-            seed=subset_seed,
-            stratified=subset_stratified,
-            label_column=subset_label_column,
-        )
+        if forced_eval_tag is not None:
+            eval_tag = forced_eval_tag
+        else:
+            eval_tag = compute_task_eval_subset_tag(
+                max_samples=max_eval_samples,
+                shuffle=subset_shuffle,
+                seed=subset_seed,
+                stratified=subset_stratified,
+                label_column=subset_label_column,
+            )
         if eval_tag is not None:
             subset_cache_path = _resolve_eval_subset_cache_path(
                 dataset_cfg=dataset_cfg,
@@ -591,7 +618,7 @@ def evaluate(
     processor: Any = None
     eval_setup: Any = None
 
-    if enable_cache and adapter_path is None:
+    if enable_cache and adapter_path is None and resolved_continual_artifact_path is None:
         dataset_cfg_for_cache = dict(dataset_cfg)
         if eval_tag is not None:
             dataset_cfg_for_cache["_eval_subset"] = {
@@ -623,6 +650,8 @@ def evaluate(
             model_path,
             adapter_path,
             delta_weights=delta_weights,
+            continual_artifact_path=resolved_continual_artifact_path,
+            continual_runtime_strict=continual_runtime_strict,
         )
         eval_setup = prepare_task_for_evaluation(
             task,
@@ -848,8 +877,10 @@ def evaluate(
         if show_summary:
             print(f"💾 Saved metrics to custom path: {save_path}")
 
-    if adapter_path is None:
+    if adapter_path is None and resolved_continual_artifact_path is None:
         target_label = adapter_label or "base model"
+    elif resolved_continual_artifact_path is not None:
+        target_label = adapter_label or f"continual@{resolved_continual_artifact_path.name}"
     else:
         target_label = f"adapter@{adapter_path.name}"
     if show_summary:
@@ -879,6 +910,7 @@ def main() -> None:
         enable_cache=args.use_cache,
         show_summary=True,
         generate_confusion_matrix=args.confusion_matrix,
+        continual_artifact_path=args.continual_artifact,
     )
 
 

@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     from merging.engine.registry import list_merge_methods
 
     merge_methods = list_merge_methods()
+    sweep_methods = sorted(set(merge_methods + ["continual"]))
     parser = argparse.ArgumentParser(description="Speech merging pipeline.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -219,7 +220,7 @@ def parse_args() -> argparse.Namespace:
     sweep_parser.add_argument(
         "--method",
         default=None,
-        choices=merge_methods,
+        choices=sweep_methods,
         help="Merge method for sweep (overrides config).",
     )
     sweep_parser.add_argument(
@@ -267,6 +268,159 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output directory for sweep summary.",
     )
+
+    materialize_parser = subparsers.add_parser(
+        "materialize-merged-artifact",
+        help="Materialize an existing merged run into a reusable continual compressed artifact.",
+    )
+    materialize_parser.add_argument(
+        "--merged-run-path",
+        required=True,
+        help="Path to merged run directory containing merge_metadata.json.",
+    )
+    materialize_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output directory for the continual artifact.",
+    )
+    materialize_parser.add_argument(
+        "--energy-threshold",
+        type=float,
+        default=0.99,
+        help="Per-parameter retained-energy threshold for SVD compression.",
+    )
+    materialize_parser.add_argument(
+        "--store-dtype",
+        default="float16",
+        choices=("float16", "bfloat16", "float32"),
+        help="Storage dtype for factor tensors.",
+    )
+    materialize_parser.add_argument(
+        "--merge-mode",
+        default=None,
+        choices=("common", "strict"),
+        help="Optional override for key merge mode during materialization.",
+    )
+
+    continual_merge_parser = subparsers.add_parser(
+        "continual-merge",
+        help="Merge an existing reusable artifact (or adapter) with an incoming source.",
+    )
+    continual_merge_parser.add_argument("--x-source", required=True, help="Existing merged source (artifact path or adapter/task spec).")
+    continual_merge_parser.add_argument("--y-source", required=True, help="Incoming source (artifact path or adapter/task spec).")
+    continual_merge_parser.add_argument("--alpha", type=float, default=1.0, help="Global alpha coefficient.")
+    continual_merge_parser.add_argument(
+        "--lambda",
+        dest="lambda_weight",
+        type=float,
+        default=0.5,
+        help="Global lambda coefficient for x in alpha*(lambda*x + (1-lambda)*y).",
+    )
+    continual_merge_parser.add_argument(
+        "--output",
+        default=None,
+        help="Output directory for merged continual artifact.",
+    )
+    continual_merge_parser.add_argument(
+        "--energy-threshold",
+        type=float,
+        default=0.99,
+        help="Per-parameter retained-energy threshold for SVD compression.",
+    )
+    continual_merge_parser.add_argument(
+        "--store-dtype",
+        default="float16",
+        choices=("float16", "bfloat16", "float32"),
+        help="Storage dtype for factor tensors.",
+    )
+    continual_merge_parser.add_argument(
+        "--merge-mode",
+        default="common",
+        choices=("common", "strict"),
+        help="Key-handling behavior across sources.",
+    )
+
+    eval_continual_parser = subparsers.add_parser(
+        "evaluate-continual",
+        help="Evaluate a continual compressed artifact, or sweep alpha/lambda by building artifacts on the fly.",
+    )
+    eval_continual_parser.add_argument("--artifact-path", default=None, help="Path to an existing continual artifact directory.")
+    eval_continual_parser.add_argument("--x-source", default=None, help="Sweep mode: existing source spec.")
+    eval_continual_parser.add_argument("--y-source", default=None, help="Sweep mode: incoming source spec.")
+    eval_continual_parser.add_argument("--alpha", type=float, default=None, help="Single alpha value (single or sweep mode default).")
+    eval_continual_parser.add_argument(
+        "--lambda",
+        dest="lambda_weight",
+        type=float,
+        default=None,
+        help="Single lambda value (single or sweep mode default).",
+    )
+    eval_continual_parser.add_argument(
+        "--alpha-values",
+        nargs="+",
+        default=None,
+        help="Sweep mode alpha grid (space/comma separated).",
+    )
+    eval_continual_parser.add_argument(
+        "--lambda-values",
+        nargs="+",
+        default=None,
+        help="Sweep mode lambda grid (space/comma separated).",
+    )
+    eval_continual_parser.add_argument(
+        "--output",
+        default=None,
+        help="Sweep output directory or run output override.",
+    )
+    eval_continual_parser.add_argument(
+        "--eval-tasks",
+        nargs="+",
+        default=None,
+        help="Tasks to evaluate (defaults to constituent task union).",
+    )
+    eval_continual_parser.add_argument(
+        "--split",
+        default="test",
+        choices=("train", "validation", "test"),
+        help="Dataset split to evaluate.",
+    )
+    eval_continual_parser.add_argument("--batch-size", type=int, default=None, help="Per-device eval batch size.")
+    eval_continual_parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="Reuse cached base-model metrics when available.",
+    )
+    eval_continual_parser.add_argument(
+        "--no-save-results",
+        action="store_false",
+        dest="save_results",
+        help="Disable saving evaluation summaries.",
+    )
+    eval_continual_parser.add_argument(
+        "--no-compute-interference-baselines",
+        action="store_false",
+        dest="compute_missing_interference_baselines",
+        help="Do not auto-compute baseline metrics for interference_delta.",
+    )
+    eval_continual_parser.add_argument(
+        "--energy-threshold",
+        type=float,
+        default=0.99,
+        help="Sweep mode SVD retained-energy threshold.",
+    )
+    eval_continual_parser.add_argument(
+        "--store-dtype",
+        default="float16",
+        choices=("float16", "bfloat16", "float32"),
+        help="Sweep mode factor storage dtype.",
+    )
+    eval_continual_parser.add_argument(
+        "--merge-mode",
+        default="common",
+        choices=("common", "strict"),
+        help="Sweep mode key merge handling.",
+    )
+    eval_continual_parser.set_defaults(save_results=True, compute_missing_interference_baselines=True)
 
     return parser.parse_args()
 
@@ -469,6 +623,25 @@ def dispatch_merge_sweep(args: argparse.Namespace) -> None:
     run_sweep(normalize_merge_config(config_dict))
 
 
+def dispatch_materialize_merged_artifact(args: argparse.Namespace) -> None:
+    from merging.cli import materialize_merged_artifact_from_cli_args
+
+    materialize_merged_artifact_from_cli_args(args)
+
+
+def dispatch_continual_merge(args: argparse.Namespace) -> None:
+    from merging.cli import continual_merge_from_cli_args
+
+    continual_merge_from_cli_args(args)
+
+
+def dispatch_evaluate_continual(args: argparse.Namespace) -> None:
+    from merging.cli import evaluate_continual_from_cli_args
+
+    _configure_cuda_allocator_env()
+    evaluate_continual_from_cli_args(args)
+
+
 def main() -> None:
     """Dispatch commands."""
     args = parse_args()
@@ -484,6 +657,12 @@ def main() -> None:
         dispatch_evaluate_merged(args)
     elif args.command == "merge-sweep":
         dispatch_merge_sweep(args)
+    elif args.command == "materialize-merged-artifact":
+        dispatch_materialize_merged_artifact(args)
+    elif args.command == "continual-merge":
+        dispatch_continual_merge(args)
+    elif args.command == "evaluate-continual":
+        dispatch_evaluate_continual(args)
     else:
         raise NotImplementedError(f"Command '{args.command}' not supported.")
 

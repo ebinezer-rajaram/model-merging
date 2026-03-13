@@ -32,6 +32,10 @@ from merging.methods.weighted import merge_weighted
 from merging.engine.registry import get_merge_method, list_merge_methods
 from merging.engine import builtin_methods as _methods  # registers built-ins
 from merging.evaluation.evaluate import evaluate_merged_adapter
+from merging.continual.engine import (
+    continual_merge_sources_to_artifact,
+    materialize_existing_merge_to_artifact,
+)
 from merging.runtime.utils import (
     create_merge_output_path,
     load_adapter_weights,
@@ -44,6 +48,8 @@ __all__ = [
     "merge_weighted",
     "create_merge_output_path",
     "evaluate_merged_adapter",
+    "continual_merge_sources_to_artifact",
+    "materialize_existing_merge_to_artifact",
     "load_adapter_weights",
     "resolve_best_adapter",
     "save_merged_adapter",

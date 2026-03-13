@@ -11,6 +11,11 @@ from merging.runtime.logging import banner
 from merging.engine.registry import list_merge_methods
 from merging.engine.runner import run_merge
 from merging.config.unified import load_merge_config
+from merging.continual.cli import (
+    continual_merge_from_args,
+    evaluate_continual_from_args,
+    materialize_merged_artifact_from_args,
+)
 
 
 def merge_adapters_cli(
@@ -187,3 +192,18 @@ def merge_from_args(args: argparse.Namespace) -> None:
         evaluate=args.evaluate,
         eval_split=args.eval_split,
     )
+
+
+def materialize_merged_artifact_from_cli_args(args: argparse.Namespace) -> None:
+    banner("🧱 Materialize Continual Artifact")
+    materialize_merged_artifact_from_args(args)
+
+
+def continual_merge_from_cli_args(args: argparse.Namespace) -> None:
+    banner("🔁 Continual Merge")
+    continual_merge_from_args(args)
+
+
+def evaluate_continual_from_cli_args(args: argparse.Namespace) -> None:
+    banner("📊 Evaluate Continual Artifact")
+    evaluate_continual_from_args(args)

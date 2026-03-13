@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 import torch
+from torch import nn
 from peft import PeftModel
 from transformers import (
     IntervalStrategy,
@@ -273,6 +274,8 @@ def load_model_and_processor(
     model_path: Path,
     adapter_path: Optional[Path] = None,
     delta_weights: Optional[Dict[str, torch.Tensor]] = None,
+    continual_artifact_path: Optional[Path] = None,
+    continual_runtime_strict: bool = False,
     device_map_override: Optional[Any] = None,
     torch_dtype_override: Optional[torch.dtype] = None,
 ) -> tuple[Any, Qwen2_5OmniProcessor]:
@@ -299,6 +302,17 @@ def load_model_and_processor(
     # Load saved adapter if provided
     if adapter_path is not None:
         model = PeftModel.from_pretrained(model, str(adapter_path))
+
+    if continual_artifact_path is not None:
+        if adapter_path is not None:
+            raise ValueError("continual_artifact_path cannot be used with adapter_path.")
+        if delta_weights is not None:
+            raise ValueError("continual_artifact_path cannot be used with delta_weights.")
+        _apply_continual_artifact(
+            model,
+            artifact_path=continual_artifact_path,
+            strict=continual_runtime_strict,
+        )
 
     if delta_weights is not None:
         if adapter_path is not None:
@@ -379,6 +393,170 @@ def _apply_delta_weights(model, delta_weights: Dict[str, torch.Tensor]) -> None:
         for key, model_shape, delta_shape in shape_mismatch[:5]:
             print(f"   - shape mismatch: {key} model={model_shape} delta={delta_shape}")
     print(f"✅ Applied delta weights to {applied} parameters.")
+
+
+def _resolve_delta_param_name_local(base_key: str, parameter_keys: List[str]) -> Optional[str]:
+    """Resolve a base LoRA key to an actual model parameter key."""
+    parameter_key_set = set(parameter_keys)
+    candidates = [f"{base_key}.weight"]
+    suffix_bases = {base_key}
+
+    def _add_candidate(prefix_from: str, prefix_to: str) -> None:
+        if base_key.startswith(prefix_from):
+            trimmed = base_key.replace(prefix_from, prefix_to, 1)
+            candidates.append(f"{trimmed}.weight")
+            suffix_bases.add(trimmed)
+
+    _add_candidate("base_model.model.model.", "model.")
+    _add_candidate("base_model.model.", "model.")
+    _add_candidate("base_model.model.", "")
+    _add_candidate("base_model.", "")
+    _add_candidate("model.model.model.", "model.")
+    _add_candidate("model.model.", "model.")
+    _add_candidate("model.", "model.model.")
+
+    for candidate in candidates:
+        if candidate in parameter_key_set:
+            return candidate
+
+    for suffix_base in suffix_bases:
+        suffix = f".{suffix_base}.weight"
+        for key in parameter_keys:
+            if key.endswith(suffix):
+                return key
+    return None
+
+
+def _apply_continual_artifact(
+    model,
+    *,
+    artifact_path: Path,
+    strict: bool = False,
+) -> None:
+    """Apply a continual compressed artifact using fused low-rank wrappers when possible.
+
+    Non-fusable params (e.g., non-linear or non-2D) fall back to dense delta application.
+    """
+    from merging.artifacts.continual_format import ContinualArtifactReader
+    from merging.optimizers.core.streaming import (
+        StreamingLoraEntry,
+        TaskCoefficientProvider,
+        register_fused_lora_linear_modules,
+    )
+    from merging.policies.lambda_policy import extract_layer_index
+
+    reader = ContinualArtifactReader(Path(artifact_path).resolve())
+    parameter_keys = list(model.state_dict().keys())
+    device = next(model.parameters()).device
+
+    fused_entries: List[StreamingLoraEntry] = []
+    dense_fallback: Dict[str, torch.Tensor] = {}
+    unmapped: List[str] = []
+    non_linear: List[str] = []
+    shape_mismatch: List[str] = []
+
+    for source_key in reader.list_param_keys():
+        entry = reader.get_entry(source_key)
+        original_shape = tuple(int(x) for x in entry["original_shape"])
+        param_key = _resolve_delta_param_name_local(source_key, parameter_keys)
+        if param_key is None:
+            unmapped.append(source_key)
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        try:
+            param = model.get_parameter(param_key)
+        except Exception:
+            unmapped.append(source_key)
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        if tuple(param.shape) != original_shape:
+            shape_mismatch.append(
+                f"{source_key}: model={tuple(param.shape)} artifact={original_shape}"
+            )
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        if "." not in param_key:
+            non_linear.append(source_key)
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        module_path, param_name = param_key.rsplit(".", 1)
+        if param_name != "weight" or len(original_shape) != 2:
+            non_linear.append(source_key)
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        try:
+            module = model.get_submodule(module_path)
+        except Exception:
+            non_linear.append(source_key)
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        if not isinstance(module, nn.Linear):
+            non_linear.append(source_key)
+            if strict:
+                continue
+            dense_fallback[source_key] = reader.materialize_dense_param_delta(source_key, dtype=torch.float32)
+            continue
+
+        a_factor, b_factor, scale = reader.get_factor_tensors(source_key)
+        fused_entries.append(
+            StreamingLoraEntry(
+                param_key=param_key,
+                layer_idx=extract_layer_index(source_key),
+                a_factors=[a_factor],
+                b_factors=[b_factor],
+                scales=[float(scale)],
+            )
+        )
+
+    if strict and (unmapped or non_linear or shape_mismatch):
+        raise ValueError(
+            "Strict continual runtime validation failed: "
+            f"unmapped={len(unmapped)}, non_linear={len(non_linear)}, shape_mismatch={len(shape_mismatch)}"
+        )
+
+    if fused_entries:
+        provider = TaskCoefficientProvider()
+        coeffs = torch.ones(1, device=device, dtype=torch.float32)
+        provider.set_coefficients(task_coeffs=coeffs, default_coeffs=coeffs, layer_coeffs={})
+        handles = register_fused_lora_linear_modules(
+            model=model,
+            entries=fused_entries,
+            coefficient_provider=provider,
+            delta_residency="gpu_cache" if torch.cuda.is_available() else "cpu_stream",
+            dtype_compute="auto",
+        )
+        setattr(
+            model,
+            "_continual_runtime",
+            {"provider": provider, "fused_handles": handles, "artifact_path": str(artifact_path)},
+        )
+
+    if dense_fallback:
+        _apply_delta_weights(model, dense_fallback)
+
+    print(
+        "✅ Applied continual artifact: "
+        f"fused={len(fused_entries)}, dense_fallback={len(dense_fallback)}, "
+        f"unmapped={len(unmapped)}, non_linear={len(non_linear)}, shape_mismatch={len(shape_mismatch)}"
+    )
 
 
 def _json_default(value: Any) -> str:
