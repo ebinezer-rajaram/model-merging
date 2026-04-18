@@ -118,6 +118,72 @@ def _cleanup_evaluation_runtime(model: Any, processor: Any, eval_setup: Any) -> 
     except Exception:
         pass
 
+
+def _find_existing_eval_subset_tag(
+    *,
+    metrics_split_dir: Path,
+    task: Optional[str],
+    max_samples: Optional[int],
+    shuffle: bool,
+    seed: int,
+    stratified: bool,
+    label_column: Optional[str],
+) -> Optional[str]:
+    """Reuse an existing subset tag when the effective subset params match."""
+    if not metrics_split_dir.exists():
+        return None
+
+    expected_max = int(max_samples) if max_samples is not None else None
+    expected_seed = int(seed)
+    expected_shuffle = bool(shuffle)
+    is_asr = str(task or "").strip().lower() == ASR_TASK_NAME
+    expected_stratified = bool(stratified)
+    expected_label = str(label_column or "label")
+
+    asr_candidates: list[tuple[str, bool]] = []
+    for path in sorted(metrics_split_dir.glob("*__subset_*.json")):
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        meta = payload.get("_eval_subset")
+        if not isinstance(meta, dict):
+            continue
+        tag = meta.get("tag")
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+
+        got_max = meta.get("max_samples")
+        got_max = int(got_max) if got_max is not None else None
+        got_seed = int(meta.get("seed", 0) or 0)
+        got_shuffle = bool(meta.get("shuffle", False))
+        got_stratified = bool(meta.get("stratified", False))
+        got_label = str(meta.get("label_column") or "label")
+
+        if got_max != expected_max:
+            continue
+        if got_seed != expected_seed:
+            continue
+        if got_shuffle != expected_shuffle:
+            continue
+        if not is_asr:
+            if got_stratified != expected_stratified:
+                continue
+            if expected_stratified and got_label != expected_label:
+                continue
+            return tag.strip()
+
+        asr_candidates.append((tag.strip(), got_stratified))
+
+    if is_asr and asr_candidates:
+        # If multiple historical ASR tags match (same max/shuffle/seed),
+        # prefer the legacy "standard subset" variant when available.
+        for tag, got_stratified in asr_candidates:
+            if got_stratified:
+                return tag
+        return asr_candidates[0][0]
+    return None
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments for the evaluation script."""
     parser = argparse.ArgumentParser(description="Evaluate base model or LoRA adapter on a task.")
@@ -589,13 +655,28 @@ def evaluate(
         if max_eval_samples is None and "max_samples" in eval_subset and eval_subset["max_samples"] is not None:
             max_eval_samples = int(eval_subset["max_samples"])
 
+        if str(task).strip().lower() == ASR_TASK_NAME:
+            subset_stratified = False
+            subset_label_column = None
+
         # Tag is derived from the resolved per-task parameters only, so it is
         # stable across experiments that share the same effective subset settings
         # regardless of differences in the broader eval_subset config.
         if forced_eval_tag is not None:
             eval_tag = forced_eval_tag
         else:
-            eval_tag = compute_task_eval_subset_tag(
+            # Prefer existing tag with matching subset metadata to keep continuity
+            # across historical tag-hash implementations.
+            existing_tag = _find_existing_eval_subset_tag(
+                metrics_split_dir=eval_output_dir / split,
+                task=task,
+                max_samples=max_eval_samples,
+                shuffle=subset_shuffle,
+                seed=subset_seed,
+                stratified=subset_stratified,
+                label_column=subset_label_column,
+            )
+            eval_tag = existing_tag or compute_task_eval_subset_tag(
                 max_samples=max_eval_samples,
                 shuffle=subset_shuffle,
                 seed=subset_seed,
@@ -682,6 +763,8 @@ def evaluate(
                 if selected_indices is None:
                     label_column: Optional[str] = None
                     use_stratified = bool(subset_stratified)
+                    if str(task).strip().lower() == ASR_TASK_NAME:
+                        use_stratified = False
                     if use_stratified:
                         label_column = subset_label_column or dataset_cfg.get("label_column")
                         if not label_column:

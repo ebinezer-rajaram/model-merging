@@ -120,7 +120,7 @@ def maybe_compute_interference_baselines(
 
         # Use per-task stable tag so baseline files are shared across experiments
         # with the same effective subset settings.
-        eval_tag = _resolve_task_eval_tag(task_key, eval_subset)
+        eval_tag = _resolve_task_eval_tag(task_key, split, eval_subset)
 
         metric_key, _ = TASK_METRICS[task_key]
         base_value = load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=eval_tag)
@@ -176,7 +176,72 @@ def maybe_compute_interference_baselines(
                 print(f"⚠️  Failed to compute best adapter metrics for {task_key}/{split}: {exc}")
 
 
-def _resolve_task_eval_tag(task: str, eval_subset: Optional[Mapping[str, Any]]) -> Optional[str]:
+def _find_existing_eval_subset_tag_for_task(
+    *,
+    task: str,
+    split: str,
+    max_samples: Optional[int],
+    shuffle: bool,
+    seed: int,
+    stratified: bool,
+    label_column: Optional[str],
+) -> Optional[str]:
+    metrics_dir = PACKAGE_ROOT / "artifacts" / task / "metrics" / "eval" / split
+    if not metrics_dir.exists():
+        return None
+
+    expected_max = int(max_samples) if max_samples is not None else None
+    expected_seed = int(seed)
+    expected_shuffle = bool(shuffle)
+    is_asr = str(task).strip().lower() == "asr"
+    expected_stratified = bool(stratified)
+    expected_label = str(label_column or "label")
+
+    asr_candidates: list[tuple[str, bool]] = []
+    for path in sorted(metrics_dir.glob("*__subset_*.json")):
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        meta = payload.get("_eval_subset")
+        if not isinstance(meta, dict):
+            continue
+        tag = meta.get("tag")
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+
+        got_max = meta.get("max_samples")
+        got_max = int(got_max) if got_max is not None else None
+        got_seed = int(meta.get("seed", 0) or 0)
+        got_shuffle = bool(meta.get("shuffle", False))
+        got_stratified = bool(meta.get("stratified", False))
+        got_label = str(meta.get("label_column") or "label")
+
+        if got_max != expected_max:
+            continue
+        if got_seed != expected_seed:
+            continue
+        if got_shuffle != expected_shuffle:
+            continue
+        if not is_asr:
+            if got_stratified != expected_stratified:
+                continue
+            if expected_stratified and got_label != expected_label:
+                continue
+            return tag.strip()
+        asr_candidates.append((tag.strip(), got_stratified))
+
+    if is_asr and asr_candidates:
+        # If multiple historical ASR tags match (same max/shuffle/seed),
+        # prefer the legacy "standard subset" variant when available.
+        for tag, got_stratified in asr_candidates:
+            if got_stratified:
+                return tag
+        return asr_candidates[0][0]
+    return None
+
+
+def _resolve_task_eval_tag(task: str, split: str, eval_subset: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Compute the per-task stable eval tag from a raw eval_subset config dict."""
     if not eval_subset or not bool(eval_subset.get("enabled", True)):
         return None
@@ -212,6 +277,22 @@ def _resolve_task_eval_tag(task: str, eval_subset: Optional[Mapping[str, Any]]) 
         if task_override.get("label_column"):
             label_column = task_override["label_column"]
 
+    if str(task).strip().lower() == "asr":
+        stratified = False
+        label_column = None
+
+    existing_tag = _find_existing_eval_subset_tag_for_task(
+        task=task,
+        split=split,
+        max_samples=max_samples,
+        shuffle=shuffle,
+        seed=seed,
+        stratified=stratified,
+        label_column=label_column,
+    )
+    if existing_tag:
+        return existing_tag
+
     return compute_task_eval_subset_tag(
         max_samples=max_samples,
         shuffle=shuffle,
@@ -235,7 +316,7 @@ def maybe_add_interference_delta(
         return
 
     # Prefer eval_subset (resolves a per-task stable tag) over a pre-computed eval_tag.
-    resolved_tag = _resolve_task_eval_tag(task_key, eval_subset) if eval_subset is not None else eval_tag
+    resolved_tag = _resolve_task_eval_tag(task_key, split, eval_subset) if eval_subset is not None else eval_tag
 
     metric_key, higher_is_better = TASK_METRICS[task_key]
     merged_value = metrics.get(metric_key)
