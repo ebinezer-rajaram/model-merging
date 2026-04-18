@@ -29,14 +29,14 @@ def test_vocalsound_task_config_and_merge_presets_parse() -> None:
     assert schema_cfg.task == "vocalsound"
 
     supermerge_cfg = load_merge_config(
-        "configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml"
+        "configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml"
     )
     assert "vocalsound" in supermerge_cfg.adapters
     assert supermerge_cfg.eval_tasks is not None
     assert "vocalsound" in supermerge_cfg.eval_tasks
 
     scalar_cfg = load_merge_config(
-        "configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml"
+        "configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml"
     )
     assert "vocalsound" in scalar_cfg.adapters
     assert scalar_cfg.eval_tasks is not None

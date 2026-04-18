@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 SOURCE_RUN="artifacts/merged/weighted_delta_n/emotion_intent_kws_langid_speaker_ver_vocalsound/runs/run_supermerge_layer_wise_20260310_203741"
-SWEEP_CONFIG="configs/merge/merge_continual_6task_materialized_plus_asr.yaml"
+SWEEP_CONFIG="configs/merge/continual/merge_continual_6task_materialized_plus_asr.yaml"
 ENERGY_THRESHOLD="0.99"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"

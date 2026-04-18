@@ -98,7 +98,7 @@ python3 main.py train --task asr --config asr.yaml
 python3 main.py evaluate --task asr --config asr.yaml --split validation
 
 # Run merge from config
-python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
 
 # Train VocalSound adapter
 python3 main.py train --task vocalsound --config vocalsound.yaml
@@ -139,7 +139,7 @@ python3 main.py evaluate --task intent --config intent.yaml --adapter artifacts/
 Config-driven merge:
 
 ```bash
-python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
 ```
 
 Direct argument merge:
@@ -163,7 +163,7 @@ python3 main.py evaluate-merged --method weighted --tasks asr emotion --run-id l
 Config-driven sweep:
 
 ```bash
-python3 main.py merge-sweep --config configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge-sweep --config configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
 ```
 
 Override-driven sweep:
@@ -234,18 +234,18 @@ Expected extracted layout:
 
 Current valid merge config files in this repo:
 
-- `configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml`
-- `configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml`
-- `configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
-- `configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
+- `configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml`
+- `configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml`
+- `configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
+- `configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
 
 Use them directly with `merge` and `merge-sweep`:
 
 ```bash
-python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
-python3 main.py merge-sweep --config configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
-python3 main.py merge --config configs/merge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
-python3 main.py merge-sweep --config configs/merge/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
+python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge-sweep --config configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
+python3 main.py merge-sweep --config configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
 ```
 
 For method internals and full merge framework notes, see `merging/merging.md`.
