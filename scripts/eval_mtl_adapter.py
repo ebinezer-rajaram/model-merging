@@ -18,6 +18,17 @@ from merging.evaluation.interference import maybe_add_interference_delta, maybe_
 from merging.runtime.utils import PACKAGE_ROOT, get_task_module
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate a saved MTL LoRA adapter on one or more tasks."
@@ -125,17 +136,49 @@ def main() -> None:
             metrics_dir = task_set_root / "metrics" / run_name
         metrics_dir.mkdir(parents=True, exist_ok=True)
 
+        out_path = metrics_dir / f"eval_results_{split}.json"
+        existing_tasks: list[str] = []
+        merged_results: dict = {}
+        if out_path.exists():
+            try:
+                existing = json.loads(out_path.read_text(encoding="utf-8"))
+                existing_results = existing.get("results", {})
+                if isinstance(existing_results, dict):
+                    merged_results.update(existing_results)
+                if isinstance(existing.get("tasks"), list):
+                    existing_tasks = [str(t) for t in existing["tasks"]]
+            except Exception:
+                pass
+
+        merged_results.update(results)
+        merged_tasks = _dedupe_preserve_order(existing_tasks + tasks)
+
         summary = {
             "split": split,
             "timestamp": datetime.now().isoformat(),
             "adapter_path": str(adapter_path),
-            "tasks": tasks,
-            "results": results,
+            "tasks": merged_tasks,
+            "last_requested_tasks": tasks,
+            "results": merged_results,
         }
-        out_path = metrics_dir / f"eval_results_{split}.json"
-        with out_path.open("w") as fh:
+        with out_path.open("w", encoding="utf-8") as fh:
             json.dump(summary, fh, indent=2)
-        print(f"\n💾 Results saved to {out_path}")
+        print(f"\n💾 Aggregated results saved to {out_path}")
+
+        for task, task_metrics in results.items():
+            per_task_dir = metrics_dir / "per_task" / task
+            per_task_dir.mkdir(parents=True, exist_ok=True)
+            per_task_summary = {
+                "split": split,
+                "timestamp": summary["timestamp"],
+                "adapter_path": str(adapter_path),
+                "task": task,
+                "metrics": task_metrics,
+            }
+            per_task_path = per_task_dir / f"eval_results_{split}.json"
+            with per_task_path.open("w", encoding="utf-8") as fh:
+                json.dump(per_task_summary, fh, indent=2)
+            print(f"💾 Per-task results saved to {per_task_path}")
 
 
 if __name__ == "__main__":
