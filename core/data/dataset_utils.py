@@ -325,15 +325,10 @@ def compute_split_hours(
     """Compute total duration (in hours) for a subset of dataset indices."""
     if not indices or duration_field not in dataset.column_names:
         return 0.0
-    total_seconds = 0.0
-    for i in indices:
-        try:
-            duration = float(dataset[duration_field][i])
-            total_seconds += duration
-        except (RuntimeError, Exception):
-            # Skip corrupted files that can't be accessed
-            continue
-    return total_seconds / 3600.0
+    all_durations = np.array(dataset[duration_field], dtype=np.float64)
+    idx_arr = np.array(indices, dtype=np.intp)
+    valid = idx_arr[(idx_arr >= 0) & (idx_arr < len(all_durations))]
+    return float(all_durations[valid].sum()) / 3600.0
 
 
 def build_manifest(
@@ -379,9 +374,9 @@ def build_manifest(
 
     field_set = list(fields or [])
     skipped_count = 0
-    for position, idx in enumerate(indices):
+    selected_ds = manifest_ds.select([int(idx) for idx in indices])
+    for position, (idx, example) in enumerate(zip(indices, selected_ds)):
         try:
-            example = manifest_ds[int(idx)]
             if not isinstance(example, dict):
                 raise TypeError(
                     f"Expected dataset row to be a mapping, received {type(example)!r}"
