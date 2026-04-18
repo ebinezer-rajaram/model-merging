@@ -238,6 +238,7 @@ class EvalTaskBuilder(Protocol):
 
 
 _TASK_REGISTRY: Dict[str, Tuple[str, EvalTaskBuilder]] = {}
+_TASK_CONFIG_GETTERS: Dict[str, Callable[[], Any]] = {}  # task_key -> () -> TaskConfig
 
 
 def register_eval_task(name: str, builder: EvalTaskBuilder, *, overwrite: bool = False) -> None:
@@ -622,13 +623,60 @@ def print_metrics(label: str, task: str, split: str, metrics: Dict[str, Any]) ->
             print(f"  {key}: {value}")
 
 
+def load_task_dataset_bundle(
+    task_name: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple:
+    """Load the raw dataset bundle for a task without constructing collators/metrics.
+
+    Returns the same tuple that dataset_loader produces (train_ds, val_ds, test_ds, ...),
+    allowing callers to load once and pass the bundle to multiple
+    prepare_task_for_evaluation calls via the ``bundle`` argument.
+    """
+    key = (task_name or "").strip().lower()
+    if key not in _TASK_CONFIG_GETTERS:
+        available = ", ".join(get_registered_eval_tasks()) or "none"
+        raise NotImplementedError(
+            f"Task '{task_name}' is not registered. Available tasks: {available}."
+        )
+    task_config = _TASK_CONFIG_GETTERS[key]()
+    cfg = config or {}
+    dataset_cfg = cfg.get("dataset", {})
+
+    loader_kwargs: Dict[str, Any] = {
+        "seed": dataset_cfg.get("seed", cfg.get("seed", 0)),
+        "num_proc": dataset_cfg.get("num_proc"),
+        "cache_dir": dataset_cfg.get("cache_dir"),
+        "cache_splits": dataset_cfg.get("cache_splits", True),
+        "force_rebuild": dataset_cfg.get("force_rebuild", False),
+    }
+    for key_name in task_config.loader_config_keys:
+        if key_name in dataset_cfg:
+            loader_kwargs[key_name] = dataset_cfg[key_name]
+    if "dataset_config" in task_config.loader_config_keys and "language" in cfg:
+        loader_kwargs["dataset_config"] = cfg["language"]
+
+    return task_config.dataset_loader(**loader_kwargs)
+
+
 def prepare_task_for_evaluation(
     task_name: str,
     processor: Qwen2_5OmniProcessor,
     split: str = "validation",
     config: Optional[Dict[str, Any]] = None,
+    bundle: Optional[Tuple] = None,
 ) -> TaskEvalSetup:
-    """Return dataset, collator, and metric functions for the requested task."""
+    """Return dataset, collator, and metric functions for the requested task.
+
+    Args:
+        task_name: Registered task name.
+        processor: Qwen processor.
+        split: Dataset split to load.
+        config: Optional runtime config overrides.
+        bundle: Optional pre-loaded dataset bundle (from load_task_dataset_bundle).
+            When provided the dataset is not loaded again, saving I/O for callers
+            that need multiple splits of the same task.
+    """
     tokenizer = getattr(processor, "tokenizer", None)
     if tokenizer is not None and getattr(tokenizer, "padding_side", None) != "left":
         tokenizer.padding_side = "left"
@@ -639,7 +687,10 @@ def prepare_task_for_evaluation(
             f"Evaluation for task '{task_name}' is not registered. Available tasks: {available}."
         )
     _, builder = _TASK_REGISTRY[key]
-    return builder(processor=processor, split=split, config=config or {})
+    kwargs: Dict[str, Any] = {"processor": processor, "split": split, "config": config or {}}
+    if bundle is not None:
+        kwargs["_preloaded_bundle"] = bundle
+    return builder(**kwargs)
 
 
 def run_evaluation(
@@ -651,6 +702,8 @@ def run_evaluation(
     output_dir: Path | None = None,
     store_predictions: bool = False,
     processor: Optional[Any] = None,
+    dataloader_num_workers: int = 0,
+    dataloader_prefetch_factor: Optional[int] = None,
 ) -> Dict[str, float]:
     """Execute evaluation on the provided dataset and return metric scores.
 
@@ -662,6 +715,8 @@ def run_evaluation(
         output_dir: Output directory for evaluation artifacts
         store_predictions: If True, enable prediction storage in compute_metrics (for confusion matrix)
         processor: Optional processor for the model (ensures correct tokenizer settings)
+        dataloader_num_workers: Number of DataLoader workers for eval
+        dataloader_prefetch_factor: Optional prefetch factor (used only when workers > 0)
 
     Returns:
         Dictionary of evaluation metrics
@@ -669,11 +724,19 @@ def run_evaluation(
     generation_kwargs = {**DEFAULT_GENERATION_KWARGS, **(generation_kwargs or {})}
     output_dir = ensure_dir(Path(output_dir or "runs/eval"))
 
+    num_workers = max(int(dataloader_num_workers), 0)
+    prefetch_factor = (
+        int(dataloader_prefetch_factor)
+        if dataloader_prefetch_factor is not None and num_workers > 0
+        else None
+    )
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_eval_batch_size=batch_size,
         dataloader_drop_last=False,
-        dataloader_num_workers=0,
+        dataloader_num_workers=num_workers,
+        dataloader_prefetch_factor=prefetch_factor,
         remove_unused_columns=False,
         report_to=[],
         eval_strategy=IntervalStrategy.NO,
@@ -727,6 +790,7 @@ def _build_generic_eval_setup(
     processor: Qwen2_5OmniProcessor,
     split: str,
     config: Optional[Dict[str, Any]] = None,
+    _preloaded_bundle: Optional[Tuple] = None,
 ) -> TaskEvalSetup:
     """Generic evaluation setup builder that works for all tasks via configuration.
 
@@ -766,8 +830,8 @@ def _build_generic_eval_setup(
     if "dataset_config" in task_config.loader_config_keys and "language" in cfg:
         loader_kwargs["dataset_config"] = cfg["language"]
 
-    # Load dataset
-    dataset_bundle = task_config.dataset_loader(**loader_kwargs)
+    # Load dataset (reuse pre-loaded bundle if provided)
+    dataset_bundle = _preloaded_bundle if _preloaded_bundle is not None else task_config.dataset_loader(**loader_kwargs)
     train_ds = dataset_bundle[0]
     val_ds = dataset_bundle[1]
     test_ds = dataset_bundle[2] if len(dataset_bundle) > 2 else None
@@ -1270,105 +1334,29 @@ def _register_default_tasks() -> None:
     Note: Task names are hardcoded to avoid circular imports during module initialization.
     The actual task components are imported lazily when the evaluation setup is built.
     """
-    # Register ASR
-    try:
-        register_eval_task(
-            "asr",
-            lambda **kwargs: _build_generic_eval_setup(_get_asr_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass  # Silently skip if ASR components are unavailable
-
-    # Register Emotion
-    try:
-        register_eval_task(
-            "emotion",
-            lambda **kwargs: _build_generic_eval_setup(_get_emotion_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Speaker ID
-    try:
-        register_eval_task(
-            "speaker_id",
-            lambda **kwargs: _build_generic_eval_setup(_get_speaker_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Intent
-    try:
-        register_eval_task(
-            "intent",
-            lambda **kwargs: _build_generic_eval_setup(_get_intent_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Speech QA
-    try:
-        register_eval_task(
-            "speech_qa",
-            lambda **kwargs: _build_generic_eval_setup(_get_speech_qa_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Speech Translation
-    try:
-        register_eval_task(
-            "st",
-            lambda **kwargs: _build_generic_eval_setup(_get_st_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Keyword Spotting
-    try:
-        register_eval_task(
-            "kws",
-            lambda **kwargs: _build_generic_eval_setup(_get_kws_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Language Identification
-    try:
-        register_eval_task(
-            "langid",
-            lambda **kwargs: _build_generic_eval_setup(_get_langid_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register Speaker Verification
-    try:
-        register_eval_task(
-            "speaker_ver",
-            lambda **kwargs: _build_generic_eval_setup(_get_speaker_ver_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
-
-    # Register VocalSound
-    try:
-        register_eval_task(
-            "vocalsound",
-            lambda **kwargs: _build_generic_eval_setup(_get_vocalsound_task_config(), **kwargs),
-            overwrite=True,
-        )
-    except Exception:
-        pass
+    _default_tasks = [
+        ("asr",        _get_asr_task_config),
+        ("emotion",    _get_emotion_task_config),
+        ("speaker_id", _get_speaker_task_config),
+        ("intent",     _get_intent_task_config),
+        ("speech_qa",  _get_speech_qa_task_config),
+        ("st",         _get_st_task_config),
+        ("kws",        _get_kws_task_config),
+        ("langid",     _get_langid_task_config),
+        ("speaker_ver",_get_speaker_ver_task_config),
+        ("vocalsound", _get_vocalsound_task_config),
+    ]
+    for _task_name, _config_getter in _default_tasks:
+        try:
+            _getter = _config_getter  # capture for closure
+            register_eval_task(
+                _task_name,
+                lambda _g=_getter, **kwargs: _build_generic_eval_setup(_g(), **kwargs),
+                overwrite=True,
+            )
+            _TASK_CONFIG_GETTERS[_task_name] = _config_getter
+        except Exception:
+            pass
 
 
 _register_default_tasks()

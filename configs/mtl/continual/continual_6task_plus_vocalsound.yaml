@@ -1,0 +1,155 @@
+# Continual MTL: start from an existing 6-task MTL adapter, then add VocalSound.
+
+seed: 0
+
+model:
+  path: data/models/Qwen2.5-Omni-3B
+  # In continual mode, LoRA settings are auto-overridden from base_adapter.
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.1
+    bias: none
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+      - audio_tower.proj
+    task_type: CAUSAL_LM
+
+training:
+  # Use VocalSound-like stage-2 settings for protocol parity.
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 2
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+
+  learning_rate: 2.0e-5
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 2.0
+
+  num_train_epochs: 3
+  max_steps: -1
+  eval_strategy: steps
+  eval_steps: 100
+  save_strategy: steps
+  save_steps: 100
+  initial_eval: true
+
+  save_total_limit: 4
+  resume_from_checkpoint: null
+  load_best_model_at_end: true
+  # In added_task_metric mode, ranking uses eval_added_tasks_primary_oriented_mean.
+  metric_for_best_model: eval_added_tasks_primary_oriented_mean
+  greater_is_better: true
+
+  early_stopping_patience: 5
+  early_stopping_threshold: 0.0
+
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 4
+  eval_accumulation_steps: 2
+  remove_unused_columns: false
+
+  logging_steps: 10
+  report_to:
+    - tensorboard
+    - wandb
+
+  # Selection eval is validation-only (SpeechQA remains test-only OOD).
+  selection_criterion: geometric_mean_interference_delta
+  selection_split: validation
+  compute_missing_interference_baselines: true
+  sampling:
+    temperature: 1.0
+
+  selection_eval_subset:
+    enabled: true
+    max_samples: 1000
+    shuffle: true
+    seed: 0
+    stratified: true
+    label_column: label
+    per_task:
+      asr:
+        max_samples: 1000
+        stratified: true
+      emotion:
+        max_samples: 1000
+      intent:
+        max_samples: 1000
+      kws:
+        max_samples: 1000
+      langid:
+        max_samples: 1000
+      speaker_ver:
+        max_samples: 1000
+      vocalsound:
+        max_samples: 1000
+
+  # Final eval/test augmentation (does not affect continual training or selection eval):
+  final_eval_extra_tasks: []
+  final_eval_include_speech_qa: true
+
+artifacts:
+  root: artifacts/mtl/continual
+  allow_mixed_output: false
+  adapter_subdir: qwen2_5_omni_lora_mtl_continual_6task_plus_vocalsound
+  layout: task_set
+  task_set_slug_mode: base_then_added
+
+metrics:
+  auto_plot: true
+
+continual:
+  enabled: true
+  # Your current 6-task MTL base adapter:
+  base_adapter: artifacts/mtl/6_task/asr_emotion_intent_kws_langid_speaker_ver/adapters/qwen2_5_omni_lora_mtl_default/best
+  base_adapter_run_id: null
+  added_tasks: [vocalsound]
+  # null = discover from base adapter metadata.
+  base_tasks_override: null
+  # Early stopping/model selection on added task(s) only.
+  selection_mode: added_task_metric
+  selection_task_set: base_plus_added
+  # Keep SpeechQA as final test-only transfer probe.
+  final_eval_include_speech_qa: true
+
+# Keep task configs available for config resolution. Training tasks in continual
+# mode come from continual.added_tasks (added-only updates).
+tasks:
+  - name: asr
+    config: asr.yaml
+    train_weight: 1.0
+  - name: emotion
+    config: emotion.yaml
+    train_weight: 1.0
+  - name: intent
+    config: intent.yaml
+    train_weight: 1.0
+  - name: kws
+    config: kws.yaml
+    train_weight: 1.0
+  - name: langid
+    config: langid.yaml
+    train_weight: 1.0
+  - name: speaker_ver
+    config: speaker_ver.yaml
+    train_weight: 1.0
+  - name: vocalsound
+    config: vocalsound.yaml
+    train_weight: 1.0
+
+logging:
+  wandb_project: speech-merging-mtl

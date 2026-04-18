@@ -1,0 +1,159 @@
+# Joint Multi-Task (MTL) Configuration
+
+seed: 0
+
+# Model Configuration
+model:
+  path: data/models/Qwen2.5-Omni-3B
+  lora:
+    r: 64                             # LoRA rank
+    alpha: 128                        # LoRA alpha scaling
+    dropout: 0.1                      # LoRA dropout
+    bias: none                        # Bias type: none, all, lora_only
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+      - audio_tower.proj
+    task_type: CAUSAL_LM
+
+# Training Configuration
+training:
+  # Compute & batching
+  per_device_train_batch_size: 12     # Parity with smallest single-task batch (speaker_ver)
+  per_device_eval_batch_size: 12
+  gradient_accumulation_steps: 2
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+
+  # Optimization
+  learning_rate: 3.0e-5
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Schedule (MTL recommended: step-based control)
+  num_train_epochs: 2                 # Fallback only when max_steps < 0
+  max_steps: 10000                    # Primary stopping control
+  eval_strategy: steps
+  eval_steps: 250
+  save_strategy: steps
+  save_steps: 250
+  initial_eval: false
+
+  # Checkpointing
+  save_total_limit: 3
+  resume_from_checkpoint: auto       # null | auto | explicit path
+  load_best_model_at_end: true
+  metric_for_best_model: eval_mtl_arithmetic_mean_interference_delta
+  greater_is_better: true
+
+  # Early stopping
+  early_stopping_patience: 5
+  early_stopping_threshold: 0.001
+
+  # Data loading
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 4
+  eval_accumulation_steps: 4
+  remove_unused_columns: false
+
+  # Logging
+  logging_steps: 50
+  report_to:
+    - tensorboard
+    - wandb
+
+  # MTL-specific selection + sampling
+  selection_criterion: arithmetic_mean_interference_delta
+  selection_split: validation
+  compute_missing_interference_baselines: true
+  sampling:
+    temperature: 2.0                  # >1.0 flattens task-size dominance
+
+  # Faster model-selection eval (subset on validation during training)
+  selection_eval_subset:
+    enabled: true
+    max_samples: 1200
+    shuffle: true
+    seed: 0
+    stratified: true
+    label_column: label
+    per_task:
+      asr:
+        max_samples: 1000
+        stratified: false
+      emotion:
+        max_samples: 1000
+      intent:
+        max_samples: 1000
+      kws:
+        max_samples: 1000
+      langid:
+        max_samples: 1000
+      speaker_ver:
+        max_samples: 1000
+      vocalsound:
+        max_samples: 1000
+
+  # Final eval/test augmentation (does not affect training or checkpoint selection):
+  # evaluate held-out VocalSound plus SpeechQA transfer.
+  final_eval_extra_tasks: [vocalsound]
+  final_eval_include_speech_qa: true
+
+# Artifacts Configuration
+artifacts:
+  root: artifacts/mtl
+  allow_mixed_output: false
+  adapter_subdir: qwen2_5_omni_lora_mtl_default
+  layout: task_set
+  task_set_slug_mode: sorted_names
+
+# Metrics Configuration
+metrics:
+  auto_plot: true
+
+# Optional continual stage-2 MTL mode (disabled by default)
+continual:
+  enabled: false
+  base_adapter: null
+  base_adapter_run_id: null
+  added_tasks: []
+  base_tasks_override: null
+  selection_mode: mtl_interference      # mtl_interference | added_task_metric
+  selection_task_set: base_plus_added
+  final_eval_include_speech_qa: true
+
+# Task Set (config-defined, no hardcoded defaults)
+tasks:
+  - name: intent
+    config: intent.yaml
+    train_weight: 1.0
+  - name: kws
+    config: kws.yaml
+    train_weight: 1.0
+  - name: langid
+    config: langid.yaml
+    train_weight: 1.0
+  - name: speaker_ver
+    config: speaker_ver.yaml
+    train_weight: 1.0
+  - name: asr
+    config: asr.yaml
+    train_weight: 1.0
+  - name: emotion
+    config: emotion.yaml
+    train_weight: 1.0
+
+# Logging Configuration
+logging:
+  wandb_project: speech-merging-mtl

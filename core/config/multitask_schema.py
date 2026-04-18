@@ -52,9 +52,29 @@ class MultiTaskTrainingConfig(BaseModel):
         description="Optional eval subset config for faster model-selection evals.",
     )
     compute_missing_interference_baselines: bool = Field(default=True)
+    final_eval_extra_tasks: List[str] = Field(
+        default_factory=list,
+        description="Optional extra tasks to include for final eval/test only (non-continual).",
+    )
+    final_eval_include_speech_qa: bool = Field(
+        default=False,
+        description="Include speech_qa in non-continual final eval/test task set.",
+    )
 
     # Reuse existing training knobs by allowing extras here.
     model_config = {"extra": "allow"}
+
+    @field_validator("final_eval_extra_tasks")
+    @classmethod
+    def validate_final_eval_extra_tasks(cls, tasks: List[str]) -> List[str]:
+        normalized = []
+        for raw in tasks:
+            task = str(raw).strip().lower()
+            if task not in TASK_REGISTRY:
+                valid = ", ".join(sorted(TASK_REGISTRY.keys()))
+                raise ValueError(f"Unknown task '{raw}'. Valid tasks: {valid}")
+            normalized.append(task)
+        return normalized
 
 
 class MultiTaskLoggingConfig(BaseModel):
@@ -69,11 +89,19 @@ class MultiTaskArtifactsConfig(BaseModel):
     """Artifact storage configuration for MTL runs."""
 
     adapter_subdir: str = Field(description="Subdirectory name for LoRA adapters")
+    root: str = Field(
+        default="artifacts/mtl",
+        description="Root directory for MTL artifacts.",
+    )
+    allow_mixed_output: bool = Field(
+        default=False,
+        description="Allow writing runs with a different mode into an existing task-set root.",
+    )
     layout: Literal["task_set"] = Field(
         default="task_set",
         description="MTL artifact layout strategy.",
     )
-    task_set_slug_mode: Literal["sorted_names"] = Field(
+    task_set_slug_mode: Literal["sorted_names", "base_then_added"] = Field(
         default="sorted_names",
         description="How to derive the task-set slug directory name.",
     )
@@ -89,6 +117,56 @@ class MultiTaskMetricsConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class MultiTaskContinualConfig(BaseModel):
+    """Optional continual fine-tuning controls for MTL stage-2 updates."""
+
+    enabled: bool = Field(default=False)
+    base_adapter: Optional[str] = Field(
+        default=None,
+        description="Path to a base MTL adapter run/best/latest directory.",
+    )
+    base_adapter_run_id: Optional[str] = Field(
+        default=None,
+        description="Optional alias (best/latest/run_*) resolved under base_adapter when base_adapter points to adapter root.",
+    )
+    added_tasks: List[str] = Field(default_factory=list, description="Tasks to train in stage-2.")
+    base_tasks_override: Optional[List[str]] = Field(
+        default=None,
+        description="Optional explicit base-task list; overrides metadata discovery.",
+    )
+    selection_mode: Literal["mtl_interference", "added_task_metric"] = Field(default="mtl_interference")
+    selection_task_set: Literal["base_plus_added"] = Field(default="base_plus_added")
+    final_eval_include_speech_qa: bool = Field(default=True)
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("added_tasks")
+    @classmethod
+    def validate_added_tasks(cls, tasks: List[str]) -> List[str]:
+        normalized = []
+        for raw in tasks:
+            task = str(raw).strip().lower()
+            if task not in TASK_REGISTRY:
+                valid = ", ".join(sorted(TASK_REGISTRY.keys()))
+                raise ValueError(f"Unknown task '{raw}'. Valid tasks: {valid}")
+            normalized.append(task)
+        return normalized
+
+    @field_validator("base_tasks_override")
+    @classmethod
+    def validate_base_tasks_override(cls, tasks: Optional[List[str]]) -> Optional[List[str]]:
+        if tasks is None:
+            return None
+        normalized = []
+        for raw in tasks:
+            task = str(raw).strip().lower()
+            if task not in TASK_REGISTRY:
+                valid = ", ".join(sorted(TASK_REGISTRY.keys()))
+                raise ValueError(f"Unknown task '{raw}'. Valid tasks: {valid}")
+            normalized.append(task)
+        return normalized
+
+
 class MultiTaskConfig(BaseModel):
     """Top-level config model for joint multi-task training."""
 
@@ -97,6 +175,7 @@ class MultiTaskConfig(BaseModel):
     training: MultiTaskTrainingConfig = Field(default_factory=MultiTaskTrainingConfig)
     artifacts: MultiTaskArtifactsConfig
     metrics: Optional[MultiTaskMetricsConfig] = Field(default_factory=MultiTaskMetricsConfig)
+    continual: Optional[MultiTaskContinualConfig] = Field(default_factory=MultiTaskContinualConfig)
     tasks: List[MultiTaskSpec] = Field(min_length=1)
     logging: Optional[MultiTaskLoggingConfig] = Field(default_factory=MultiTaskLoggingConfig)
 
@@ -124,6 +203,7 @@ __all__ = [
     "MultiTaskLoggingConfig",
     "MultiTaskArtifactsConfig",
     "MultiTaskMetricsConfig",
+    "MultiTaskContinualConfig",
     "MultiTaskConfig",
     "parse_multitask_config",
 ]

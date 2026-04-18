@@ -7,7 +7,7 @@ import json
 import math
 import random
 import time
-from collections import defaultdict
+import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -15,9 +15,11 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from core.evaluation.eval_utils import run_evaluation
 from core.data.io_utils import ensure_dir
 from merging.evaluation.interference import (
+    TASK_METRICS,
     compute_eval_tag_from_subset,
     maybe_add_interference_delta,
     maybe_compute_interference_baselines,
+    oriented_score,
 )
 
 try:
@@ -69,10 +71,14 @@ class MultiTaskEvaluator:
         compute_missing_interference_baselines: bool,
         metrics_dir: Path,
         selection_criterion: str = "geometric_mean_interference_delta",
+        selection_mode: str = "mtl_interference",
+        selected_primary_tasks: Optional[Sequence[str]] = None,
         use_cache: bool = True,
         eval_subset: Optional[Dict[str, Any]] = None,
         wandb_project: Optional[str] = None,
         auto_plot: bool = True,
+        dataloader_num_workers: int = 0,
+        dataloader_prefetch_factor: Optional[int] = None,
     ):
         self.tasks = [str(task) for task in tasks]
         self.task_generation_kwargs = {
@@ -91,11 +97,25 @@ class MultiTaskEvaluator:
                 "selection_criterion must be one of "
                 "{geometric_mean_interference_delta, arithmetic_mean_interference_delta}."
             )
+        self.selection_mode = str(selection_mode).strip().lower()
+        if self.selection_mode not in {"mtl_interference", "added_task_metric"}:
+            raise ValueError("selection_mode must be one of {mtl_interference, added_task_metric}.")
+        self.selected_primary_tasks = [
+            str(task).strip().lower()
+            for task in (selected_primary_tasks or [])
+            if str(task).strip()
+        ]
         self.use_cache = bool(use_cache)
         self.eval_subset = dict(eval_subset) if isinstance(eval_subset, Mapping) else None
         self.eval_tag = compute_eval_tag_from_subset(self.eval_subset)
         self.wandb_project = str(wandb_project) if wandb_project else None
         self.auto_plot = bool(auto_plot)
+        self.dataloader_num_workers = int(dataloader_num_workers)
+        self.dataloader_prefetch_factor = (
+            int(dataloader_prefetch_factor)
+            if dataloader_prefetch_factor is not None
+            else None
+        )
 
         self.history_jsonl_path = self.metrics_dir / "mtl_eval_history.jsonl"
         self.history_csv_path = self.metrics_dir / "mtl_eval_history.csv"
@@ -107,6 +127,7 @@ class MultiTaskEvaluator:
             "🧾 MTL evaluator configured: "
             f"split={self.split}, batch_size={self.batch_size}, "
             f"selection_criterion={self.selection_criterion}, "
+            f"selection_mode={self.selection_mode}, "
             f"eval_subset_tag={self.eval_tag or 'none'}, "
             f"auto_plot={self.auto_plot}"
         )
@@ -153,6 +174,10 @@ class MultiTaskEvaluator:
             elif isinstance(override, (int, float)):
                 max_samples = int(override)
 
+        if str(task).strip().lower() == "asr":
+            stratified = False
+            label_column = None
+
         if max_samples is None:
             return dataset
         max_samples = int(max_samples)
@@ -171,12 +196,11 @@ class MultiTaskEvaluator:
                 stratified = False
             else:
                 rng = random.Random(seed)
-                labels = list(dataset[resolved_label_column])
-                by_label = defaultdict(list)
-                for idx, value in enumerate(labels):
-                    by_label[value].append(idx)
+                labels_arr = np.array(dataset[resolved_label_column])
+                unique_labels = np.unique(labels_arr)
+                by_label = {lbl: np.where(labels_arr == lbl)[0].tolist() for lbl in unique_labels}
 
-                total = len(labels)
+                total = len(labels_arr)
                 targets = []
                 for key, idxs in by_label.items():
                     frac = (len(idxs) / float(total)) * float(max_samples)
@@ -255,6 +279,8 @@ class MultiTaskEvaluator:
                 generation_kwargs=self.task_generation_kwargs.get(task, {}),
                 output_dir=self.metrics_dir / "tmp_eval" / task,
                 processor=processor,
+                dataloader_num_workers=self.dataloader_num_workers,
+                dataloader_prefetch_factor=self.dataloader_prefetch_factor,
             )
             maybe_add_interference_delta(
                 task=task,
@@ -286,18 +312,40 @@ class MultiTaskEvaluator:
         flat_metrics["eval_mtl_arithmetic_mean_interference_delta"] = float(arithmetic)
         flat_metrics["eval_mtl_num_tasks_with_delta"] = float(len(deltas))
 
+        if self.selected_primary_tasks:
+            primary_values = []
+            for task in self.selected_primary_tasks:
+                metric_spec = TASK_METRICS.get(task)
+                if metric_spec is None:
+                    continue
+                metric_name, higher_is_better = metric_spec
+                task_metrics = per_task_metrics.get(task, {})
+                raw_value = task_metrics.get(metric_name)
+                if not isinstance(raw_value, (int, float)):
+                    continue
+                primary_values.append(oriented_score(float(raw_value), higher_is_better))
+            if primary_values:
+                flat_metrics["eval_added_tasks_primary_oriented_mean"] = float(
+                    sum(primary_values) / float(len(primary_values))
+                )
+                flat_metrics["eval_added_tasks_primary_num_tasks"] = float(len(primary_values))
+
+        selected_value = aggregate
+        if self.selection_mode == "added_task_metric":
+            selected_value = float(flat_metrics.get("eval_added_tasks_primary_oriented_mean", float("-inf")))
+
         self._append_history(global_step=global_step, metrics=flat_metrics)
         self._log_to_wandb(global_step=global_step, flat_metrics=flat_metrics)
         print(
             "📌 MTL aggregate: "
             f"arithmetic={arithmetic:.4f}, geometric={geometric}, "
-            f"selected({self.selection_criterion})={aggregate}"
+            f"selected({self.selection_mode})={selected_value}"
         )
 
         return MultiTaskEvalResult(
             metrics=flat_metrics,
             per_task_metrics=per_task_metrics,
-            aggregate_delta=float(aggregate),
+            aggregate_delta=float(selected_value),
         )
 
     def _append_history(self, *, global_step: int, metrics: Mapping[str, float]) -> None:

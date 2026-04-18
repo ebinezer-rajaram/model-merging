@@ -30,6 +30,39 @@ def parse_args() -> argparse.Namespace:
 
     mtl_parser = subparsers.add_parser("mtl", help="Run joint multi-task training.")
     mtl_parser.add_argument("--config", required=True, help="MTL config path.")
+    mtl_parser.add_argument("--continual-enabled", action="store_true", help="Enable continual stage-2 MTL mode.")
+    mtl_parser.add_argument("--base-adapter", default=None, help="Base MTL adapter path for continual mode.")
+    mtl_parser.add_argument(
+        "--base-adapter-run-id",
+        default=None,
+        help="Optional alias under base adapter root (best/latest/run_*).",
+    )
+    mtl_parser.add_argument("--added-tasks", nargs="+", default=None, help="Added tasks for continual stage-2 updates.")
+    mtl_parser.add_argument("--base-tasks-override", nargs="+", default=None, help="Optional base task override list.")
+    mtl_parser.add_argument(
+        "--selection-mode",
+        default=None,
+        choices=("mtl_interference", "added_task_metric"),
+        help="Continual checkpoint-selection mode override.",
+    )
+    mtl_parser.add_argument(
+        "--selection-task-set",
+        default=None,
+        choices=("base_plus_added",),
+        help="Continual selection task-set override.",
+    )
+    mtl_parser.add_argument(
+        "--final-eval-include-speech-qa",
+        action="store_true",
+        help="Include speech_qa in final continual evaluation.",
+    )
+    mtl_parser.add_argument(
+        "--no-final-eval-include-speech-qa",
+        action="store_false",
+        dest="final_eval_include_speech_qa",
+        help="Exclude speech_qa from final continual evaluation.",
+    )
+    mtl_parser.set_defaults(final_eval_include_speech_qa=None)
 
     merge_parser = subparsers.add_parser("merge", help="Merge trained adapters.")
     merge_parser.add_argument(
@@ -441,6 +474,24 @@ def dispatch_mtl(args: argparse.Namespace) -> None:
     argv = ["train_multitask.py"]
     if args.config:
         argv.extend(["--config", args.config])
+    if args.continual_enabled:
+        argv.append("--continual-enabled")
+    if args.base_adapter:
+        argv.extend(["--base-adapter", args.base_adapter])
+    if args.base_adapter_run_id:
+        argv.extend(["--base-adapter-run-id", args.base_adapter_run_id])
+    if args.added_tasks:
+        argv.extend(["--added-tasks", *args.added_tasks])
+    if args.base_tasks_override:
+        argv.extend(["--base-tasks-override", *args.base_tasks_override])
+    if args.selection_mode:
+        argv.extend(["--selection-mode", args.selection_mode])
+    if args.selection_task_set:
+        argv.extend(["--selection-task-set", args.selection_task_set])
+    if args.final_eval_include_speech_qa is True:
+        argv.append("--final-eval-include-speech-qa")
+    elif args.final_eval_include_speech_qa is False:
+        argv.append("--no-final-eval-include-speech-qa")
     sys.argv = argv
     train_multitask_main()
 
