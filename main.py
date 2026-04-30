@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import core.evaluation.evaluate_task as evaluate_task
+from core.evaluation.split_utils import SUPPORTED_EVAL_SPLITS
 from core.training.train_task import main as train_task_main
 from core.training.train_multitask import main as train_multitask_main
 
@@ -20,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     from merging.engine.registry import list_merge_methods
 
     merge_methods = list_merge_methods()
-    sweep_methods = sorted(set(merge_methods + ["continual"]))
+    sweep_methods = sorted(set(merge_methods + ["continual", "continual_supermerge"]))
     parser = argparse.ArgumentParser(description="Speech merging pipeline.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -108,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     merge_parser.add_argument(
         "--eval-split",
         default="test",
-        choices=["train", "validation", "test"],
+        choices=list(SUPPORTED_EVAL_SPLITS),
         help="Dataset split for evaluation",
     )
 
@@ -116,11 +117,12 @@ def parse_args() -> argparse.Namespace:
     eval_parser.add_argument("--task", default="asr", help="Task name to evaluate.")
     eval_parser.add_argument("--config", default=None, help="Config filename override.")
     eval_parser.add_argument("--adapter", default=None, help="Path to adapter directory.")
+    eval_parser.add_argument("--trained-on-task", default=None, help="Task or merge tag the adapter was trained on.")
     eval_parser.add_argument(
         "--split",
         default="validation",
-        choices=("train", "validation", "test"),
-        help="Dataset split to evaluate.",
+        choices=SUPPORTED_EVAL_SPLITS,
+        help="Dataset split to evaluate. Use test-other for ASR LibriSpeech test.other.",
     )
     eval_parser.add_argument("--batch-size", type=int, default=None, help="Eval batch size override.")
     eval_parser.add_argument("--save-json", default=None, help="Optional metrics JSON output path.")
@@ -205,8 +207,8 @@ def parse_args() -> argparse.Namespace:
     eval_merged_parser.add_argument(
         "--split",
         default="test",
-        choices=("train", "validation", "test"),
-        help="Dataset split to evaluate.",
+        choices=SUPPORTED_EVAL_SPLITS,
+        help="Dataset split to evaluate. Use test-other for ASR LibriSpeech test.other.",
     )
     eval_merged_parser.add_argument("--batch-size", type=int, default=None, help="Eval batch size override.")
     eval_merged_parser.add_argument(
@@ -283,7 +285,7 @@ def parse_args() -> argparse.Namespace:
     sweep_parser.add_argument(
         "--split",
         default=None,
-        choices=["train", "validation", "test"],
+        choices=list(SUPPORTED_EVAL_SPLITS),
         help="Dataset split override.",
     )
     sweep_parser.add_argument(
@@ -414,8 +416,8 @@ def parse_args() -> argparse.Namespace:
     eval_continual_parser.add_argument(
         "--split",
         default="test",
-        choices=("train", "validation", "test"),
-        help="Dataset split to evaluate.",
+        choices=SUPPORTED_EVAL_SPLITS,
+        help="Dataset split to evaluate. Use test-other for ASR LibriSpeech test.other.",
     )
     eval_continual_parser.add_argument("--batch-size", type=int, default=None, help="Per-device eval batch size.")
     eval_continual_parser.add_argument(
@@ -522,6 +524,7 @@ def dispatch_evaluate(args: argparse.Namespace) -> None:
             task=args.task,
             config_name=args.config,
             adapter=args.adapter,
+            trained_on_task=args.trained_on_task,
             split=args.split,
             batch_size=args.batch_size,
             save_json=args.save_json,
@@ -556,6 +559,7 @@ def dispatch_evaluate(args: argparse.Namespace) -> None:
             task=args.task,
             config_name=args.config,
             adapter=args.adapter,
+            trained_on_task=args.trained_on_task,
             split=args.split,
             batch_size=args.batch_size,
             save_json=args.save_json,

@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from core import compute_eval_subset_tag, compute_task_eval_subset_tag
+from core.evaluation.split_utils import canonical_output_split
 from merging.runtime.utils import PACKAGE_ROOT
 
 EPS = 1e-8
@@ -39,6 +40,7 @@ def load_eval_metric(
     *,
     eval_tag: Optional[str] = None,
 ) -> Optional[float]:
+    split = canonical_output_split(split)
     # In subset-tagged mode, only read subset-tagged metrics to avoid mixing
     # full-split baselines with subset evaluations.
     candidates = [with_eval_tag(filename, eval_tag)] if eval_tag else [filename]
@@ -68,6 +70,7 @@ def load_eval_metrics_json(
     *,
     eval_tag: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    split = canonical_output_split(split)
     # In subset-tagged mode, only read subset-tagged metrics to avoid mixing
     # full-split baselines with subset evaluations.
     candidates = [with_eval_tag(filename, eval_tag)] if eval_tag else [filename]
@@ -113,6 +116,7 @@ def maybe_compute_interference_baselines(
     # that only want to read or post-process metrics.
     from core.evaluation.evaluate_task import evaluate
 
+    output_split = canonical_output_split(split)
     for task in tasks:
         task_key = task.lower()
         if task_key not in TASK_METRICS:
@@ -120,13 +124,13 @@ def maybe_compute_interference_baselines(
 
         # Use per-task stable tag so baseline files are shared across experiments
         # with the same effective subset settings.
-        eval_tag = _resolve_task_eval_tag(task_key, split, eval_subset)
+        eval_tag = _resolve_task_eval_tag(task_key, output_split, eval_subset)
 
         metric_key, _ = TASK_METRICS[task_key]
-        base_value = load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=eval_tag)
+        base_value = load_eval_metric(task_key, output_split, "base_model.json", metric_key, eval_tag=eval_tag)
         task_value = load_eval_metric(
             task_key,
-            split,
+            output_split,
             f"best_{task_key}_adapter.json",
             metric_key,
             eval_tag=eval_tag,
@@ -140,7 +144,7 @@ def maybe_compute_interference_baselines(
                 missing.append("base_model.json")
             if task_value is None:
                 missing.append(f"best_{task_key}_adapter.json")
-            print(f"🧮 Computing missing interference baselines for {task_key}/{split}: {', '.join(missing)}")
+            print(f"🧮 Computing missing interference baselines for {task_key}/{output_split}: {', '.join(missing)}")
 
         try:
             if base_value is None:
@@ -156,7 +160,7 @@ def maybe_compute_interference_baselines(
                 )
         except Exception as exc:
             if show_summary:
-                print(f"⚠️  Failed to compute base_model metrics for {task_key}/{split}: {exc}")
+                print(f"⚠️  Failed to compute base_model metrics for {task_key}/{output_split}: {exc}")
 
         try:
             if task_value is None:
@@ -173,7 +177,7 @@ def maybe_compute_interference_baselines(
                 )
         except Exception as exc:
             if show_summary:
-                print(f"⚠️  Failed to compute best adapter metrics for {task_key}/{split}: {exc}")
+                print(f"⚠️  Failed to compute best adapter metrics for {task_key}/{output_split}: {exc}")
 
 
 def _find_existing_eval_subset_tag_for_task(
@@ -243,6 +247,7 @@ def _find_existing_eval_subset_tag_for_task(
 
 def _resolve_task_eval_tag(task: str, split: str, eval_subset: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Compute the per-task stable eval tag from a raw eval_subset config dict."""
+    split = canonical_output_split(split)
     if not eval_subset or not bool(eval_subset.get("enabled", True)):
         return None
     shuffle = bool(eval_subset.get("shuffle", False))
@@ -314,19 +319,20 @@ def maybe_add_interference_delta(
     task_key = task.lower()
     if task_key not in TASK_METRICS:
         return
+    output_split = canonical_output_split(split)
 
     # Prefer eval_subset (resolves a per-task stable tag) over a pre-computed eval_tag.
-    resolved_tag = _resolve_task_eval_tag(task_key, split, eval_subset) if eval_subset is not None else eval_tag
+    resolved_tag = _resolve_task_eval_tag(task_key, output_split, eval_subset) if eval_subset is not None else eval_tag
 
     metric_key, higher_is_better = TASK_METRICS[task_key]
     merged_value = metrics.get(metric_key)
     if not isinstance(merged_value, (int, float)):
         return
 
-    base_value = load_eval_metric(task_key, split, "base_model.json", metric_key, eval_tag=resolved_tag)
+    base_value = load_eval_metric(task_key, output_split, "base_model.json", metric_key, eval_tag=resolved_tag)
     task_value = load_eval_metric(
         task_key,
-        split,
+        output_split,
         f"best_{task_key}_adapter.json",
         metric_key,
         eval_tag=resolved_tag,
@@ -340,8 +346,8 @@ def maybe_add_interference_delta(
                 missing.append(with_eval_tag(f"best_{task_key}_adapter.json", resolved_tag))
             missing_str = ", ".join(missing)
             print(
-                f"⚠️  Skipping interference_delta for {task_key}/{split}: "
-                f"missing {missing_str} under artifacts/{task_key}/metrics/eval/{split}"
+                f"⚠️  Skipping interference_delta for {task_key}/{output_split}: "
+                f"missing {missing_str} under artifacts/{task_key}/metrics/eval/{output_split}"
             )
         return
 
@@ -358,7 +364,7 @@ def maybe_add_interference_delta(
         "base": base_value,
         "task_adapter": task_value,
         "merged": float(merged_value),
-        "split": split,
+        "split": output_split,
     }
     if show_summary:
         print(f"   interference_delta: {metrics['interference_delta']:.4f}")

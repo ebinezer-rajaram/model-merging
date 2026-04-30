@@ -83,16 +83,20 @@ def load_librispeech_subset(
     val_full = val_full.map(add_duration, **num_proc_map_kwargs(effective_num_proc))
     test_full = None
     if return_test_split:
-        available_splits = [name for name in base.keys() if name.startswith("test")]
-        split_aliases = {
-            "test.clean": "test",
-            "test-clean": "test",
-            "test_other": "test.other",
-            "test-other": "test.other",
-        }
-        lookup_split = split_aliases.get(test_split, test_split)
+        _OTHER_ALIASES = {"test.other", "test-other", "test_other"}
+        if test_split in _OTHER_ALIASES:
+            base_test = load_dataset("librispeech_asr", "other")
+            lookup_split = "test"
+        else:
+            base_test = base
+            split_aliases = {
+                "test.clean": "test",
+                "test-clean": "test",
+            }
+            lookup_split = split_aliases.get(test_split, test_split)
+        available_splits = [name for name in base_test.keys() if name.startswith("test")]
         try:
-            test_full = base[lookup_split]
+            test_full = base_test[lookup_split]
         except KeyError as exc:
             raise ValueError(
                 f"Requested test split '{test_split}' is not available. Options: {available_splits}."

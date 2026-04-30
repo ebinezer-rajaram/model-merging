@@ -30,6 +30,7 @@ from merging.runtime.utils import (
     save_merged_adapter,
 )
 from core import compute_eval_subset_tag
+from core.evaluation.split_utils import canonical_output_split
 from merging.evaluation.interference import (
     TASK_METRICS,
     load_eval_metrics_json,
@@ -39,6 +40,10 @@ from merging.evaluation.interference import (
 from merging.optimizers.core.heldout_reporting import export_heldout_tracking_artifacts
 
 _OOM_RETRY_ENV_FLAG = "MERGE_EVAL_ENABLE_OOM_RETRY"
+
+
+def _is_test_other_output(output_split: str) -> bool:
+    return canonical_output_split(output_split) == "test_other"
 
 
 def _is_cuda_oom_error(exc: BaseException) -> bool:
@@ -99,6 +104,7 @@ def _retry_task_in_subprocess(
     eval_subset: Optional[Dict[str, Any]],
     show_summary: bool,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    output_split = canonical_output_split(split)
     eval_tag: Optional[str] = None
     if eval_subset and bool(eval_subset.get("enabled", True)):
         eval_tag = compute_eval_subset_tag(eval_subset)
@@ -142,7 +148,7 @@ def _retry_task_in_subprocess(
         return None, f"retry subprocess exited with code {completed.returncode}: {stderr_msg}"
 
     suffix = f"__{eval_tag}" if eval_tag else ""
-    summary_path = adapter_path / f"eval_results_{split}{suffix}.json"
+    summary_path = adapter_path / f"eval_results_{output_split}{suffix}.json"
     if not summary_path.exists():
         return None, f"retry subprocess did not produce expected summary: {summary_path}"
     try:
@@ -311,6 +317,8 @@ def evaluate_merged_adapter(
     """Evaluate a merged adapter on one or more tasks."""
     from core.evaluation.evaluate_task import evaluate
 
+    requested_split = str(split)
+    output_split = canonical_output_split(requested_split)
     results: Dict[str, Dict] = {}
     eval_tag: Optional[str] = None
     if eval_subset and bool(eval_subset.get("enabled", True)):
@@ -500,7 +508,8 @@ def evaluate_merged_adapter(
 
         if save_results:
             summary = {
-                "split": split,
+                "split": output_split,
+                "requested_split": requested_split,
                 "timestamp": datetime.now().isoformat(),
                 "adapter_path": None,
                 "merge_tag": merge_tag,
@@ -516,10 +525,10 @@ def evaluate_merged_adapter(
                 summary["eval_subset"] = eval_subset
             if eval_tag is not None:
                 summary["eval_tag"] = eval_tag
-            eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+            eval_dir = resolve_merge_eval_dir(method_name, source_tasks, output_split)
             eval_dir.mkdir(parents=True, exist_ok=True)
             suffix = f"__{eval_tag}" if eval_tag else ""
-            results_path = eval_dir / f"eval_results_{merge_tag}{suffix}_{split}.json"
+            results_path = eval_dir / f"eval_results_{merge_tag}{suffix}_{output_split}.json"
             with results_path.open("w") as handle:
                 json.dump(summary, handle, indent=2)
             if show_summary:
@@ -545,7 +554,7 @@ def evaluate_merged_adapter(
                 show_summary=show_summary,
             )
             run_suffix = f"__{eval_tag}" if eval_tag else ""
-            run_results_path = output_path / f"eval_results_{split}{run_suffix}.json"
+            run_results_path = output_path / f"eval_results_{output_split}{run_suffix}.json"
             with run_results_path.open("w") as handle:
                 json.dump(summary, handle, indent=2)
             summary_path = output_path / "summary.json"
@@ -558,7 +567,8 @@ def evaluate_merged_adapter(
                         "params": metadata.get("params", {}),
                         "source_tasks": source_tasks,
                         "evaluated_tasks": tasks_to_eval,
-                        "split": split,
+                        "split": output_split,
+                        "requested_split": requested_split,
                         "eval_tag": eval_tag,
                         "results_path": str(run_results_path),
                     },
@@ -568,15 +578,16 @@ def evaluate_merged_adapter(
             if show_summary:
                 print(f"📦 Run bundle saved to {output_path}")
 
-            update_results_index(
-                eval_dir,
-                merge_tag=merge_tag,
-                split=split,
-                results_path=results_path,
-                metadata=metadata,
-                summary=summary,
-                run_path=output_path,
-            )
+            if not _is_test_other_output(output_split):
+                update_results_index(
+                    eval_dir,
+                    merge_tag=merge_tag,
+                    split=split,
+                    results_path=results_path,
+                    metadata=metadata,
+                    summary=summary,
+                    run_path=output_path,
+                )
 
             # Write standardised experiment_summary.json alongside eval_results.
             if not eval_tag:  # skip subset evals
@@ -585,7 +596,7 @@ def evaluate_merged_adapter(
                     summary=summary,
                     metadata=metadata,
                     source_tasks=source_tasks,
-                    split=split,
+                    split=output_split,
                 )
 
         if failed_tasks:
@@ -709,7 +720,8 @@ def evaluate_merged_adapter(
 
     if save_results:
         summary = {
-            "split": split,
+            "split": output_split,
+            "requested_split": requested_split,
             "timestamp": datetime.now().isoformat(),
             "adapter_path": str(merged_run_path),
             "merge_tag": merge_tag,
@@ -723,35 +735,36 @@ def evaluate_merged_adapter(
         if eval_tag is not None:
             summary["eval_tag"] = eval_tag
         suffix = f"__{eval_tag}" if eval_tag else ""
-        results_path = merged_run_path / f"eval_results_{split}{suffix}.json"
+        results_path = merged_run_path / f"eval_results_{output_split}{suffix}.json"
         with results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
         if show_summary:
             print(f"\n💾 Evaluation results saved to {results_path}")
 
         method_name = metadata.get("merge_method", "merged")
-        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, output_split)
         eval_dir.mkdir(parents=True, exist_ok=True)
-        eval_results_path = eval_dir / f"eval_results_{merge_tag}{suffix}_{split}.json"
+        eval_results_path = eval_dir / f"eval_results_{merge_tag}{suffix}_{output_split}.json"
         with eval_results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
         if show_summary:
             print(f"💾 Evaluation results saved to {eval_results_path}")
 
-        update_results_index(
-            eval_dir,
-            merge_tag=merge_tag,
-            split=split,
-            results_path=eval_results_path,
-            metadata=metadata,
-            summary=summary,
-            run_path=merged_run_path,
-        )
-        export_heldout_tracking_artifacts(
-            metadata=metadata,
-            output_dir=merged_run_path,
-            show_summary=show_summary,
-        )
+        if not _is_test_other_output(output_split):
+            update_results_index(
+                eval_dir,
+                merge_tag=merge_tag,
+                split=split,
+                results_path=eval_results_path,
+                metadata=metadata,
+                summary=summary,
+                run_path=merged_run_path,
+            )
+            export_heldout_tracking_artifacts(
+                metadata=metadata,
+                output_dir=merged_run_path,
+                show_summary=show_summary,
+            )
 
         # Write standardised experiment_summary.json alongside eval_results.
         if not eval_tag:  # skip subset evals
@@ -760,7 +773,7 @@ def evaluate_merged_adapter(
                 summary=summary,
                 metadata=metadata,
                 source_tasks=source_tasks,
-                split=split,
+                split=output_split,
             )
 
     if failed_tasks:
@@ -887,6 +900,8 @@ def _evaluate_saved_merged(
 ) -> Dict[str, Dict]:
     from core.evaluation.evaluate_task import evaluate
 
+    requested_split = str(split)
+    output_split = canonical_output_split(requested_split)
     results: Dict[str, Dict] = {}
     source_tasks = infer_merged_source_tasks(metadata)
     merge_tag = build_merge_tag(metadata, source_tasks)
@@ -927,7 +942,8 @@ def _evaluate_saved_merged(
 
     if save_results:
         summary = {
-            "split": split,
+            "split": output_split,
+            "requested_split": requested_split,
             "timestamp": datetime.now().isoformat(),
             "adapter_path": str(merged_run_path),
             "merge_tag": merge_tag,
@@ -936,30 +952,31 @@ def _evaluate_saved_merged(
             "results": results,
             "task_status": task_status,
         }
-        results_path = merged_run_path / f"eval_results_{split}.json"
+        results_path = merged_run_path / f"eval_results_{output_split}.json"
         with results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
         if show_summary:
             print(f"\n💾 Evaluation results saved to {results_path}")
 
         method_name = metadata.get("merge_method", "merged")
-        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, output_split)
         eval_dir.mkdir(parents=True, exist_ok=True)
-        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
+        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{output_split}.json"
         with eval_results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
         if show_summary:
             print(f"💾 Evaluation results saved to {eval_results_path}")
 
-        update_results_index(
-            eval_dir,
-            merge_tag=merge_tag,
-            split=split,
-            results_path=eval_results_path,
-            metadata=metadata,
-            summary=summary,
-            run_path=merged_run_path,
-        )
+        if not _is_test_other_output(output_split):
+            update_results_index(
+                eval_dir,
+                merge_tag=merge_tag,
+                split=split,
+                results_path=eval_results_path,
+                metadata=metadata,
+                summary=summary,
+                run_path=merged_run_path,
+            )
 
     if failed_tasks:
         raise RuntimeError(
@@ -1026,15 +1043,15 @@ def _write_merge_experiment_summary(
         sweep_output_path = results_path.parent / summary_name
         write_experiment_summary(output_path=sweep_output_path, is_best=None, **_summary_kwargs)
 
-        # Combo-root experiment_summary.json — written for every eval (overwritten by each
-        # new sweep point; the last one written will reflect the most recent evaluation).
-        # The generate_outputs.py backfill script selects the true best afterwards.
-        combo_dir = results_path.parent.parent.parent  # eval/{split}/ → eval/ → combo/
-        write_experiment_summary(
-            output_path=combo_dir / "experiment_summary.json",
-            is_best=None,
-            **_summary_kwargs,
-        )
+        if not _is_test_other_output(split):
+            # Combo-root experiment_summary.json is shared across split dirs and
+            # would overwrite existing paper/table bookkeeping for test-clean.
+            combo_dir = results_path.parent.parent.parent  # eval/{split}/ → eval/ → combo/
+            write_experiment_summary(
+                output_path=combo_dir / "experiment_summary.json",
+                is_best=None,
+                **_summary_kwargs,
+            )
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning(

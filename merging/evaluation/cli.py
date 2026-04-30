@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from merging.engine.registry import list_merge_methods
 from merging.config.unified import load_merge_config
 from merging.evaluation.evaluate import evaluate_merged_adapter
+from core.evaluation.split_utils import SUPPORTED_EVAL_SPLITS
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,8 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split",
         default="test",
-        choices=("train", "validation", "test"),
-        help="Dataset split to evaluate.",
+        choices=SUPPORTED_EVAL_SPLITS,
+        help="Dataset split to evaluate. Use test-other for ASR LibriSpeech test.other.",
     )
     parser.add_argument("--batch-size", type=int, default=None, help="Per-device eval batch size.")
     parser.add_argument(

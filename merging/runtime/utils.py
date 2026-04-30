@@ -28,6 +28,7 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from core import load_config
+from core.evaluation.split_utils import canonical_output_split
 from core.training.run_manager import RunManager
 
 
@@ -277,7 +278,7 @@ def resolve_merge_eval_dir(
 ) -> Path:
     """Resolve directory for merged evaluation outputs."""
     summary_dir = resolve_merge_summary_dir(method_name, source_tasks, {}, base_dir=base_dir)
-    return summary_dir / "eval" / split
+    return summary_dir / "eval" / canonical_output_split(split)
 
 
 def update_results_index(

@@ -20,6 +20,7 @@ from transformers import (
 )
 
 from core.data.io_utils import ensure_dir
+from core.evaluation.split_utils import canonical_output_split
 from core.training.trainer import CustomTrainer
 
 DEFAULT_GENERATION_KWARGS: Dict[str, Any] = {"max_new_tokens": 128, "do_sample": False}
@@ -181,6 +182,7 @@ class TaskEvalSetup:
     compute_metrics: Callable[[Any], Dict[str, float]]
     label_names: Optional[List[str]] = None  # For classification tasks (confusion matrix)
     apply_subset_indices: Optional[Callable[[Sequence[int]], None]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -576,6 +578,7 @@ def compute_base_cache_path(
     dataset_cfg: Dict[str, Any],
 ) -> Path:
     """Generate a deterministic cache file path for base-model metrics."""
+    split = canonical_output_split(split)
     fingerprint_payload = {
         "task": task,
         "split": split,
@@ -600,6 +603,7 @@ def resolve_merged_eval_dir(
     merged_method: Optional[str],
 ) -> Path:
     """Resolve output directory for merged evaluation artifacts."""
+    split = canonical_output_split(split)
     merged_base = ensure_dir(metrics_dir / "eval" / split / "merged")
     other_tasks = [t for t in merged_tasks if t != task]
     if not other_tasks:
@@ -861,9 +865,19 @@ def _build_generic_eval_setup(
     if dataset is None:
         raise ValueError(f"Split '{split}' is unavailable for this task.")
 
+    try:
+        num_samples_before_hook = len(dataset)
+    except Exception:
+        num_samples_before_hook = None
+
     # Apply optional post-load hook (e.g., ASR duration filtering, Speech QA answers alignment)
     if task_config.post_load_hook is not None:
         dataset = task_config.post_load_hook(dataset, dataset_cfg, normalized_split)
+
+    try:
+        num_samples_after_hook = len(dataset)
+    except Exception:
+        num_samples_after_hook = None
 
     # Filter columns: keep required + optional (if they exist)
     keep_columns = set(task_config.required_columns)
@@ -998,6 +1012,12 @@ def _build_generic_eval_setup(
         compute_metrics=metrics_fn,
         label_names=label_names,
         apply_subset_indices=apply_subset_indices,
+        metadata={
+            "requested_split": split,
+            "data_split": normalized_split,
+            "num_samples_before_post_load_hook": num_samples_before_hook,
+            "num_samples_after_post_load_hook": num_samples_after_hook,
+        },
     )
 
 
@@ -1100,7 +1120,10 @@ def _get_asr_task_config() -> TaskConfig:
         # Use explicit values in config when bounded subsets are desired.
         kwargs.setdefault("train_hours", None)
         kwargs.setdefault("val_hours", None)
-        kwargs.setdefault("return_full_validation", True)
+        # The generic evaluator expects loader tuple index 2 to be the test split.
+        # Returning full validation would shift test to index 3 and silently
+        # evaluate validation when split="test".
+        kwargs.setdefault("return_full_validation", False)
         kwargs.setdefault("return_test_split", True)
         kwargs.setdefault("test_split", "test.clean")
         return load_librispeech_subset(**kwargs)

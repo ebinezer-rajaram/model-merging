@@ -6,6 +6,7 @@ import argparse
 import sys
 from typing import List, Optional
 
+from core.evaluation.split_utils import SUPPORTED_EVAL_SPLITS
 from merging import evaluate_merged_adapter
 from merging.runtime.logging import banner
 from merging.engine.registry import list_merge_methods
@@ -157,7 +158,7 @@ Examples:
         "--eval-split",
         type=str,
         default="test",
-        choices=["train", "validation", "test"],
+        choices=list(SUPPORTED_EVAL_SPLITS),
         help="Dataset split to use for evaluation (default: test)",
     )
     return parser.parse_args()

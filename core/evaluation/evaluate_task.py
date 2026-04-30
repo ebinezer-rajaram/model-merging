@@ -30,6 +30,12 @@ from core import (
     prepare_task_for_evaluation,
     run_evaluation,
 )
+from core.evaluation.split_utils import (
+    SUPPORTED_EVAL_SPLITS,
+    apply_task_split_overrides,
+    canonical_output_split,
+    task_data_split,
+)
 from merging.runtime.utils import resolve_merge_eval_dir
 from tasks.asr import (
     TASK_NAME as ASR_TASK_NAME,
@@ -199,8 +205,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split",
         default="validation",
-        choices=("train", "validation", "test"),
-        help="Dataset split to run evaluation on.",
+        choices=SUPPORTED_EVAL_SPLITS,
+        help=(
+            "Dataset split to run evaluation on. For ASR, test-other selects "
+            "LibriSpeech test.other while other tasks still use their test split."
+        ),
     )
     parser.add_argument("--batch-size", type=int, default=None, help="Per-device evaluation batch size.")
     parser.add_argument("--save-json", default=None, help="Optional path to save metrics as JSON.")
@@ -411,6 +420,40 @@ def _write_eval_subset_cache(path: Path, payload: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _add_asr_eval_metadata(
+    metrics: Dict[str, Any],
+    *,
+    split_metadata: Dict[str, Any],
+    config: Dict[str, Any],
+    setup_metadata: Optional[Dict[str, Any]],
+    dataset_size_before_subset: Optional[int],
+    dataset_size_after_subset: Optional[int],
+) -> None:
+    """Attach explicit LibriSpeech split/sample metadata to ASR metrics."""
+    metrics["dataset"] = "librispeech_asr"
+    metrics["dataset_config"] = "clean"
+    for key in ("requested_split", "resolved_split", "output_split", "data_split"):
+        if key in split_metadata:
+            metrics[key] = split_metadata[key]
+    metrics["wer_normalization"] = str(config.get("metrics", {}).get("wer_normalization", "default"))
+
+    before_filter = None
+    after_filter = None
+    if isinstance(setup_metadata, dict):
+        before_filter = setup_metadata.get("num_samples_before_post_load_hook")
+        after_filter = setup_metadata.get("num_samples_after_post_load_hook")
+    if before_filter is None:
+        before_filter = dataset_size_before_subset
+    if after_filter is None:
+        after_filter = dataset_size_before_subset
+    if before_filter is not None:
+        metrics["num_samples_before_filter"] = int(before_filter)
+    if after_filter is not None:
+        metrics["num_samples_after_filter"] = int(after_filter)
+    if dataset_size_after_subset is not None:
+        metrics["num_samples_evaluated"] = int(dataset_size_after_subset)
+
+
 def _save_metrics_to_locations(
     metrics: Dict[str, Any],
     adapter_path: Optional[Path],
@@ -513,7 +556,7 @@ def _save_metrics_to_locations(
 
     # Also save to adapter directory for reference (timestamped)
     if adapter_path is not None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         adapter_metrics_path = adapter_path / f"{split}_metrics_{timestamp}.json"
         with adapter_metrics_path.open("w") as handle:
             json.dump(metrics, handle, indent=2, sort_keys=True, default=_json_default)
@@ -546,6 +589,10 @@ def evaluate(
     eval_subset: Optional[Dict[str, Any]] = None,
 ) -> EvaluationResult:
     """Run evaluation with optional caching for the base model."""
+    requested_split = str(split)
+    output_split = canonical_output_split(requested_split)
+    data_split = task_data_split(task, requested_split)
+
     if task == ASR_TASK_NAME:
         config_path = get_asr_config_path(PACKAGE_ROOT, config_name)
         artifact_dirs = get_asr_artifact_directories(PACKAGE_ROOT)
@@ -585,6 +632,11 @@ def evaluate(
     # Load config if not already loaded (for ST, it's already loaded above)
     if task != ST_TASK_NAME:
         config = load_config(config_path)
+    config, split_metadata = apply_task_split_overrides(
+        task=task,
+        config=config,
+        requested_split=requested_split,
+    )
     config = prepare_dataset_cache(config, artifact_dirs)
 
     model_path = get_model_path(config, task)
@@ -668,7 +720,7 @@ def evaluate(
             # Prefer existing tag with matching subset metadata to keep continuity
             # across historical tag-hash implementations.
             existing_tag = _find_existing_eval_subset_tag(
-                metrics_split_dir=eval_output_dir / split,
+                metrics_split_dir=eval_output_dir / output_split,
                 task=task,
                 max_samples=max_eval_samples,
                 shuffle=subset_shuffle,
@@ -688,7 +740,7 @@ def evaluate(
                 dataset_cfg=dataset_cfg,
                 artifact_dirs=artifact_dirs,
                 task=task,
-                split=split,
+                split=output_split,
                 eval_tag=eval_tag,
             )
 
@@ -711,7 +763,7 @@ def evaluate(
         cache_path = compute_base_cache_path(
             eval_output_dir,
             task=task,
-            split=split,
+            split=output_split,
             config_path=config_path,
             batch_size=resolved_batch_size,
             generation_kwargs=generation_kwargs,
@@ -737,9 +789,14 @@ def evaluate(
         eval_setup = prepare_task_for_evaluation(
             task,
             processor,
-            split=split,
+            split=data_split,
             config=config,
         )
+        setup_metadata = dict(getattr(eval_setup, "metadata", None) or {})
+        try:
+            dataset_size_before_subset = len(eval_setup.dataset)
+        except Exception:
+            dataset_size_before_subset = None
 
         if max_eval_samples is not None:
             max_eval_samples = int(max_eval_samples)
@@ -775,7 +832,7 @@ def evaluate(
                             use_stratified = False
                             label_column = None
                             print(
-                                f"⚠️  eval_subset stratified requested for {task}/{split} "
+                                f"⚠️  eval_subset stratified requested for {task}/{output_split} "
                                 "but no valid label_column was found; falling back to non-stratified selection."
                             )
                     if use_stratified:
@@ -815,7 +872,7 @@ def evaluate(
                     if subset_cache_path is not None:
                         metadata = {
                             "task": task,
-                            "split": split,
+                            "split": output_split,
                             "eval_tag": eval_tag,
                             "dataset_size": original_size,
                             "dataset_fingerprint": dataset_fingerprint,
@@ -837,6 +894,11 @@ def evaluate(
                 if eval_setup.apply_subset_indices is not None:
                     eval_setup.apply_subset_indices(selected_indices)
 
+        try:
+            dataset_size_after_subset = len(eval_setup.dataset)
+        except Exception:
+            dataset_size_after_subset = None
+
         # Enable prediction storage if confusion matrix is requested
         store_predictions = generate_confusion_matrix and eval_setup.label_names is not None
 
@@ -849,6 +911,16 @@ def evaluate(
             store_predictions=store_predictions,
             processor=processor,
         )
+
+        if str(task).strip().lower() == ASR_TASK_NAME:
+            _add_asr_eval_metadata(
+                metrics,
+                split_metadata=split_metadata,
+                config=config,
+                setup_metadata=setup_metadata,
+                dataset_size_before_subset=dataset_size_before_subset,
+                dataset_size_after_subset=dataset_size_after_subset,
+            )
 
         # Generate confusion matrix if requested and predictions are available
         if generate_confusion_matrix and eval_setup.label_names:
@@ -863,7 +935,7 @@ def evaluate(
                 if merged_tasks:
                     merged_dir = resolve_merged_eval_dir(
                         metrics_dir=artifact_dirs["metrics"],
-                        split=split,
+                        split=output_split,
                         task=task,
                         merged_tasks=merged_tasks,
                         adapter_label=adapter_label,
@@ -871,7 +943,7 @@ def evaluate(
                     )
                     cm_path = merged_dir / "confusion_matrix.png"
                 else:
-                    eval_dir = ensure_dir(artifact_dirs["metrics"] / "eval" / split)
+                    eval_dir = ensure_dir(artifact_dirs["metrics"] / "eval" / output_split)
                     if adapter_path is None:
                         if adapter_label:
                             cm_filename = f"confusion_matrix_{adapter_label}.png"
@@ -892,7 +964,7 @@ def evaluate(
                     y_pred=predictions,
                     label_names=eval_setup.label_names,
                     plot_path=cm_path,
-                    title=f"Confusion Matrix - {split.title()} Set",
+                    title=f"Confusion Matrix - {output_split.title()} Set",
                     normalize=normalize,
                 )
 
@@ -924,6 +996,13 @@ def evaluate(
                 print(f"💾 Cached base metrics to {cache_path}")
             else:
                 print(f"💾 Cached base metrics to {cache_path}")
+    elif str(task).strip().lower() == ASR_TASK_NAME:
+        metrics.setdefault("dataset", "librispeech_asr")
+        metrics.setdefault("dataset_config", "clean")
+        metrics.setdefault("wer_normalization", str(config.get("metrics", {}).get("wer_normalization", "default")))
+        for key in ("requested_split", "resolved_split", "output_split", "data_split"):
+            if key in split_metadata:
+                metrics.setdefault(key, split_metadata[key])
 
     _cleanup_evaluation_runtime(model, processor, eval_setup)
 
@@ -937,7 +1016,7 @@ def evaluate(
         adapter_label=adapter_label,
         metrics_dir=artifact_dirs["metrics"],
         task=task,
-        split=split,
+        split=output_split,
         trained_on_task=trained_on_task,
         merged_tasks=merged_tasks,
         merged_method=merged_method,
@@ -967,7 +1046,7 @@ def evaluate(
     else:
         target_label = f"adapter@{adapter_path.name}"
     if show_summary:
-        print_metrics(target_label, task, split, metrics)
+        print_metrics(target_label, task, output_split, metrics)
 
     return EvaluationResult(
         metrics=metrics,

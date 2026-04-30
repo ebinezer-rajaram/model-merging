@@ -102,4 +102,4 @@ artifacts:
 metrics:
   history_csv: training_history.csv
   loss_plot: loss_wer_plot.png
-  wer_normalization: aggressive       # Options: "default", "standardize", "aggressive", "both", or "all" (compute multiple)
+  wer_normalization: aggressive        # Options: "default", "standardize", "aggressive", "both", or "all" (compute multiple)
