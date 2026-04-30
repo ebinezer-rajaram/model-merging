@@ -10,6 +10,7 @@ merge hyperparameters (e.g., weighted / weighted_delta lambda).
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,8 @@ from merging.evaluation.sweep import (
 from merging.evaluation.continual_sweep import (
     default_continual_sweep_dir,
     evaluate_continual_point,
-    is_continual_method,
+    is_bayes_continual_method,
+    is_continual_supermerge_method,
     prepare_continual_context,
 )
 
@@ -74,6 +76,22 @@ class _DimSpec:
                 raise ValueError(f"space.{self.name} requires non-empty values for kind={self.kind}.")
         else:
             raise ValueError(f"Unsupported space kind for {self.name}: {self.kind}")
+
+
+@dataclass(frozen=True)
+class _EarlyStopConfig:
+    enabled: bool = False
+    min_evals: int = 8
+    patience: int = 5
+    min_score_delta: float = 5e-4
+    param_resolution: Dict[str, float] | None = None
+    require_both: bool = True
+
+
+@dataclass
+class _EarlyStopWindowEntry:
+    params: Dict[str, Any]
+    best_score_after_eval: float
 
 
 class _SpaceEncoder:
@@ -165,6 +183,123 @@ class _SpaceEncoder:
                 else:  # pragma: no cover
                     raise AssertionError(f"Unhandled kind: {dim.kind}")
         return x
+
+
+def _parse_early_stop(raw: Any, *, dims: List[_DimSpec], init_points: int) -> _EarlyStopConfig:
+    if raw is None:
+        return _EarlyStopConfig(enabled=False, min_evals=max(init_points, 8))
+    if not isinstance(raw, Mapping):
+        raise ValueError("search.early_stop must be a mapping when provided.")
+
+    enabled = bool(raw.get("enabled", False))
+    min_evals = int(raw.get("min_evals", max(init_points, 8)))
+    patience = int(raw.get("patience", 5))
+    min_score_delta = float(raw.get("min_score_delta", 5e-4))
+    require_both = bool(raw.get("require_both", True))
+
+    if min_evals < 0:
+        raise ValueError("search.early_stop.min_evals must be >= 0.")
+    if patience < 0:
+        raise ValueError("search.early_stop.patience must be >= 0.")
+    if min_score_delta < 0.0:
+        raise ValueError("search.early_stop.min_score_delta must be >= 0.")
+
+    dims_by_name = {dim.name: dim for dim in dims}
+    raw_resolution = raw.get("param_resolution", {}) or {}
+    if not isinstance(raw_resolution, Mapping):
+        raise ValueError("search.early_stop.param_resolution must be a mapping when provided.")
+
+    param_resolution: Dict[str, float] = {}
+    for name, value in raw_resolution.items():
+        key = str(name)
+        if key not in dims_by_name:
+            raise ValueError(f"search.early_stop.param_resolution contains unknown parameter '{key}'.")
+        dim = dims_by_name[key]
+        if dim.kind.lower() not in _FLOAT_KINDS:
+            continue
+        resolution = float(value)
+        if resolution <= 0.0:
+            raise ValueError(f"search.early_stop.param_resolution.{key} must be > 0.")
+        param_resolution[key] = resolution
+
+    return _EarlyStopConfig(
+        enabled=enabled,
+        min_evals=min_evals,
+        patience=patience,
+        min_score_delta=min_score_delta,
+        param_resolution=param_resolution,
+        require_both=require_both,
+    )
+
+
+def _quantize_param(value: Any, resolution: float) -> int:
+    return int(np.rint(float(value) / resolution))
+
+
+def _evaluate_early_stop(
+    history: List[_EarlyStopWindowEntry],
+    *,
+    total_evaluations: int,
+    best_params: Optional[Mapping[str, Any]],
+    dims: List[_DimSpec],
+    config: _EarlyStopConfig,
+) -> tuple[bool, Dict[str, Any], List[str]]:
+    state: Dict[str, Any] = {
+        "evaluations": total_evaluations,
+        "patience_used": min(len(history), config.patience),
+        "score_delta": None,
+        "window_best_scores": [],
+        "window_quantized_buckets": {},
+        "best_quantized_bucket": {},
+        "plateau_triggered": False,
+        "resolution_triggered": False,
+        "require_both": bool(config.require_both),
+    }
+
+    if not config.enabled:
+        return False, state, []
+    if config.patience <= 0 or total_evaluations < config.min_evals or len(history) < config.patience:
+        return False, state, []
+
+    window = history[-config.patience :]
+    scores = [float(entry.best_score_after_eval) for entry in window]
+    score_delta = float(scores[-1] - scores[0]) if scores else 0.0
+    plateau_triggered = score_delta < config.min_score_delta
+
+    quantized_buckets: Dict[str, List[int]] = {}
+    best_buckets: Dict[str, int] = {}
+    resolution_checks: List[bool] = []
+    best_params = dict(best_params or {})
+    for dim in dims:
+        resolution = (config.param_resolution or {}).get(dim.name)
+        if resolution is None or dim.kind.lower() not in _FLOAT_KINDS or dim.name not in best_params:
+            continue
+        buckets = [_quantize_param(entry.params[dim.name], resolution) for entry in window]
+        quantized_buckets[dim.name] = buckets
+        best_bucket = _quantize_param(best_params[dim.name], resolution)
+        best_buckets[dim.name] = best_bucket
+        resolution_checks.append(all(bucket == best_bucket for bucket in buckets))
+
+    resolution_triggered = bool(resolution_checks) and all(resolution_checks)
+    reasons: List[str] = []
+    if plateau_triggered:
+        reasons.append("score_plateau")
+    if resolution_triggered:
+        reasons.append("param_resolution")
+
+    state["score_delta"] = score_delta
+    state["window_best_scores"] = scores
+    state["window_quantized_buckets"] = quantized_buckets
+    state["best_quantized_bucket"] = best_buckets
+    state["plateau_triggered"] = plateau_triggered
+    state["resolution_triggered"] = resolution_triggered
+
+    should_stop = False
+    if config.require_both:
+        should_stop = plateau_triggered and resolution_triggered
+    else:
+        should_stop = plateau_triggered or resolution_triggered
+    return should_stop, state, reasons
 
 
 def _parse_space(space: Mapping[str, Any]) -> List[_DimSpec]:
@@ -290,6 +425,9 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         budget: 20
         seed: 42
     """
+    if is_continual_supermerge_method(config.method):
+        raise ValueError("continual_supermerge uses the differentiable CE optimizer, not Bayesian search.")
+
     space_raw = search.get("space")
     if not isinstance(space_raw, Mapping):
         raise ValueError("Bayes search requires search.space to be a mapping.")
@@ -313,12 +451,13 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
 
     xi = float(search.get("xi", 0.01))
     invalid_score = float(search.get("invalid_score", -1e9))
+    early_stop_cfg = _parse_early_stop(search.get("early_stop"), dims=dims, init_points=init_points)
 
     # Output path mirrors grid sweeps.
     started_at = datetime.now()
     timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     summary_dir = config.output_dir
-    continual_mode = is_continual_method(config.method)
+    continual_mode = is_bayes_continual_method(config.method)
     continual_context = prepare_continual_context(config) if continual_mode else None
     if summary_dir is None:
         if continual_mode:
@@ -360,9 +499,15 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         "post_sweep_eval": None,
         "best_index": best_idx,
         "best_score": best_score,
+        "early_stopped": False,
+        "early_stop_reason": None,
+        "early_stop_state": None,
         "runs": runs,
     }
     _atomic_write_json(summary_path, summary)
+
+    bo_history: deque[_EarlyStopWindowEntry] = deque(maxlen=max(1, early_stop_cfg.patience))
+    bo_eval_count = 0
 
     def _flush_summary() -> None:
         summary["best_index"] = best_idx
@@ -378,6 +523,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         details: Dict[str, Any],
         *,
         continual_meta: Optional[Mapping[str, Any]] = None,
+        phase: Optional[str] = None,
     ) -> None:
         nonlocal best_idx, best_score, best_tiebreak
         entry: Dict[str, Any] = {
@@ -386,6 +532,8 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
             "score_details": dict(details),
             "results": results or {},
         }
+        if phase is not None:
+            entry["phase"] = phase
         if isinstance(continual_meta, Mapping):
             entry["continual"] = dict(continual_meta)
         runs.append(entry)
@@ -437,9 +585,16 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
             score = raw_score if np.isfinite(raw_score) else invalid_score
             if not np.isfinite(score):
                 score = invalid_score
-            _record_run(params, results, float(score), score_details, continual_meta=continual_meta)
+            _record_run(
+                params,
+                results,
+                float(score),
+                score_details,
+                continual_meta=continual_meta,
+                phase=current_phase,
+            )
         except Exception as exc:
-            _record_run(params, None, invalid_score, {"error": str(exc)})
+            _record_run(params, None, invalid_score, {"error": str(exc)}, phase=current_phase)
 
     def _coerce_point_params(point: Mapping[str, Any], field: str) -> Dict[str, Any]:
         params_raw = point.get(field, point)
@@ -590,6 +745,32 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
         else:
             print(f"♻️  Warm-started BO with {added} point(s) from {compatible_files}/{files_read} compatible sweep file(s).")
 
+    current_phase: Optional[str] = None
+
+    def _maybe_stop_after_bo_eval() -> bool:
+        nonlocal bo_eval_count
+        if not early_stop_cfg.enabled or current_phase != "bo" or best_idx is None or not bo_history:
+            return False
+        should_stop, stop_state, stop_reasons = _evaluate_early_stop(
+            list(bo_history),
+            total_evaluations=bo_eval_count,
+            best_params=runs[best_idx]["params"] if best_idx is not None else None,
+            dims=dims,
+            config=early_stop_cfg,
+        )
+        summary["early_stop_state"] = stop_state
+        if not should_stop:
+            return False
+        summary["early_stopped"] = True
+        summary["early_stop_reason"] = ",".join(stop_reasons) if stop_reasons else "early_stop"
+        _flush_summary()
+        print(
+            "\n🛑 Early stopping Bayesian sweep "
+            f"after {stop_state['evaluations']} BO evaluations "
+            f"(reason={summary['early_stop_reason']}, score_delta={stop_state['score_delta']:.4g})"
+        )
+        return True
+
     try:
         warm_start = search.get("initial_points")
         if warm_start is not None:
@@ -607,6 +788,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
                     continue
                 seen.add(key)
                 print(f"\n[warm-start {len(runs)+1}/{effective_budget}] Evaluating params: {params}")
+                current_phase = "warm_start"
                 _evaluate(params)
                 if len(runs) >= effective_budget:
                     break
@@ -619,6 +801,7 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
                 continue
             seen.add(key)
             print(f"\n[init {len(runs)+1}/{effective_budget}] Evaluating params: {params}")
+            current_phase = "init"
             _evaluate(params)
 
         # BO loop.
@@ -669,7 +852,18 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
 
             seen.add(encoder._key(next_params))
             print(f"\n[{phase} {len(runs)+1}/{effective_budget}] Evaluating params: {next_params}")
+            current_phase = phase
             _evaluate(next_params)
+            if phase == "bo":
+                bo_eval_count += 1
+                bo_history.append(
+                    _EarlyStopWindowEntry(
+                        params=dict(next_params),
+                        best_score_after_eval=float(best_score),
+                    )
+                )
+                if _maybe_stop_after_bo_eval():
+                    break
     except KeyboardInterrupt:
         _flush_summary()
         print(f"\n⏹️  Sweep interrupted. Partial summary saved to {summary_path}")

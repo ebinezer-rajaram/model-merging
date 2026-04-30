@@ -21,8 +21,20 @@ from merging.delta_sources.resolver import resolve_delta_sources
 from merging.runtime.utils import PACKAGE_ROOT
 
 
+CONTINUAL_BAYES_METHOD = "continual"
+CONTINUAL_SUPERMERGE_METHOD = "continual_supermerge"
+
+
 def is_continual_method(method: str) -> bool:
-    return str(method).strip().lower() == "continual"
+    return str(method).strip().lower() in {CONTINUAL_BAYES_METHOD, CONTINUAL_SUPERMERGE_METHOD}
+
+
+def is_bayes_continual_method(method: str) -> bool:
+    return str(method).strip().lower() == CONTINUAL_BAYES_METHOD
+
+
+def is_continual_supermerge_method(method: str) -> bool:
+    return str(method).strip().lower() == CONTINUAL_SUPERMERGE_METHOD
 
 
 def _sanitize_token(value: str) -> str:
@@ -45,13 +57,19 @@ def default_continual_sweep_dir(config: MergeConfig) -> Path:
     combo = "_".join(sorted(_source_label(spec) for spec in config.adapters))
     if not combo:
         combo = "sources"
-    return PACKAGE_ROOT / "artifacts" / "merged" / "continual" / combo / "sweeps"
+    method_dir = (
+        CONTINUAL_SUPERMERGE_METHOD
+        if is_continual_supermerge_method(config.method)
+        else CONTINUAL_BAYES_METHOD
+    )
+    return PACKAGE_ROOT / "artifacts" / "merged" / method_dir / combo / "sweeps"
 
 
 @dataclass(frozen=True)
 class ContinualSweepContext:
     x_source: DeltaSource
     y_source: DeltaSource
+    seen_tasks: List[str]
     eval_tasks: List[str]
     merge_mode: str
     energy_threshold: float
@@ -60,6 +78,7 @@ class ContinualSweepContext:
     lambda_default: float
     batch_size: Optional[int]
     use_cache: bool
+    continual_source_mode: str
 
 
 def prepare_continual_context(config: MergeConfig) -> ContinualSweepContext:
@@ -68,7 +87,25 @@ def prepare_continual_context(config: MergeConfig) -> ContinualSweepContext:
             "Continual sweep requires exactly 2 adapter specs in config.adapters: [x_source, y_source]."
         )
 
-    sources = resolve_delta_sources(config.adapters)
+    method_params = dict(config.method_params)
+    default_source_mode = (
+        "fused_lora_leaves"
+        if is_continual_supermerge_method(config.method)
+        else "compressed_recursive"
+    )
+    continual_source_mode = str(
+        method_params.get("continual_source_mode", default_source_mode)
+    ).strip().lower()
+    if continual_source_mode not in {"compressed_recursive", "fused_lora_leaves"}:
+        raise ValueError(
+            "method_params.continual_source_mode must be one of: "
+            "compressed_recursive|fused_lora_leaves."
+        )
+
+    sources = resolve_delta_sources(
+        config.adapters,
+        continual_source_mode=continual_source_mode,
+    )
     x_source, y_source = sources[0], sources[1]
 
     tasks = select_eval_tasks_for_sources(
@@ -82,7 +119,6 @@ def prepare_continual_context(config: MergeConfig) -> ContinualSweepContext:
             "Set eval_tasks explicitly in the sweep config."
         )
 
-    method_params = dict(config.method_params)
     energy_threshold = float(method_params.get("energy_threshold", 0.99))
     if not 0.0 < energy_threshold <= 1.0:
         raise ValueError(f"method_params.energy_threshold must be in (0,1], got {energy_threshold}")
@@ -99,10 +135,16 @@ def prepare_continual_context(config: MergeConfig) -> ContinualSweepContext:
     batch_size_raw = method_params.get("batch_size")
     batch_size = int(batch_size_raw) if batch_size_raw is not None else None
     use_cache = bool(method_params.get("use_cache", False))
+    seen_tasks = select_eval_tasks_for_sources(
+        x_tasks=x_source.constituent_tasks_flat(),
+        y_tasks=y_source.constituent_tasks_flat(),
+        explicit_eval_tasks=None,
+    )
 
     return ContinualSweepContext(
         x_source=x_source,
         y_source=y_source,
+        seen_tasks=seen_tasks,
         eval_tasks=tasks,
         merge_mode=config.merge_mode,
         energy_threshold=energy_threshold,
@@ -111,6 +153,7 @@ def prepare_continual_context(config: MergeConfig) -> ContinualSweepContext:
         lambda_default=lambda_default,
         batch_size=batch_size,
         use_cache=use_cache,
+        continual_source_mode=continual_source_mode,
     )
 
 
@@ -288,9 +331,13 @@ def run_post_sweep_eval_for_best_continual(
 __all__ = [
     "ContinualSweepContext",
     "build_continual_run_dir",
+    "CONTINUAL_BAYES_METHOD",
+    "CONTINUAL_SUPERMERGE_METHOD",
     "default_continual_sweep_dir",
     "evaluate_continual_point",
+    "is_bayes_continual_method",
     "is_continual_method",
+    "is_continual_supermerge_method",
     "prepare_continual_context",
     "resolve_alpha_lambda",
     "run_post_sweep_eval_for_best_continual",
