@@ -1,0 +1,85 @@
+adapters:
+  - artifacts/continual/materialized/REPLACE_WITH_MATERIALIZED_ARTIFACT
+  - asr
+method: continual_supermerge
+merge_mode: common
+
+method_params:
+  energy_threshold: 0.99
+  store_dtype: float16
+  alpha: 1.0
+  lambda: 0.5
+  use_cache: false
+
+optimizer:
+  type: continual_supermerge
+  params:
+    split: train
+    steps: 500
+    batch_size: 8
+    lr: 0.001
+    betas: [0.9, 0.99]
+    gradient_accumulation_steps: 1
+    merge_impl: fused_lora_linear
+    delta_residency: gpu_cache
+    model_dtype: bf16
+    dtype_compute: bf16
+    task_vector_dtype: bf16
+    ce_task_weighting: equal
+    enforce_seen_tasks_only: true
+    enforce_validation_only_selection: false
+    early_stopping_patience: 0
+    early_stopping_threshold: 0.0001
+    early_stopping_warmup_steps: 20
+    early_stopping_rolling_window: 10
+    restore_best_checkpoint: true
+    gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
+    logging_steps: 5
+    heldout_eval:
+      enabled: true
+      split: validation
+      frequency_updates: 200
+      batch_size: 8
+      subset:
+        enabled: true
+        max_samples: 500
+        stratified: true
+        stratify_by: label
+        shuffle: true
+        seed: 0
+      compute_missing_interference_baselines: true
+      pareto:
+        selection_criterion: geometric_mean_interference_delta
+        patience_evals: 5
+        min_evals_before_stop: 5
+        hypervolume_min_delta: 0.01
+        selection_min_delta: 0.005
+        dominance_epsilon: 0.02
+      restore_best_checkpoint: true
+
+split: validation
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, vocalsound, asr]
+eval_subset:
+  enabled: true
+  seed: 0
+  shuffle: true
+  stratified: true
+  label_column: label
+  max_samples: 1000
+  per_task:
+    asr:
+      tag: subset_3f15039510
+      max_samples: 1000
+      stratified: true
+      label_column: label
+      seed: 0
+
+save_merged: false
+constraint_nonnegative: false
+
+post_sweep_eval:
+  enabled: true
+  split: test
+  save_merged: true
+  eval_tasks: [emotion, intent, kws, langid, speaker_ver, vocalsound, asr, speech_qa]

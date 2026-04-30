@@ -18,7 +18,9 @@ from merging.runtime.utils import PACKAGE_ROOT
 from merging.evaluation.continual_sweep import (
     default_continual_sweep_dir,
     evaluate_continual_point,
+    is_bayes_continual_method,
     is_continual_method,
+    is_continual_supermerge_method,
     prepare_continual_context,
     run_post_sweep_eval_for_best_continual,
 )
@@ -180,7 +182,7 @@ def _run_post_sweep_eval_for_best(
     lambda_policy: Optional[Dict[str, Any]],
     optimizer: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    if is_continual_method(config.method):
+    if is_bayes_continual_method(config.method):
         context = prepare_continual_context(config)
         summary_dir = config.output_dir if config.output_dir is not None else default_continual_sweep_dir(config)
         summary_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +260,15 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
     search_type = str(search.get("type", "grid")).lower()
     lambda_policy = _lambda_policy_mapping(config.lambda_policy)
     optimizer = _optimizer_mapping(config.optimizer)
+    if is_continual_supermerge_method(config.method):
+        from merging.continual.supermerge_optimizer import run_continual_supermerge_optimizer
+
+        summary_dir = config.output_dir if config.output_dir is not None else default_continual_sweep_dir(config)
+        return run_continual_supermerge_optimizer(
+            config=config,
+            context=prepare_continual_context(config),
+            summary_dir=summary_dir,
+        )
     continual_mode = is_continual_method(config.method)
     continual_context = prepare_continual_context(config) if continual_mode else None
 

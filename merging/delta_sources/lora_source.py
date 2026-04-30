@@ -150,5 +150,12 @@ class LoRADeltaSource:
         dense = (b_cast @ a_cast) * scale
         return dense
 
+    def get_factor_tensors(self, source_key: str) -> tuple[torch.Tensor, torch.Tensor, float]:
+        """Return low-rank factors in the same orientation as continual SVD artifacts."""
+        if source_key not in self._pairs:
+            raise KeyError(f"LoRA source '{self._source_id}' has no parameter '{source_key}'")
+        pair = self._pairs[source_key]
+        return pair["A"].clone(), pair["B"].clone(), self._scale_for_key(source_key)
+
 
 __all__ = ["LoRADeltaSource"]

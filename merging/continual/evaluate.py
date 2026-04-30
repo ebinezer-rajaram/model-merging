@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from core.evaluation.evaluate_task import evaluate
+from core.evaluation.split_utils import canonical_output_split
 from merging.artifacts.continual_format import ContinualArtifactReader
 from merging.evaluation.interference import (
     maybe_add_interference_delta,
@@ -33,6 +34,10 @@ def _ordered_union(values: Iterable[str]) -> List[str]:
 def _format_float_token(value: float) -> str:
     token = f"{float(value):g}"
     return token.replace("-", "m").replace(".", "p")
+
+
+def _is_test_other_output(output_split: str) -> bool:
+    return canonical_output_split(output_split) == "test_other"
 
 
 def build_continual_tag(
@@ -65,8 +70,11 @@ def evaluate_continual_artifact(
     merge_tag: Optional[str] = None,
     alpha: Optional[float] = None,
     lambda_weight: Optional[float] = None,
+    method_name: str = "continual",
 ) -> Dict[str, Dict[str, Any]]:
     """Evaluate a continual artifact on one or more tasks."""
+    requested_split = str(split)
+    output_split = canonical_output_split(requested_split)
     artifact_dir = Path(artifact_path).resolve()
     reader = ContinualArtifactReader(artifact_dir)
     manifest = reader.manifest
@@ -112,7 +120,7 @@ def evaluate_continual_artifact(
                 continual_artifact_path=artifact_dir,
                 adapter_label=merge_tag,
                 merged_tasks=source_tasks,
-                merged_method="continual",
+                merged_method=method_name,
                 eval_subset=eval_subset,
             )
             metrics = dict(payload.metrics)
@@ -135,7 +143,8 @@ def evaluate_continual_artifact(
 
     summary = {
         "timestamp": datetime.now().isoformat(),
-        "split": split,
+        "split": output_split,
+        "requested_split": requested_split,
         "artifact_path": str(artifact_dir),
         "merge_tag": merge_tag,
         "source_tasks": source_tasks,
@@ -148,19 +157,18 @@ def evaluate_continual_artifact(
     }
 
     if save_results:
-        run_results_path = artifact_dir / f"eval_results_{split}.json"
+        run_results_path = artifact_dir / f"eval_results_{output_split}.json"
         with run_results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
 
-        method_name = "continual"
-        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, split)
+        eval_dir = resolve_merge_eval_dir(method_name, source_tasks, output_split)
         eval_dir.mkdir(parents=True, exist_ok=True)
-        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{split}.json"
+        eval_results_path = eval_dir / f"eval_results_{merge_tag}_{output_split}.json"
         with eval_results_path.open("w") as handle:
             json.dump(summary, handle, indent=2)
 
         metadata = {
-            "merge_method": "continual",
+            "merge_method": method_name,
             "source_adapters": manifest.get("source_metadata", []),
             "params": {
                 "alpha": alpha,
@@ -168,15 +176,16 @@ def evaluate_continual_artifact(
                 "dense_merge_semantics": manifest.get("dense_merge_semantics", {}),
             },
         }
-        update_results_index(
-            eval_dir,
-            merge_tag=merge_tag,
-            split=split,
-            results_path=eval_results_path,
-            metadata=metadata,
-            summary=summary,
-            run_path=artifact_dir,
-        )
+        if not _is_test_other_output(output_split):
+            update_results_index(
+                eval_dir,
+                merge_tag=merge_tag,
+                split=output_split,
+                results_path=eval_results_path,
+                metadata=metadata,
+                summary=summary,
+                run_path=artifact_dir,
+            )
 
     if failed:
         raise RuntimeError(

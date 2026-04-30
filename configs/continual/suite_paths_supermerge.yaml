@@ -1,0 +1,119 @@
+suite_id: thesis_continual_extension_supermerge_v1
+
+defaults:
+  output_root: artifacts/continual_suite
+  merge_template: configs/merge/continual/merge_continual_supermerge_6task_materialized_plus_asr.yaml
+  mtl_template: configs/mtl/continual/continual_6task_plus_asr.yaml
+  selection_split: validation
+  report_split: test
+  include_speech_qa: true
+
+  seed_adapters:
+    asr: artifacts/asr/adapters/qwen2_5_omni_lora_asr_100h/best
+    emotion: artifacts/emotion/adapters/qwen2_5_omni_lora_emotion_audio_v2/best
+    intent: artifacts/intent/adapters/qwen2_5_omni_lora_intent/best
+    kws: artifacts/kws/adapters/qwen2_5_omni_lora_kws/best
+    langid: artifacts/langid/adapters/qwen2_5_omni_lora_langid/best
+    speaker_ver: artifacts/speaker_ver/adapters/qwen2_5_omni_lora_speaker_ver_v2/best
+    vocalsound: artifacts/vocalsound/adapters/qwen2_5_omni_lora_vocalsound/best
+
+  merge:
+    method: continual_supermerge
+    method_params:
+      energy_threshold: 0.99
+      store_dtype: float16
+      alpha: 1.0
+      lambda: 0.5
+      use_cache: false
+      continual_source_mode: fused_lora_leaves
+    optimizer:
+      type: continual_supermerge
+      params:
+        split: train
+        steps: 500
+        batch_size: 8
+        lr: 0.001
+        betas: [0.9, 0.99]
+        gradient_accumulation_steps: 1
+        merge_impl: fused_lora_linear
+        delta_residency: gpu_cache
+        model_dtype: bf16
+        dtype_compute: bf16
+        task_vector_dtype: bf16
+        ce_task_weighting: equal
+        enforce_seen_tasks_only: true
+        enforce_validation_only_selection: false
+        early_stopping_patience: 0
+        early_stopping_threshold: 0.0001
+        early_stopping_warmup_steps: 20
+        min_optimizer_steps_before_early_stop: 20
+        early_stopping_rolling_window: 10
+        restore_best_checkpoint: true
+        gradient_checkpointing: true
+        gradient_checkpointing_use_reentrant: false
+        logging_steps: 5
+        heldout_eval:
+          enabled: true
+          split: validation
+          frequency_updates: 50
+          batch_size: 8
+          subset:
+            enabled: true
+            max_samples: 500
+            stratified: true
+            stratify_by: label
+            shuffle: true
+            seed: 0
+          compute_missing_interference_baselines: true
+          pareto:
+            selection_criterion: geometric_mean_interference_delta
+            patience_evals: 5
+            min_evals_before_stop: 5
+            hypervolume_min_delta: 0.01
+            selection_min_delta: 0.005
+            dominance_epsilon: 0.02
+          restore_best_checkpoint: true
+        eval_subset:
+          enabled: true
+          seed: 0
+          shuffle: true
+          stratified: true
+          label_column: label
+          max_samples: 1000
+          per_task:
+            asr:
+              max_samples: 1000
+              stratified: true
+              label_column: label
+              seed: 0
+    eval_subset:
+      enabled: true
+      seed: 0
+      shuffle: true
+      stratified: true
+      label_column: label
+      max_samples: 1000
+      per_task:
+        asr:
+          max_samples: 1000
+          stratified: true
+          label_column: label
+          seed: 0
+    constraint_nonnegative: false
+
+paths:
+  - path_id: compatible_acoustic
+    tasks: [speaker_ver, langid, kws, asr]
+
+  - path_id: conflicting_stress
+    tasks: [asr, intent, emotion, speaker_ver]
+
+  - path_id: heldout_asr_probe
+    tasks: [speaker_ver, langid, kws, vocalsound]
+    eval_only_tasks: [asr]
+
+  - path_id: semantic_to_speaker_5task
+    tasks: [intent, emotion, asr, vocalsound, speaker_ver]
+
+  - path_id: speaker_to_semantic_5task
+    tasks: [speaker_ver, vocalsound, asr, emotion, intent]
