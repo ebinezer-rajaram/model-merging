@@ -125,9 +125,14 @@ def test_local_spoken_squad_loader_fails_when_missing_audio_rate_exceeds_thresho
                         "context": "alpha beta gamma",
                         "qas": [
                             {"id": "q1", "question": "q1?", "answers": [{"text": "beta", "answer_start": 6}]},
-                            {"id": "q2", "question": "q2?", "answers": [{"text": "beta", "answer_start": 6}]},
                         ],
-                    }
+                    },
+                    {
+                        "context": "delta epsilon zeta",
+                        "qas": [
+                            {"id": "q2", "question": "q2?", "answers": [{"text": "epsilon", "answer_start": 6}]},
+                        ],
+                    },
                 ],
             }
         ],
@@ -135,7 +140,8 @@ def test_local_spoken_squad_loader_fails_when_missing_audio_rate_exceeds_thresho
     (data_dir / "spoken_train-v1.1.json").write_text(json.dumps(payload))
     (data_dir / "spoken_test-v1.1.json").write_text(json.dumps(payload))
 
-    # Provide wav only for test split and only one train/topic-paragraph mapping.
+    # Provide one train paragraph mapping, leaving the second paragraph unresolved.
+    _write_silent_wav(data_dir / "wav" / "train" / "1_1_1.wav")
     _write_silent_wav(data_dir / "wav" / "test" / "1_1_1.wav")
 
     try:

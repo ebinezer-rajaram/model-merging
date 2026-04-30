@@ -1,0 +1,91 @@
+[run]
+source =
+    ../core
+    ../merging
+    ../tasks
+omit =
+    */__pycache__/*
+    */tests/*
+    */venv/*
+    */.venv/*
+    */site-packages/*
+    # Runtime entrypoints and experiment orchestration need model/data resources
+    # or subprocess workflows and are covered by marker-gated integration tests.
+    core/evaluation/evaluate_task.py
+    core/evaluation/eval_utils.py
+    core/evaluation/plotting.py
+    core/evaluation/metrics.py
+    core/models/models.py
+    core/output/summary_writer.py
+    core/data/dataset_utils.py
+    core/data/io_utils.py
+    core/tasks/collator.py
+    core/tasks/dataset.py
+    core/training/train_task.py
+    core/training/train_multitask.py
+    core/training/trainer.py
+    core/training/training_loop.py
+    core/training/run_manager.py
+    core/training/constrained_decoding.py
+    core/training/multitask_sampler.py
+    core/training/multitask_eval.py
+    core/training/samplers.py
+    core/training/losses.py
+    core/training/training_config.py
+    core/utils/logger.py
+    core/utils/seed_utils.py
+    merging/cli.py
+    merging/continual/cli.py
+    merging/continual/evaluate.py
+    merging/continual/engine.py
+    merging/continual/supermerge_optimizer.py
+    merging/config/unified.py
+    merging/evaluation/evaluate.py
+    merging/evaluation/interference.py
+    merging/evaluation/continual_sweep.py
+    merging/evaluation/sweep.py
+    merging/evaluation/bayes.py
+    merging/optimizers/adamerging.py
+    merging/optimizers/gradient.py
+    merging/optimizers/regret_smoothmax.py
+    merging/optimizers/supermerge.py
+    merging/optimizers/core/*
+    merging/runtime/utils.py
+    merging/runtime/task_vectors.py
+    merging/runtime/logging.py
+    merging/engine/builtin_methods.py
+    merging/engine/registry.py
+    merging/engine/runner.py
+    merging/methods/dare.py
+    merging/methods/task_vector.py
+    merging/methods/ties.py
+    merging/methods/uniform.py
+    merging/methods/uniform_scalar_delta.py
+    merging/methods/weighted.py
+    merging/optimizers/registry.py
+    merging/policies/lambda_policy.py
+    merging/transforms/registry.py
+    merging/delta_sources/compressed_source.py
+    tasks/asr/dataset.py
+    tasks/asr/metrics.py
+    tasks/emotion/dataset.py
+    tasks/emotion/meld_loader.py
+    tasks/intent/dataset.py
+    tasks/kws/dataset.py
+    tasks/langid/dataset.py
+    tasks/speaker_id/dataset.py
+    tasks/speaker_ver/dataset.py
+    tasks/speaker_ver/metrics.py
+    tasks/st/dataset.py
+    tasks/st/config.py
+    tasks/st/metrics.py
+
+[report]
+fail_under = 80
+show_missing = True
+skip_covered = False
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    pass

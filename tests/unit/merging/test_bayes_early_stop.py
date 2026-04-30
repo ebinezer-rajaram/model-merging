@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
+import numpy as np
+
 from merging.config.unified import MergeConfig
 from merging.evaluation import bayes as bayes_module
 
@@ -21,8 +23,8 @@ class _FakeGP:
 
     def predict(self, x_cand, return_std: bool = True):
         size = len(x_cand)
-        mu = [float(size - idx) for idx in range(size)]
-        sigma = [1.0 for _ in range(size)]
+        mu = np.array([float(size - idx) for idx in range(size)], dtype=float)
+        sigma = np.ones(size, dtype=float)
         if return_std:
             return mu, sigma
         return mu

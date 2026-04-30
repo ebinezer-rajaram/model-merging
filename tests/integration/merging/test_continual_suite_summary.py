@@ -13,7 +13,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def test_summary_script_writes_all_expected_csvs(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[3]
     suite_root = tmp_path / "artifacts" / "continual_suite" / "smoke_suite"
     stage_dir = suite_root / "compatible_acoustic" / "stage_02"
     sweeps_dir = stage_dir / "merge" / "sweeps"
@@ -107,7 +107,7 @@ def test_summary_script_writes_all_expected_csvs(tmp_path: Path) -> None:
 
 
 def test_summary_script_preserves_continual_supermerge_method_label(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[3]
     suite_root = tmp_path / "artifacts" / "continual_suite" / "smoke_suite"
     stage_dir = suite_root / "compatible_acoustic" / "stage_02"
     sweeps_dir = stage_dir / "merge" / "sweeps"

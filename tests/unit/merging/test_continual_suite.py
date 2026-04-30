@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from continual_suite_lib import (
     StageResultRecord,
     compute_stage_tables,
@@ -133,9 +135,9 @@ def test_compute_stage_tables_tracks_forgetting_and_rollups() -> None:
     assert len(stage_rows) == 2
     assert stage_rows[1]["new_task_delta"] == 0.60
     assert stage_rows[1]["seen_min_delta"] == 0.60
-    assert stage_rows[1]["prior_avg_delta"] == 0.775
+    assert stage_rows[1]["prior_avg_delta"] == pytest.approx(0.775)
     assert round(float(stage_rows[1]["avg_prior_forgetting"]), 4) == -0.075
 
     forgetting_by_task = {row["prior_task"]: row["forgetting"] for row in forgetting_rows}
-    assert forgetting_by_task["asr"] == -0.20
-    assert forgetting_by_task["intent"] == 0.05
+    assert forgetting_by_task["asr"] == pytest.approx(-0.20)
+    assert forgetting_by_task["intent"] == pytest.approx(0.05)

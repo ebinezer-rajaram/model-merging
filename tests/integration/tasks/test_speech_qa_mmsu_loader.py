@@ -40,9 +40,20 @@ def _build_mmsu_dataset(tmp_path: Path) -> DatasetDict:
     return DatasetDict({"train": train})
 
 
+def _add_constant_duration(dataset: DatasetDict, **kwargs) -> DatasetDict:
+    del kwargs
+    return DatasetDict(
+        {
+            split: subset.add_column("duration", [0.08] * len(subset))
+            for split, subset in dataset.items()
+        }
+    )
+
+
 def test_mmsu_loader_uses_answer_gt_and_eval_first_split(monkeypatch, tmp_path: Path) -> None:
     dataset_dict = _build_mmsu_dataset(tmp_path)
     monkeypatch.setattr("tasks.speech_qa.dataset.load_dataset", lambda *args, **kwargs: dataset_dict)
+    monkeypatch.setattr("tasks.speech_qa.dataset.add_duration_to_dataset", _add_constant_duration)
 
     train_ds, val_ds, test_ds, answers_map = load_speech_qa_dataset(
         dataset_name="ddwang2000/MMSU",
@@ -65,6 +76,7 @@ def test_mmsu_loader_uses_answer_gt_and_eval_first_split(monkeypatch, tmp_path: 
 def test_mmsu_loader_injects_choice_context_when_enabled(monkeypatch, tmp_path: Path) -> None:
     dataset_dict = _build_mmsu_dataset(tmp_path)
     monkeypatch.setattr("tasks.speech_qa.dataset.load_dataset", lambda *args, **kwargs: dataset_dict)
+    monkeypatch.setattr("tasks.speech_qa.dataset.add_duration_to_dataset", _add_constant_duration)
 
     _, _, test_ds, _ = load_speech_qa_dataset(
         dataset_name="ddwang2000/MMSU",
@@ -116,6 +128,7 @@ def test_mmsu_loader_requires_task_name_for_subtask_analysis(monkeypatch, tmp_pa
         "tasks.speech_qa.dataset.load_dataset",
         lambda *args, **kwargs: DatasetDict({"train": train_no_subtask}),
     )
+    monkeypatch.setattr("tasks.speech_qa.dataset.add_duration_to_dataset", _add_constant_duration)
 
     with pytest.raises(ValueError) as exc_info:
         load_speech_qa_dataset(

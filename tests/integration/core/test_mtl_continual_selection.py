@@ -14,7 +14,8 @@ class _DummySetup:
 
 
 def test_added_task_metric_selection_mode(monkeypatch, tmp_path: Path) -> None:
-    def _fake_run_evaluation(model, setup, batch_size, generation_kwargs, output_dir, processor):  # noqa: ANN001
+    def _fake_run_evaluation(model, setup, batch_size, generation_kwargs, output_dir, processor, **kwargs):  # noqa: ANN001
+        del kwargs
         task = generation_kwargs["__task"]
         if task == "asr":
             return {"wer": 0.2}

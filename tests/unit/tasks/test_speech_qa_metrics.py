@@ -11,8 +11,11 @@ from tasks.speech_qa.metrics import compute_speech_qa_metrics
 class _DummyTokenizer:
     def __init__(self, token_map: dict[int, str]):
         self._token_map = token_map
+        self.pad_token_id = 0
 
     def decode(self, token_ids, skip_special_tokens: bool = True):
+        if isinstance(token_ids, (int, np.integer)):
+            token_ids = [token_ids]
         return "".join(self._token_map.get(int(token_id), "") for token_id in token_ids)
 
 
@@ -78,7 +81,7 @@ def test_speech_qa_metrics_writes_audit_dump(monkeypatch, tmp_path: Path) -> Non
     processor = _DummyProcessor(token_map)
     monkeypatch.setattr("tasks.speech_qa.metrics._SQUAD_METRIC", _FakeSquadMetric())
 
-    preds = np.array([[1, 2], [3]])
+    preds = np.array([[1, 2], [3, 0]])
     labels = np.array([[4, -100], [5, -100]])
     dump_path = tmp_path / "audit.jsonl"
 

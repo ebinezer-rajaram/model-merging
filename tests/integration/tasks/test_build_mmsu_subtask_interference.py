@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load_script_module():
-    script_path = Path(__file__).resolve().parents[1] / "analysis" / "scripts" / "build_mmsu_subtask_interference.py"
+    script_path = Path(__file__).resolve().parents[3] / "analysis" / "scripts" / "build_mmsu_subtask_interference.py"
     spec = importlib.util.spec_from_file_location("build_mmsu_subtask_interference", script_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("Failed to load build_mmsu_subtask_interference module")
@@ -25,10 +27,10 @@ def test_build_delta_table_computes_variant_deltas() -> None:
     )
 
     assert table["accent"]["base_accuracy"] == 0.6
-    assert table["accent"]["adapter_a"] == 0.1
-    assert table["accent"]["adapter_b"] == -0.05
-    assert table["age"]["adapter_a"] == -0.1
-    assert table["age"]["adapter_b"] == 0.15
+    assert table["accent"]["adapter_a"] == pytest.approx(0.1)
+    assert table["accent"]["adapter_b"] == pytest.approx(-0.05)
+    assert table["age"]["adapter_a"] == pytest.approx(-0.1)
+    assert table["age"]["adapter_b"] == pytest.approx(0.15)
 
 
 def test_rank_sensitive_subtasks_orders_by_impact_then_variance() -> None:
