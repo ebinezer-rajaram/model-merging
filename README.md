@@ -1,273 +1,166 @@
-# Speech Merging Research Codebase
+# Speech Adapter Merging
 
-This repository is a research framework for training task-specific LoRA adapters on speech tasks, evaluating cross-task behavior, and merging adapters with multiple strategies. The main goal is to study task overfitting and whether adapter merging can recover stronger multi-task generalization in speech-language models.
+This repository contains the research code for a thesis project on LoRA adapter composition for speech-language models. It trains task-specific adapters for Qwen2.5-Omni-3B, evaluates their in-task and cross-task behavior, and studies whether independently trained adapters can be combined to recover useful multi-task performance without full retraining.
 
-## Table of Contents
+## Research Question
 
-- [Research Context and Objectives](#research-context-and-objectives)
-- [Repository Overview](#repository-overview)
-- [Setup](#setup)
-- [Model Prerequisite](#model-prerequisite)
-- [Quickstart](#quickstart)
-- [Core CLI Workflows](#core-cli-workflows)
-- [Supported Tasks](#supported-tasks)
-- [Merge Config Usage](#merge-config-usage)
-- [Outputs and Artifact Locations](#outputs-and-artifact-locations)
-- [Metrics Interpretation](#metrics-interpretation)
-- [Reproducibility Checklist](#reproducibility-checklist)
+Single-task LoRA adapters are efficient to train, but they can overfit to narrow task formats. In speech-language systems, that problem is especially visible because tasks vary widely: ASR and speech translation are generation tasks, while intent, language ID, speaker, emotion, and vocal sound tasks are classification-style tasks.
 
-## Research Context and Objectives
+The project asks:
 
-Modern speech-language models can be adapted effectively for individual tasks using LoRA, but those task-specific adapters often encode narrow task priors. In practice, this leads to strong in-domain gains with weak cross-task transfer, especially when tasks have different supervision structure (for example, sequence generation for ASR/ST vs. classification for intent/emotion/langid). This repository is built to study that gap directly.
+> Can independently trained speech adapters be combined after training to improve multi-task generalization while avoiding the cost and sensitivity of full joint multi-task training?
 
-The central research question is whether merging independently trained speech adapters can recover broader capability without full multitask retraining. Instead of jointly training one large model on all tasks, we train each task adapter independently and then combine adapters in parameter space. This setup makes it possible to test whether useful task signals are complementary, conflicting, or redundant.
+The codebase supports experiments that compare:
 
-### Why this is important
+- the base Qwen2.5-Omni-3B model,
+- single-task LoRA adapters,
+- joint multi-task adapters,
+- merged adapter variants,
+- continual updates that add new task capability to existing adapter sets.
 
-1. Full multitask training is expensive and sensitive to data mixing strategies.
-2. Single-task adapters are efficient but can overfit to task-specific patterns.
-3. If merge-time composition works reliably, we gain a practical path to modular capability building: train once per task, combine later based on deployment needs.
+## What The Code Does
 
-### Core objectives
+The main workflow is:
 
-1. Quantify task overfitting after single-task adapter training.
-2. Measure cross-task transfer for both unmerged and merged adapters.
-3. Compare merge strategies under consistent evaluation conditions.
-4. Characterize interference vs. synergy across tasks using unified metrics.
-5. Identify which merge methods and coefficient policies are robust across heterogeneous speech tasks.
+1. Train one LoRA adapter per speech task.
+2. Evaluate adapters on their own task and, where useful, across other tasks.
+3. Run joint multi-task training as a comparison baseline.
+4. Search merge coefficients and evaluate merged adapters.
+5. Run continual merge/evaluation experiments for adding tasks after an initial adapter set.
+6. Save metrics, summaries, and run artifacts for later analysis.
 
-### Experimental framing in this codebase
-
-The repository supports a consistent experimental loop:
-
-1. Fine-tune separate adapters per task.
-2. Evaluate per-task and cross-task performance for each adapter.
-3. Merge adapters with a selected method and configuration.
-4. Evaluate merged adapters on one or more tasks.
-5. Compare outcomes using primary task metrics and interference-oriented summaries.
-
-This structure is intended to separate training effects from merge effects, so merge quality can be analyzed as a first-class experimental variable rather than as a side effect of multitask training.
-
-### What this repository aims to contribute
-
-1. A reproducible workflow for adapter-level speech merging experiments.
-2. A unified CLI (`main.py`) so training, evaluation, merging, and sweep experiments share one interface.
-3. A practical benchmark harness across multiple speech tasks with different output formats.
-4. A modular merging layer where methods, optimizer-backed coefficient learning, and sweep-based search can be compared under matched conditions.
-
-In short, the project is not only about obtaining one high-performing merged adapter, but about understanding when and why merging helps, when it hurts, and how that behavior changes across speech task families.
-
-## Repository Overview
-
-- `main.py`: canonical CLI surface for all supported workflows.
-- `configs/`: task configs (`asr.yaml`, `emotion.yaml`, etc.) and merge configs.
-- `core/`: shared training and evaluation infrastructure.
-- `tasks/`: task-specific dataset loading, metrics, and config logic.
-- `merging/`: merge methods, optimizer-backed merging, sweep/evaluation utilities.
-- `artifacts/`: saved model/adapters and related experiment outputs.
-- `runs/`: experiment logs and run bundles.
+The canonical entry point is `main.py`.
 
 ## Setup
 
-Minimal baseline setup:
+Install dependencies:
 
 ```bash
-cd speech_merging
 python3 -m pip install -r requirements.txt
 ```
 
-## Model Prerequisite
-
-Download **Qwen2.5-Omni-3B** and place it at:
+The default configs expect the base model at:
 
 ```text
 data/models/Qwen2.5-Omni-3B
 ```
 
-Several task configs use this path by default (for example, `configs/asr.yaml`).
+Several datasets are loaded from Hugging Face. Some configs also expect local data under `data/datasets/`, including MELD, VocalSound, and optional Spoken-SQuAD compatibility data.
 
 ## Quickstart
 
-Train one task adapter, evaluate it, then run one merge config:
+Train and evaluate a single-task adapter:
 
 ```bash
-# Train ASR adapter
 python3 main.py train --task asr --config asr.yaml
-
-# Evaluate on validation split
 python3 main.py evaluate --task asr --config asr.yaml --split validation
-
-# Run merge from config
-python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
-
-# Train VocalSound adapter
-python3 main.py train --task vocalsound --config vocalsound.yaml
 ```
 
-## Core CLI Workflows
-
-`main.py` supports these commands:
-
-- `train`
-- `evaluate`
-- `merge`
-- `evaluate-merged`
-- `merge-sweep`
-
-### 1) Train
+Evaluate a trained adapter:
 
 ```bash
-# Default task/config behavior
-python3 main.py train
-
-# Explicit task + config
-python3 main.py train --task emotion --config emotion.yaml
+python3 main.py evaluate \
+  --task intent \
+  --config intent.yaml \
+  --adapter artifacts/intent/adapters/qwen2_5_omni_lora_intent/best \
+  --split test
 ```
 
-### 2) Evaluate
+Run joint multi-task training:
 
 ```bash
-# Evaluate base model on a task split
-python3 main.py evaluate --task intent --config intent.yaml --split validation
-
-# Evaluate a specific adapter path
-python3 main.py evaluate --task intent --config intent.yaml --adapter artifacts/intent/<adapter_dir> --split test
+python3 main.py mtl --config configs/mtl/joint/mtl_intent_kws_langid_asr_emotion_vocalsound.yaml
 ```
 
-### 3) Merge
-
-Config-driven merge:
+Run a merge sweep:
 
 ```bash
-python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
+python3 main.py merge-sweep \
+  --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
 ```
 
-Direct argument merge:
+Evaluate a merged adapter:
 
 ```bash
-python3 main.py merge --adapters asr emotion --method weighted --lambda 0.5 --evaluate --eval-split test
+python3 main.py evaluate-merged \
+  --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml \
+  --eval-tasks emotion intent kws langid speaker_ver asr vocalsound \
+  --split test
 ```
 
-### 4) Evaluate Merged Adapter
+Run a continual merge experiment:
 
 ```bash
-# Evaluate by explicit merged adapter path
-python3 main.py evaluate-merged --adapter-path artifacts/merged/<run_dir> --split test
-
-# Or resolve by method/tasks/run-id
-python3 main.py evaluate-merged --method weighted --tasks asr emotion --run-id latest --split test
+python3 main.py continual-merge \
+  --x-source artifacts/continual/<existing_artifact> \
+  --y-source asr \
+  --alpha 1.0 \
+  --lambda 0.75
 ```
 
-### 5) Merge Sweep
-
-Config-driven sweep:
+Evaluate a continual artifact:
 
 ```bash
-python3 main.py merge-sweep --config configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
-```
-
-Override-driven sweep:
-
-```bash
-python3 main.py merge-sweep --adapters asr emotion --method weighted --search-type grid --grid lambda=0.2,0.5,0.8 --split validation
+python3 main.py evaluate-continual \
+  --artifact-path artifacts/continual/<artifact_dir> \
+  --eval-tasks emotion intent kws langid speaker_ver asr \
+  --split test
 ```
 
 ## Supported Tasks
 
-| Task key | Config file | Default dataset | Notes |
+| Task key | Config | Default data source | Primary purpose |
 | --- | --- | --- | --- |
-| `asr` | `configs/asr.yaml` | `librispeech_asr` (`clean`) | ASR with duration filtering and configurable train/val/test hours. |
-| `emotion` | `configs/emotion.yaml` | `AbstractTTS/IEMOCAP` | Emotion classification with configurable split behavior. |
-| `intent` | `configs/intent.yaml` | `slurp` | Intent classification with optional prompt metadata controls. |
-| `kws` | `configs/kws.yaml` | `speech_commands` | Keyword spotting with sampling and filtering controls. |
-| `langid` | `configs/langid.yaml` | `google/fleurs` | Language ID across configurable language sets. |
-| `speaker_id` | `configs/speaker_id.yaml` | `speechcolab/voxceleb1` | Speaker identification with subset controls for scale. |
-| `speaker_ver` | `configs/speaker_ver.yaml` | `speechcolab/voxceleb1` | Speaker verification with positive/negative pair controls. |
-| `speech_qa` | `configs/speech_qa.yaml` | `ddwang2000/MMSU` | MMSU-first Speech-QA setup for OOD evaluation, with optional local Spoken-SQuAD compatibility mode. |
-| `st` | `configs/st.yaml` | `fixie-ai/covost2` | Speech translation with configurable language pair/splits. |
-| `vocalsound` | `configs/vocalsound.yaml` | local VocalSound bundle | Human vocal sound classification from local manifest + WAV files. |
+| `asr` | `configs/asr.yaml` | `librispeech_asr` | Automatic speech recognition |
+| `emotion` | `configs/emotion.yaml` | local MELD data | Emotion classification |
+| `intent` | `configs/intent.yaml` | `marcel-gohsen/slurp` | Spoken intent classification |
+| `kws` | `configs/kws.yaml` | `google/speech_commands` | Keyword spotting |
+| `langid` | `configs/langid.yaml` | `google/fleurs` | Spoken language identification |
+| `speaker_id` | `configs/speaker_id.yaml` | `acul3/voxceleb2` | Speaker identification |
+| `speaker_ver` | `configs/speaker_ver.yaml` | `acul3/voxceleb2` | Speaker verification |
+| `speech_qa` | `configs/speech_qa.yaml` | `ddwang2000/MMSU` | Speech question answering |
+| `st` | `configs/st.yaml` | `fixie-ai/covost2` | Speech translation |
+| `vocalsound` | `configs/vocalsound.yaml` | local VocalSound data | Vocal sound classification |
 
-### VocalSound Local Setup
+## Repository Structure
 
-Use the official VocalSound local bundle under:
-
-- `data/datasets/vocalsound/vocalsound_train_data.json`
-- `data/datasets/vocalsound/vocalsound_valid_data.json`
-- `data/datasets/vocalsound/vocalsound_eval_data.json`
-- `data/datasets/vocalsound/class_labels_indices_vs.csv`
-
-Optional compatibility files are also supported:
-
-- `data/datasets/vocalsound/datafiles/tr.json`
-- `data/datasets/vocalsound/datafiles/val.json`
-- `data/datasets/vocalsound/datafiles/te.json`
-
-If audio paths in manifests are relative, they are resolved against `dataset.audio_root` (if set) and then the manifest directory.
-
-### Speech-QA (MMSU-First) Notes
-
-- Default `speech_qa` config evaluates on `ddwang2000/MMSU` in eval-first mode (`test_split: train`).
-- Use `dataset.max_test_samples` (or `dataset.max_total_samples`) to run subset-based OOD evaluation.
-- Keep `dataset.include_choices_in_prompt: false` for question-only prompts, or set it to `true` to include A-D options.
-- MMSU scoring uses free-form generation but primary evaluation is option-letter accuracy (`A/B/C/D`).
-- Speech-QA keeps SQuAD EM/F1 as secondary diagnostics for backward comparison.
-
-To switch back to local Spoken-SQuAD mode:
-
-1. Set `dataset.dataset_name: local_spoken_squad`.
-2. Set `dataset.validation_split: null`, `dataset.test_split: test` (or custom split policy).
-3. Keep local data fields (`data_dir`, `train_json`, `test_json`, `audio_root`) configured.
-
-### Local Spoken-SQuAD Setup
-
-```bash
-git clone https://github.com/Chia-Hsuan-Lee/Spoken-SQuAD.git data/datasets/Spoken-SQuAD
-bash scripts/prepare_spoken_squad_local.sh data/datasets/Spoken-SQuAD
+```text
+main.py                 Unified CLI entry point
+configs/                Task, merge, joint MTL, and continual experiment configs
+core/                   Shared config, data, training, evaluation, and output utilities
+tasks/                  Task-specific dataset loaders, collators, configs, and metrics
+merging/                Adapter sources, merge methods, optimizers, sweeps, and continual logic
+scripts/                Experiment launchers and result-collection helpers
+tests/                  Unit and integration tests for datasets, metrics, merging, and continual flows
+data/                   Local models and datasets (generated/local, not tracked)
+artifacts/              Adapter checkpoints, metrics, summaries, and merge outputs
+runs/                   Run bundles and experiment outputs
+logs/                   Runtime, TensorBoard, and wandb logs
 ```
 
-Expected extracted layout:
+## Outputs And Results
 
-- `data/datasets/Spoken-SQuAD/wav/train`
-- `data/datasets/Spoken-SQuAD/wav/test`
+Experiment outputs are generated locally and are generally ignored by git. Common locations are:
 
-## Merge Config Usage
+- `artifacts/<task>/adapters/` for trained task adapters,
+- `artifacts/<task>/metrics/` for task-level evaluations,
+- `artifacts/merged/` for merged-adapter evaluations,
+- `artifacts/mtl/` for joint multi-task runs,
+- `artifacts/continual/` and `artifacts/continual_suite/` for continual experiments,
+- `runs/` and `logs/` for run bundles and logging output.
 
-Current valid merge config files in this repo:
+Some local summary CSVs may be present under `artifacts/`, such as comparisons between base-model, single-task, and merged-adapter metrics. Treat these as generated experiment outputs tied to the commands, configs, and checkpoints used to create them.
 
-- `configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml`
-- `configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml`
-- `configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
-- `configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml`
+## Reproducibility Notes
 
-Use them directly with `merge` and `merge-sweep`:
+For each experiment, record:
 
-```bash
-python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr.yaml
-python3 main.py merge-sweep --config configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr.yaml
-python3 main.py merge --config configs/merge/supermerge/merge_supermerge_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
-python3 main.py merge-sweep --config configs/merge/uniform_scalar_delta/merge_uniform_scalar_delta_emotion_intent_kws_langid_speaker_ver_asr_vocalsound.yaml
-```
+- the exact command,
+- the config file path,
+- the model checkpoint path,
+- the adapter or artifact path,
+- the evaluation split,
+- the random seed in the config,
+- the output directory under `artifacts/`, `runs/`, or `logs/`.
 
-For method internals and full merge framework notes, see `merging/merging.md`.
-
-## Outputs and Artifact Locations
-
-- General outputs are written under `artifacts/`.
-- Run logs and run-level bundles are written under `runs/`.
-
-`artifacts/` and `runs/` are not tracked in git in this repository. Treat them as local experiment outputs.
-
-## Metrics Interpretation
-
-- Each task has task-specific primary metrics (for example, WER for ASR, accuracy/F1-style metrics for classification tasks).
-- For MMSU Speech-QA, primary metric is `accuracy` over option letters; EM/F1 are diagnostic only.
-- For merged evaluations, `interference_delta` captures transfer quality relative to reference baselines; higher is generally better.
-- Compare metrics at fixed split (`train`, `validation`, or `test`) to avoid invalid conclusions.
-
-## Reproducibility Checklist
-
-- Record the exact command you ran.
-- Record the config file path used.
-- Record the seed value(s) in config.
-- Record the evaluation split.
-- Record the output path(s) under `artifacts/` and/or `runs/`.
+For final comparisons, use matched tasks, splits, checkpoints, and metric definitions. ASR uses WER-oriented metrics, classification tasks report accuracy/F1-style metrics, and Speech-QA uses option-letter accuracy for MMSU-style evaluation.
