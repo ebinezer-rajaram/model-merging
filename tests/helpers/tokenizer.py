@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from numbers import Integral
 from typing import Iterable
 
 
@@ -11,7 +12,7 @@ class DummyTokenizer:
 
     def decode(self, token_ids, skip_special_tokens: bool = True) -> str:
         del skip_special_tokens
-        if isinstance(token_ids, int):
+        if isinstance(token_ids, Integral):
             token_ids = [token_ids]
         return "".join(self._token_map.get(int(token_id), "") for token_id in token_ids)
 
@@ -20,7 +21,7 @@ class DummyTokenizer:
 
     def convert_ids_to_tokens(self, token_ids, skip_special_tokens: bool = True):
         del skip_special_tokens
-        if isinstance(token_ids, int):
+        if isinstance(token_ids, Integral):
             token_ids = [token_ids]
         return [self._token_map.get(int(token_id), "") for token_id in token_ids]
 

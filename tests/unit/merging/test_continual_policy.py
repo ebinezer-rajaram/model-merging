@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from merging.continual.policy import ContinualMergePolicy
 
 
@@ -13,14 +15,8 @@ def test_policy_coefficients() -> None:
 
 
 def test_policy_validation_errors() -> None:
-    try:
+    with pytest.raises(ValueError):
         ContinualMergePolicy(alpha=-1.0, lambda_weight=0.5).validate()
-        raise AssertionError("Expected ValueError for negative alpha")
-    except ValueError:
-        pass
 
-    try:
+    with pytest.raises(ValueError):
         ContinualMergePolicy(alpha=1.0, lambda_weight=1.5).validate()
-        raise AssertionError("Expected ValueError for lambda out of range")
-    except ValueError:
-        pass
