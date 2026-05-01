@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import pytest
 from datasets import Dataset
 
@@ -19,6 +17,7 @@ from merging.config.unified import load_merge_config
 from merging.continual.suite import VALID_TASKS
 from merging.evaluation.interference import TASK_METRICS
 from merging.runtime.utils import TASK_REGISTRY as MERGE_TASK_REGISTRY
+from tests.helpers.core import CoreDummyProcessor
 
 
 ALL_TASKS = set(TASK_REGISTRY)
@@ -100,24 +99,6 @@ def test_merge_presets_cover_vocalsound_when_expected() -> None:
     assert scalar_cfg.eval_tasks is not None
     assert "vocalsound" in scalar_cfg.eval_tasks
 
-
-@dataclass
-class _DummyTokenizer:
-    padding_side: str = "right"
-    pad_token_id: int = 0
-
-
-@dataclass
-class _DummyFeatureExtractor:
-    sampling_rate: int = 16000
-
-
-@dataclass
-class _DummyProcessor:
-    tokenizer: _DummyTokenizer = field(default_factory=_DummyTokenizer)
-    feature_extractor: _DummyFeatureExtractor = field(default_factory=_DummyFeatureExtractor)
-
-
 def _audio() -> dict:
     return {"array": [0.0, 0.0], "sampling_rate": 16000}
 
@@ -166,7 +147,7 @@ def _bundle_for_task(task_name: str) -> tuple:
 def test_prepare_task_for_evaluation_builds_setup_for_every_registered_task(task_name: str) -> None:
     setup = prepare_task_for_evaluation(
         task_name,
-        _DummyProcessor(),
+        CoreDummyProcessor(),
         split="validation",
         config={"dataset": {"cache_splits": False}},
         bundle=_bundle_for_task(task_name),

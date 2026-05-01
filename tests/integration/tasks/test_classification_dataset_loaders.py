@@ -303,10 +303,7 @@ def _build_mmsu_dataset(tmp_path: Path) -> DatasetDict:
 def _add_constant_duration(dataset: DatasetDict, **kwargs) -> DatasetDict:
     del kwargs
     return DatasetDict(
-        {
-            split: subset.add_column("duration", [0.08] * len(subset))
-            for split, subset in dataset.items()
-        }
+        {split: subset.add_column("duration", [0.08] * len(subset)) for split, subset in dataset.items()}
     )
 
 
@@ -349,8 +346,7 @@ def test_speech_qa_mmsu_loader_injects_choice_context_when_enabled(monkeypatch, 
     )
 
     assert test_ds is not None
-    expected = "A. Paris\nB. London\nC. Berlin\nD. Madrid"
-    assert test_ds[0]["context"] == expected
+    assert test_ds[0]["context"] == "A. Paris\nB. London\nC. Berlin\nD. Madrid"
 
 
 def test_speech_qa_mmsu_loader_requires_task_name_for_subtask_analysis(monkeypatch, tmp_path: Path) -> None:
@@ -467,9 +463,7 @@ def test_speech_qa_local_spoken_squad_loader_uses_noisy_test_variant(tmp_path: P
     assert test_ds[0]["id"] == "test_q_wer44"
 
 
-def test_speech_qa_local_spoken_squad_loader_fails_when_missing_audio_rate_exceeds_threshold(
-    tmp_path: Path,
-) -> None:
+def test_speech_qa_local_spoken_squad_loader_fails_when_missing_audio_rate_exceeds_threshold(tmp_path: Path) -> None:
     data_dir = tmp_path / "Spoken-SQuAD"
     (data_dir / "wav" / "train").mkdir(parents=True, exist_ok=True)
     (data_dir / "wav" / "test").mkdir(parents=True, exist_ok=True)
@@ -482,14 +476,12 @@ def test_speech_qa_local_spoken_squad_loader_fails_when_missing_audio_rate_excee
                 "paragraphs": [
                     {
                         "context": "alpha beta gamma",
-                        "qas": [
-                            {"id": "q1", "question": "q1?", "answers": [{"text": "beta", "answer_start": 6}]},
-                        ],
+                        "qas": [{"id": "q1", "question": "q1?", "answers": [{"text": "beta", "answer_start": 6}]}],
                     },
                     {
                         "context": "delta epsilon zeta",
                         "qas": [
-                            {"id": "q2", "question": "q2?", "answers": [{"text": "epsilon", "answer_start": 6}]},
+                            {"id": "q2", "question": "q2?", "answers": [{"text": "epsilon", "answer_start": 6}]}
                         ],
                     },
                 ],
@@ -498,7 +490,6 @@ def test_speech_qa_local_spoken_squad_loader_fails_when_missing_audio_rate_excee
     }
     (data_dir / "spoken_train-v1.1.json").write_text(json.dumps(payload))
     (data_dir / "spoken_test-v1.1.json").write_text(json.dumps(payload))
-
     write_silent_wav(data_dir / "wav" / "train" / "1_1_1.wav")
     write_silent_wav(data_dir / "wav" / "test" / "1_1_1.wav")
 
@@ -521,22 +512,10 @@ def test_speech_qa_local_spoken_squad_loader_can_fallback_to_train_only_source(t
     (data_dir / "wav" / "train").mkdir(parents=True, exist_ok=True)
     (data_dir / "wav" / "test").mkdir(parents=True, exist_ok=True)
 
-    qas = [
-        {
-            "id": f"q{i}",
-            "question": f"question {i}?",
-            "answers": [{"text": "beta", "answer_start": 6}],
-        }
-        for i in range(10)
-    ]
+    qas = [{"id": f"q{i}", "question": f"question {i}?", "answers": [{"text": "beta", "answer_start": 6}]} for i in range(10)]
     payload = {
         "version": "1.1",
-        "data": [
-            {
-                "title": "topic",
-                "paragraphs": [{"context": "alpha beta gamma", "qas": qas}],
-            }
-        ],
+        "data": [{"title": "topic", "paragraphs": [{"context": "alpha beta gamma", "qas": qas}]}],
     }
     (data_dir / "spoken_train-v1.1.json").write_text(json.dumps(payload))
     (data_dir / "spoken_test-v1.1.json").write_text(json.dumps(payload))
@@ -559,8 +538,7 @@ def test_speech_qa_local_spoken_squad_loader_can_fallback_to_train_only_source(t
     assert val_ds is not None
     assert test_ds is not None
     assert len(train_ds) + len(val_ds) + len(test_ds) == 10
-    metadata = answers_map.get("_metadata", {})
-    assert metadata.get("split_origin") == "train_only_fallback"
+    assert answers_map.get("_metadata", {}).get("split_origin") == "train_only_fallback"
 
 
 def test_speech_qa_local_spoken_squad_loader_supports_max_total_samples(tmp_path: Path) -> None:
@@ -568,22 +546,10 @@ def test_speech_qa_local_spoken_squad_loader_supports_max_total_samples(tmp_path
     (data_dir / "wav" / "train").mkdir(parents=True, exist_ok=True)
     (data_dir / "wav" / "test").mkdir(parents=True, exist_ok=True)
 
-    qas = [
-        {
-            "id": f"q{i}",
-            "question": f"question {i}?",
-            "answers": [{"text": "beta", "answer_start": 6}],
-        }
-        for i in range(20)
-    ]
+    qas = [{"id": f"q{i}", "question": f"question {i}?", "answers": [{"text": "beta", "answer_start": 6}]} for i in range(20)]
     payload = {
         "version": "1.1",
-        "data": [
-            {
-                "title": "topic",
-                "paragraphs": [{"context": "alpha beta gamma", "qas": qas}],
-            }
-        ],
+        "data": [{"title": "topic", "paragraphs": [{"context": "alpha beta gamma", "qas": qas}]}],
     }
     (data_dir / "spoken_train-v1.1.json").write_text(json.dumps(payload))
     (data_dir / "spoken_test-v1.1.json").write_text(json.dumps(payload))
@@ -658,8 +624,7 @@ def test_speech_qa_local_spoken_squad_loader_supports_audio_concatenation_policy
     assert train_ds[0]["duration"] >= 0.09
     metadata = answers_map.get("_metadata", {})
     assert metadata.get("audio_merge_policy") == "concatenate_sentences"
-    train_metadata = metadata.get("train", {})
-    assert train_metadata.get("multi_sentence_prefixes") == 1
+    assert metadata.get("train", {}).get("multi_sentence_prefixes") == 1
 
 
 def _write_label_map(path: Path) -> None:

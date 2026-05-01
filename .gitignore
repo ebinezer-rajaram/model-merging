@@ -11,6 +11,8 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.coverage
+.coverage.*
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/

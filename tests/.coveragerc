@@ -21,18 +21,11 @@ omit =
     # checkpoints, or long-running Trainer workflows. Small pure helpers from
     # these areas should be tested after extraction into focused modules.
     */core/evaluation/eval_utils.py
-    */core/evaluation/plotting.py
     */core/models/models.py
-    */core/tasks/collator.py
-    */core/tasks/dataset.py
     */core/training/train_task.py
     */core/training/train_multitask.py
     */core/training/trainer.py
     */core/training/training_loop.py
-    */core/training/run_manager.py
-    */core/training/constrained_decoding.py
-    */core/training/multitask_sampler.py
-    */core/training/multitask_eval.py
     */merging/continual/evaluate.py
     */merging/continual/supermerge_optimizer.py
     */merging/evaluation/evaluate.py
@@ -47,15 +40,11 @@ omit =
     # Runtime discovery and adapter save/load utilities depend on repository
     # artifact layouts and external checkpoint conventions.
     */merging/runtime/utils.py
-    */merging/runtime/logging.py
-
-    # These are filesystem/model adapter orchestration layers; the pure merge
-    # math, runner behavior, registry behavior, and task-vector IO are covered.
-    */merging/engine/builtin_methods.py
-    */merging/methods/task_vector.py
 
     # MELD requires a local external bundle; the shared classification loader
-    # behavior is covered through patched/local emotion dataset tests.
+    # behavior is covered through patched/local emotion dataset tests. The
+    # speaker-verification loader is a large VoxCeleb orchestration path; pure
+    # pair generation and cached-pair reuse are covered offline.
     */tasks/emotion/meld_loader.py
     */tasks/speaker_ver/dataset.py
 
