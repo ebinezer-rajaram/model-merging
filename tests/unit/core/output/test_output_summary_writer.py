@@ -22,13 +22,11 @@ def test_summary_writer_cleans_orders_and_extracts_delta_info() -> None:
 
 
 def test_write_experiment_summary_annotates_results(monkeypatch, tmp_path: Path) -> None:
-    analysis_mod = types.ModuleType("analysis")
-    collect_mod = types.ModuleType("analysis.collect")
-    utils_mod = types.ModuleType("analysis.collect.utils")
+    results_mod = types.ModuleType("core.results")
+    utils_mod = types.ModuleType("core.results.utils")
     utils_mod.derive_eval_context = lambda task, source_tasks, eval_tag: f"{task}:{eval_tag or 'none'}"
-    monkeypatch.setitem(sys.modules, "analysis", analysis_mod)
-    monkeypatch.setitem(sys.modules, "analysis.collect", collect_mod)
-    monkeypatch.setitem(sys.modules, "analysis.collect.utils", utils_mod)
+    monkeypatch.setitem(sys.modules, "core.results", results_mod)
+    monkeypatch.setitem(sys.modules, "core.results.utils", utils_mod)
 
     output = tmp_path / "experiment_summary.json"
     summary_writer.write_experiment_summary(

@@ -12,7 +12,7 @@ Usage:
         [--dry-run] \\
         [--overwrite]
 
-The script mirrors the parsing logic of analysis/collect/{single_task,mtl,merge}_collector.py
+The script mirrors the parsing logic of core/results/{single_task,mtl,merge}_collector.py
 so that the summaries are consistent with what the unified parquet collector sees.
 """
 
@@ -534,7 +534,7 @@ def _parse_mtl_config(
     sampling_cfg = training_cfg.get("sampling", {}) or {}
 
     try:
-        from analysis.collect.schema import TrainingHyperparameters
+        from core.results.schema import TrainingHyperparameters
         hp = TrainingHyperparameters(
             learning_rate=_to_float(training_cfg.get("learning_rate")),
             lora_r=_to_int(lora_cfg.get("r")),

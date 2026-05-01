@@ -189,7 +189,7 @@ def _annotate_results(
     experiment_type: str,
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Strip eval_ prefix, annotate primary_metric and eval_context per split."""
-    from analysis.collect.utils import derive_eval_context  # type: ignore
+    from core.results.utils import derive_eval_context  # type: ignore
 
     annotated: Dict[str, Dict[str, Dict[str, Any]]] = {}
 

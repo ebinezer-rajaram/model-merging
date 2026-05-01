@@ -138,7 +138,7 @@ def main(argv=None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Build collectors.
-    from analysis.collect import (
+    from core.results import (
         MergeCollector,
         MTLCollector,
         ResultsAggregator,

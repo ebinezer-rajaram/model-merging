@@ -3,6 +3,8 @@
 Thumbs.db
 .idea/
 .vscode/
+.claude/
+.codex
 *.swp
 
 # Python/runtime caches
@@ -57,6 +59,10 @@ data/**
 
 datasets/
 results/
+!core/results/
+!core/results/**
+core/results/__pycache__/
+core/results/**/*.pyc
 outputs/
 plots/
 artifacts_old/
@@ -114,8 +120,11 @@ temp/
 *.pid
 *.sock
 
-analysis/
+analysis/*
+!analysis/
 !scripts/analysis/
 !scripts/analysis/**
+scripts/analysis/__pycache__/
+scripts/analysis/**/*.pyc
 !scripts/plots/
 !scripts/plots/**
