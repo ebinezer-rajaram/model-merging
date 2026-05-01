@@ -130,7 +130,16 @@ configs/                Task, merge, joint MTL, and continual experiment configs
 core/                   Shared config, data, training, evaluation, and output utilities
 tasks/                  Task-specific dataset loaders, collators, configs, and metrics
 merging/                Adapter sources, merge methods, optimizers, sweeps, and continual logic
-scripts/                Experiment launchers and result-collection helpers
+scripts/                Grouped experiment, evaluation, analysis, data, and maintenance scripts
+scripts/continual/      Continual-suite runners and summaries
+scripts/eval/           Task/model evaluation launchers
+scripts/merging/        Merge evaluation, comparison, and weighted-merge helpers
+scripts/analysis/       Reusable analysis and report-generation entrypoints
+scripts/plots/          Plot-generation scripts
+scripts/data/           Dataset inspection, preparation, and stats scripts
+scripts/training/       Training launchers and focused training utilities
+scripts/maintenance/    Backfills and migrations
+scripts/archive/        Historical or one-off experiment scripts
 tests/                  Unit and integration tests for datasets, metrics, merging, and continual flows
 data/                   Local models and datasets (generated/local, not tracked)
 artifacts/              Adapter checkpoints, metrics, summaries, and merge outputs

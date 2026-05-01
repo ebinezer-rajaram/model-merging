@@ -83,7 +83,12 @@ def test_summary_script_writes_all_expected_csvs(tmp_path: Path) -> None:
     )
 
     subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "build_continual_suite_summary.py"), "--suite-root", str(suite_root)],
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "continual" / "build_continual_suite_summary.py"),
+            "--suite-root",
+            str(suite_root),
+        ],
         check=True,
     )
 
@@ -140,7 +145,12 @@ def test_summary_script_preserves_continual_supermerge_method_label(tmp_path: Pa
     )
 
     subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "build_continual_suite_summary.py"), "--suite-root", str(suite_root)],
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "continual" / "build_continual_suite_summary.py"),
+            "--suite-root",
+            str(suite_root),
+        ],
         check=True,
     )
 

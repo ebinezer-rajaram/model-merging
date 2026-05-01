@@ -115,3 +115,7 @@ temp/
 *.sock
 
 analysis/
+!scripts/analysis/
+!scripts/analysis/**
+!scripts/plots/
+!scripts/plots/**
