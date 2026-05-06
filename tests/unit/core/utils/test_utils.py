@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import sys
+from io import StringIO
 
 import pytest
 import torch
@@ -36,7 +38,13 @@ def test_seed_helper_and_logger_are_idempotent(tmp_path) -> None:
     assert logger is setup_logger("unit-test-logger-core", tmp_path / "ignored.log")
 
 
-def test_color_formatter_leaves_plain_output_when_not_tty() -> None:
+class _NonTtyStringIO(StringIO):
+    def isatty(self) -> bool:
+        return False
+
+
+def test_color_formatter_leaves_plain_output_when_not_tty(monkeypatch) -> None:
     record = logging.LogRecord("x", logging.INFO, __file__, 1, "message", (), None)
-    handler = setup_logger("unit-test-color-logger").handlers[0]
+    monkeypatch.setattr(sys, "stdout", _NonTtyStringIO())
+    handler = setup_logger("unit-test-color-logger-non-tty").handlers[0]
     assert handler.format(record) == "message"
