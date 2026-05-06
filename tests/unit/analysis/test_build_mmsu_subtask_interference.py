@@ -7,7 +7,7 @@ import pytest
 
 
 def _load_script_module():
-    script_path = Path(__file__).resolve().parents[3] / "analysis" / "scripts" / "build_mmsu_subtask_interference.py"
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "merging" / "build_mmsu_subtask_interference.py"
     spec = importlib.util.spec_from_file_location("build_mmsu_subtask_interference", script_path)
     if spec is None or spec.loader is None:
         raise RuntimeError("Failed to load build_mmsu_subtask_interference module")

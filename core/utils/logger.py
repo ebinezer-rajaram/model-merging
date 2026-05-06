@@ -3,7 +3,7 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 
 class _ColorFormatter(logging.Formatter):
@@ -16,10 +16,15 @@ class _ColorFormatter(logging.Formatter):
     }
     RESET = "\033[0m"
 
+    def __init__(self, *args, stream: Optional[IO[str]] = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.stream = stream
+
     def format(self, record: logging.LogRecord) -> str:
         message = super().format(record)
         color = self.COLORS.get(record.levelno)
-        if color and sys.stderr.isatty():
+        stream = self.stream if self.stream is not None else sys.stderr
+        if color and stream.isatty():
             return f"{color}{message}{self.RESET}"
         return message
 
@@ -33,7 +38,7 @@ def setup_logger(name: str, log_file: Optional[Path] = None) -> logging.Logger:
     logger.setLevel(logging.INFO)
 
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(_ColorFormatter("%(message)s"))
+    stream_handler.setFormatter(_ColorFormatter("%(message)s", stream=sys.stdout))
     logger.addHandler(stream_handler)
 
     if log_file is not None:
