@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from functools import partial
 import hashlib
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 import torch
@@ -24,6 +26,12 @@ from core.evaluation.split_utils import canonical_output_split
 from core.training.trainer import CustomTrainer
 
 DEFAULT_GENERATION_KWARGS: Dict[str, Any] = {"max_new_tokens": 128, "do_sample": False}
+
+
+def _default_eval_output_dir() -> Path:
+    """Return a repo-external scratch directory for eval-only Trainer output."""
+    return Path(tempfile.gettempdir()) / "speech_merging_eval" / f"pid_{os.getpid()}"
+
 
 def compute_eval_subset_tag(eval_subset: Mapping[str, Any]) -> str:
     """Return a stable short tag for evaluation-subset settings.
@@ -726,7 +734,7 @@ def run_evaluation(
         Dictionary of evaluation metrics
     """
     generation_kwargs = {**DEFAULT_GENERATION_KWARGS, **(generation_kwargs or {})}
-    output_dir = ensure_dir(Path(output_dir or "runs/eval"))
+    output_dir = ensure_dir(Path(output_dir) if output_dir is not None else _default_eval_output_dir())
 
     num_workers = max(int(dataloader_num_workers), 0)
     prefetch_factor = (
