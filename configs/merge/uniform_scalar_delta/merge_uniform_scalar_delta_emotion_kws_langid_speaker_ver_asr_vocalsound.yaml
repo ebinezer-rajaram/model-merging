@@ -18,8 +18,11 @@ search:
       max: 1.5
 
 # Phase 1 evaluation scope (used during optimization only).
+# Select the scalar on merged/source tasks only; the held-out task is reported
+# in phase 2. Including the held-out task here can make the analytic
+# scale=0.0 baseline win the sweep.
 split: validation
-eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+eval_tasks: [emotion, kws, langid, speaker_ver, asr, vocalsound]
 
 # Speed-up for optimization runs on validation.
 eval_subset:
