@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 
-_MODULE_PATH = Path(__file__).resolve().parent / "merging" / "continual" / "suite.py"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_MODULE_PATH = _REPO_ROOT / "merging" / "continual" / "suite.py"
 _SPEC = importlib.util.spec_from_file_location("_continual_suite_impl", _MODULE_PATH)
 if _SPEC is None or _SPEC.loader is None:
     raise ImportError(f"Could not load continual suite helpers from {_MODULE_PATH}")

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from continual_suite_lib import (
+from scripts.continual_suite_lib import (
     StageResultRecord,
     compute_stage_tables,
     expand_stage_plans,
