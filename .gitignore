@@ -128,3 +128,9 @@ scripts/analysis/__pycache__/
 scripts/analysis/**/*.pyc
 !scripts/plots/
 !scripts/plots/**
+
+thesis/
+thesis_artifacts/
+
+scripts/plots/__pycache__/
+scripts/plots/**/*.pyc
