@@ -34,6 +34,7 @@ from merging.runtime.utils import PACKAGE_ROOT
 from merging.evaluation.evaluate import evaluate_merged_adapter
 from merging.evaluation.sweep import (
     _atomic_write_json,
+    _combine_method_and_search_params,
     _lambda_policy_mapping,
     _optimizer_mapping,
     _run_post_sweep_eval_for_best,
@@ -560,7 +561,10 @@ def run_bayes_search(config: MergeConfig, search: Dict[str, Any]) -> Dict[str, A
                 )
             else:
                 method_impl = get_merge_method(config.method)
-                effective_params = normalize_params(method_impl, params=params)
+                effective_params = normalize_params(
+                    method_impl,
+                    params=_combine_method_and_search_params(config, params),
+                )
                 if lambda_policy is not None:
                     effective_params["lambda_policy"] = lambda_policy
                 if optimizer is not None:

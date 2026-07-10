@@ -38,6 +38,7 @@ def test_run_sweep_grid_dispatches_evaluation_and_post_eval(tmp_path: Path, monk
     config = MergeConfig(
         adapters=["emotion", "intent"],
         method="weighted",
+        method_params={"drop_rate": 0.9},
         search={"type": "grid", "grid": {"lambda": [0.1, 0.8]}},
         output_dir=tmp_path,
         split="validation",
@@ -69,6 +70,7 @@ def test_run_sweep_grid_dispatches_evaluation_and_post_eval(tmp_path: Path, monk
     assert summary["best_index"] == 1
     assert summary["post_sweep_eval"]["score"] == pytest.approx(0.8)
     assert calls[-1]["split"] == "test"
+    assert all(call["params"]["drop_rate"] == pytest.approx(0.9) for call in calls)
 
 
 def test_cleanup_runs_after_each_task_attempt(monkeypatch: pytest.MonkeyPatch) -> None:

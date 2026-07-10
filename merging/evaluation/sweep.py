@@ -175,6 +175,12 @@ def _optimizer_mapping(spec: Optional[OptimizerSpec | Dict[str, Any]]) -> Option
     return {"type": spec.type, "params": dict(spec.params)}
 
 
+def _combine_method_and_search_params(config: MergeConfig, params: Mapping[str, Any]) -> Dict[str, Any]:
+    combined = dict(config.method_params)
+    combined.update(dict(params))
+    return combined
+
+
 def _run_post_sweep_eval_for_best(
     *,
     config: MergeConfig,
@@ -214,7 +220,7 @@ def _run_post_sweep_eval_for_best(
     )
 
     method_impl = get_merge_method(config.method)
-    effective_params = normalize_params(method_impl, params=best_params)
+    effective_params = normalize_params(method_impl, params=_combine_method_and_search_params(config, best_params))
     if lambda_policy is not None:
         effective_params["lambda_policy"] = lambda_policy
     if optimizer is not None:
@@ -340,7 +346,10 @@ def run_sweep(config: MergeConfig | SweepConfig) -> Dict[str, Any]:
                 )
             else:
                 method_impl = get_merge_method(config.method)
-                effective_params = normalize_params(method_impl, params=params)
+                effective_params = normalize_params(
+                    method_impl,
+                    params=_combine_method_and_search_params(config, params),
+                )
                 if lambda_policy is not None:
                     effective_params["lambda_policy"] = lambda_policy
                 if optimizer is not None:
