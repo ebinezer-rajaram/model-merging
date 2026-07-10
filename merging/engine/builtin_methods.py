@@ -428,7 +428,7 @@ def register_builtin_methods() -> None:
         MergeMethod(
             name="dare",
             required_params=(),
-            params_defaults={"drop_rate": 0.9, "seed": 42},
+            params_defaults={"drop_rate": 0.9, "seed": 42, "lambda": 1.0},
             params_validator=_validate_dare_params,
             min_adapters=2,
             max_adapters=None,

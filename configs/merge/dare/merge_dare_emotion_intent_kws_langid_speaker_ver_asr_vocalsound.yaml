@@ -1,0 +1,9 @@
+adapters: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+method: dare
+merge_mode: common
+method_params:
+  drop_rate: 0.9
+  seed: 42
+split: test
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound, speech_qa]
+save_merged: false

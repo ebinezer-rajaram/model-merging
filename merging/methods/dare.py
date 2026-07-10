@@ -16,7 +16,7 @@ from merging.transforms.registry import apply_transforms
 TensorDict = Dict[str, torch.Tensor]
 
 
-def _validate_dare_params(params: Optional[Dict[str, object]]) -> Tuple[float, int]:
+def _validate_dare_params(params: Optional[Dict[str, object]]) -> Tuple[float, int, float]:
     raw = params or {}
 
     drop_rate_value = raw.get("drop_rate", 0.9)
@@ -32,7 +32,14 @@ def _validate_dare_params(params: Optional[Dict[str, object]]) -> Tuple[float, i
     seed_value = raw.get("seed", 42)
     if not isinstance(seed_value, int) or isinstance(seed_value, bool):
         raise ValueError(f"dare param 'seed' must be an int, got {type(seed_value).__name__}")
-    return drop_rate, int(seed_value)
+
+    lambda_value = raw.get("lambda", 1.0)
+    if not isinstance(lambda_value, (int, float)) or isinstance(lambda_value, bool):
+        raise ValueError(
+            f"dare param 'lambda' must be a float/int scaling factor, got {type(lambda_value).__name__}"
+        )
+    lambda_scale = float(lambda_value)
+    return drop_rate, int(seed_value), lambda_scale
 
 
 def _resolve_keys_to_merge(task_vectors: List[TensorDict], merge_mode: str) -> Tuple[List[str], int]:
@@ -173,15 +180,17 @@ def merge_dare(
         lambda_weight=None,
         params=params,
     )
-    drop_rate, seed = _validate_dare_params(spec.method_params)
+    drop_rate, seed, lambda_scale = _validate_dare_params(spec.method_params)
 
     print(
         f"🧮 dare: extracting task vectors for {len(adapter_paths)} adapters "
-        f"(drop_rate={drop_rate:.4f}, seed={seed})..."
+        f"(drop_rate={drop_rate:.4f}, seed={seed}, lambda={lambda_scale:.4f})..."
     )
     task_vectors = [apply_transforms(extract_task_vector_from_lora(path), spec.transforms) for path in adapter_paths]
     sparse_vectors, sparsify_stats = sparsify_deltas(task_vectors, drop_rate=drop_rate, seed=seed)
     merged_delta, fuse_stats = fuse_deltas_uniform(sparse_vectors, merge_mode=merge_mode)
+    if lambda_scale != 1.0:
+        merged_delta = {key: tensor * lambda_scale for key, tensor in merged_delta.items()}
     merged_nonzero_entries = int(sum((tensor != 0).sum().item() for tensor in merged_delta.values()))
 
     metadata = build_merge_metadata(
@@ -190,7 +199,8 @@ def merge_dare(
         num_adapters=len(adapter_paths),
         source_metadata=source_metadata,
         num_parameters=len(merged_delta),
-        params={"drop_rate": drop_rate, "seed": seed},
+        params={"drop_rate": drop_rate, "seed": seed, "lambda": lambda_scale},
+        lambda_weight=lambda_scale,
         method_params=spec.method_params,
         lambda_policy=spec.method_params.get("lambda_policy"),
         transforms=[{"name": t.name, "params": dict(t.params)} for t in spec.transforms],

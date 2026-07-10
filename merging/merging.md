@@ -380,6 +380,7 @@ python main.py merge-sweep --config <path>
 - `dare` is runnable in task-vector space with deterministic random masking:
   - `method_params.drop_rate` in `[0,1)` (default `0.9`)
   - `method_params.seed` integer seed (default `42`)
+  - `method_params.lambda` final scaling factor (default `1.0`)
   - operation: random drop + rescale by `1/(1-drop_rate)`, then uniform fusion
 - `dare` is **not saveable** (in‑memory only), but works with `evaluate-merged` and `merge-sweep`.
 - `ties` is runnable and uses paper-core TIES in task-vector space:

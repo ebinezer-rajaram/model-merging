@@ -275,6 +275,8 @@ def test_dare_sparsify_fuse_and_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_
         _validate_dare_params({"drop_rate": 1.0})
     with pytest.raises(ValueError, match="seed"):
         _validate_dare_params({"seed": True})
+    with pytest.raises(ValueError, match="'lambda'"):
+        _validate_dare_params({"lambda": False})
 
     a = tmp_path / "a"
     b = tmp_path / "b"
@@ -289,9 +291,12 @@ def test_dare_sparsify_fuse_and_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_
         adapter_paths=[a, b],
         source_metadata=[{"task": "a"}, {"task": "b"}],
         merge_mode="common",
-        params={"drop_rate": 0.0, "seed": 1},
+        params={"drop_rate": 0.0, "seed": 1, "lambda": 0.5},
     )
-    assert torch.allclose(result.merged_delta["x"], torch.tensor([3.0, 5.0]))
+    assert torch.allclose(result.merged_delta["x"], torch.tensor([1.5, 2.5]))
+    assert result.metadata["params"]["lambda"] == pytest.approx(0.5)
+    assert result.metadata["method_params"]["lambda"] == pytest.approx(0.5)
+    assert result.metadata["lambda"] == pytest.approx(0.5)
     assert result.metadata["dare_stats"]["skipped_shape_mismatch_count"] == 1
 
     with pytest.raises(ValueError, match="at least 2"):

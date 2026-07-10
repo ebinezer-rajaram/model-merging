@@ -1,0 +1,41 @@
+adapters: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+method: ties
+merge_mode: common
+
+search:
+  type: bayes
+  budget: 12
+  init_points: 6
+  inject_zero_baseline: true
+  initial_points:
+    - {lambda: 0.25}
+    - {lambda: 0.5}
+    - {lambda: 0.75}
+    - {lambda: 1.0}
+    - {lambda: 1.25}
+    - {lambda: 1.5}
+  seed: 42
+  space:
+    lambda:
+      type: float
+      min: 0.0
+      max: 2.0
+
+split: validation
+eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound]
+
+eval_subset:
+  enabled: true
+  seed: 0
+  shuffle: true
+  stratified: true
+  label_column: label
+  max_samples: 1000
+
+save_merged: false
+
+post_sweep_eval:
+  enabled: true
+  split: test
+  save_merged: false
+  eval_tasks: [emotion, intent, kws, langid, speaker_ver, asr, vocalsound, speech_qa]
