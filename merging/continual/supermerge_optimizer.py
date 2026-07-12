@@ -15,9 +15,12 @@ from core import load_config, set_global_seed
 from core.evaluation.eval_utils import load_model_and_processor
 from core.evaluation.evaluate_task import get_model_path, prepare_dataset_cache
 from merging.config.unified import MergeConfig
-from merging.continual.engine import continual_merge_sources_to_artifact
+from merging.continual.engine import (
+    continual_merge_sources_to_artifact,
+    continual_merge_sources_to_artifact_layer_wise,
+)
 from merging.continual.evaluate import build_continual_tag, evaluate_continual_artifact
-from merging.continual.policy import ContinualMergePolicy
+from merging.continual.policy import ContinualMergePolicy, LayerWiseContinualMergePolicy
 from merging.evaluation.continual_sweep import (
     CONTINUAL_SUPERMERGE_METHOD,
     ContinualSweepContext,
@@ -66,6 +69,22 @@ except Exception:  # pragma: no cover - optional dependency
 class ContinualScalarParameters:
     alpha: float
     lambda_weight: float
+
+
+@dataclass(frozen=True)
+class LayerWiseContinualScalarParameters:
+    default_alpha: float
+    default_lambda: float
+    layer_alpha: Dict[int, float]
+    layer_lambda: Dict[int, float]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "default_alpha": float(self.default_alpha),
+            "default_lambda": float(self.default_lambda),
+            "layer_alpha": {str(k): float(v) for k, v in self.layer_alpha.items()},
+            "layer_lambda": {str(k): float(v) for k, v in self.layer_lambda.items()},
+        }
 
 
 def _logit(p: float) -> float:
@@ -202,6 +221,48 @@ def _coefficients(alpha_raw: torch.Tensor, lambda_raw: torch.Tensor) -> torch.Te
     return torch.stack([alpha * lambda_weight, alpha * (1.0 - lambda_weight)])
 
 
+def _layer_wise_scalar_values(
+    alpha_raw_default: torch.Tensor,
+    alpha_raw_layer: torch.Tensor,
+    lambda_raw_default: torch.Tensor,
+    lambda_raw_layer: torch.Tensor,
+    layer_indices: List[int],
+) -> LayerWiseContinualScalarParameters:
+    default_alpha = float(torch.nn.functional.softplus(alpha_raw_default).detach().item())
+    default_lambda = float(torch.sigmoid(lambda_raw_default).detach().item())
+    layer_alpha = {
+        layer_idx: float(torch.nn.functional.softplus(alpha_raw_layer[i]).detach().item())
+        for i, layer_idx in enumerate(layer_indices)
+    }
+    layer_lambda = {
+        layer_idx: float(torch.sigmoid(lambda_raw_layer[i]).detach().item())
+        for i, layer_idx in enumerate(layer_indices)
+    }
+    return LayerWiseContinualScalarParameters(
+        default_alpha=default_alpha,
+        default_lambda=default_lambda,
+        layer_alpha=layer_alpha,
+        layer_lambda=layer_lambda,
+    )
+
+
+def _layer_wise_coefficients(
+    alpha_raw_default: torch.Tensor,
+    alpha_raw_layer: torch.Tensor,
+    lambda_raw_default: torch.Tensor,
+    lambda_raw_layer: torch.Tensor,
+    layer_indices: List[int],
+) -> tuple[torch.Tensor, Dict[int, torch.Tensor]]:
+    """Compute default and per-layer coefficient tensors, preserving autograd graph."""
+    default_coeffs = _coefficients(alpha_raw_default, lambda_raw_default)
+    layer_coeffs: Dict[int, torch.Tensor] = {}
+    for i, layer_idx in enumerate(layer_indices):
+        a = torch.nn.functional.softplus(alpha_raw_layer[i])
+        lam = torch.sigmoid(lambda_raw_layer[i])
+        layer_coeffs[layer_idx] = torch.stack([a * lam, a * (1.0 - lam)])
+    return default_coeffs, layer_coeffs
+
+
 def _write_optimizer_metadata(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
@@ -262,6 +323,7 @@ def run_continual_supermerge_optimizer(
     restore_best_checkpoint = bool(params.get("restore_best_checkpoint", True))
     init_alpha = float(params.get("init_alpha", context.alpha_default))
     init_lambda = float(params.get("init_lambda", context.lambda_default))
+    layer_wise = bool(params.get("layer_wise", False))
     use_autocast = bool(params.get("use_autocast", True))
     gradient_checkpointing = bool(params.get("gradient_checkpointing", False))
     gradient_checkpointing_use_reentrant = bool(params.get("gradient_checkpointing_use_reentrant", False))
@@ -431,18 +493,70 @@ def run_continual_supermerge_optimizer(
         )
 
     alpha_init_raw = math.log(math.expm1(max(init_alpha, 1e-8)))
-    alpha_raw = torch.nn.Parameter(torch.tensor(alpha_init_raw, device=device, dtype=torch.float32))
-    lambda_raw = torch.nn.Parameter(torch.tensor(_logit(init_lambda), device=device, dtype=torch.float32))
-    optimizer = torch.optim.Adam([alpha_raw, lambda_raw], lr=lr, betas=betas)
+    lambda_init_raw = _logit(init_lambda)
+    if layer_wise:
+        layer_indices: List[int] = sorted({
+            entry.layer_idx
+            for entry in (lora_entries if lora_entries else delta_entries)
+            if entry.layer_idx is not None
+        })
+        if not layer_indices:
+            raise ValueError(
+                "optimizer.params.layer_wise=True but no layer indices could be extracted "
+                "from the source entries. Check that the adapters contain layer-indexed parameters."
+            )
+        alpha_raw_default = torch.nn.Parameter(
+            torch.tensor(alpha_init_raw, device=device, dtype=torch.float32)
+        )
+        alpha_raw_layer = torch.nn.Parameter(
+            torch.full((len(layer_indices),), alpha_init_raw, device=device, dtype=torch.float32)
+        )
+        lambda_raw_default = torch.nn.Parameter(
+            torch.tensor(lambda_init_raw, device=device, dtype=torch.float32)
+        )
+        lambda_raw_layer = torch.nn.Parameter(
+            torch.full((len(layer_indices),), lambda_init_raw, device=device, dtype=torch.float32)
+        )
+        optimizer = torch.optim.Adam(
+            [alpha_raw_default, alpha_raw_layer, lambda_raw_default, lambda_raw_layer],
+            lr=lr,
+            betas=betas,
+        )
+        print(
+            f"[continual_supermerge] layer_wise=True "
+            f"num_layers={len(layer_indices)} "
+            f"layer_range=[{layer_indices[0]},{layer_indices[-1]}]"
+        )
+    else:
+        alpha_raw = torch.nn.Parameter(
+            torch.tensor(alpha_init_raw, device=device, dtype=torch.float32)
+        )
+        lambda_raw = torch.nn.Parameter(
+            torch.tensor(lambda_init_raw, device=device, dtype=torch.float32)
+        )
+        optimizer = torch.optim.Adam([alpha_raw, lambda_raw], lr=lr, betas=betas)
     coefficient_provider = TaskCoefficientProvider()
 
-    def apply_coefficients() -> None:
-        coeffs = _coefficients(alpha_raw, lambda_raw)
-        coefficient_provider.set_coefficients(
-            task_coeffs=coeffs,
-            default_coeffs=None,
-            layer_coeffs={},
-        )
+    if layer_wise:
+        def apply_coefficients() -> None:
+            default_coeffs, layer_coeffs_dict = _layer_wise_coefficients(
+                alpha_raw_default, alpha_raw_layer,
+                lambda_raw_default, lambda_raw_layer,
+                layer_indices,
+            )
+            coefficient_provider.set_coefficients(
+                task_coeffs=default_coeffs,
+                default_coeffs=default_coeffs,
+                layer_coeffs=layer_coeffs_dict,
+            )
+    else:
+        def apply_coefficients() -> None:
+            coeffs = _coefficients(alpha_raw, lambda_raw)
+            coefficient_provider.set_coefficients(
+                task_coeffs=coeffs,
+                default_coeffs=None,
+                layer_coeffs={},
+            )
 
     apply_coefficients()
     streaming_handles = []
@@ -534,7 +648,7 @@ def run_continual_supermerge_optimizer(
         )
 
     best_loss: Optional[float] = None
-    best_params: Optional[ContinualScalarParameters] = None
+    best_params: Optional[Any] = None  # ContinualScalarParameters or LayerWiseContinualScalarParameters
     best_update_step: Optional[int] = None
     no_improve_steps = 0
     optimizer_steps_completed = 0
@@ -595,7 +709,14 @@ def run_continual_supermerge_optimizer(
             optimizer.zero_grad(set_to_none=True)
             optimizer_steps_completed += 1
             apply_coefficients()
-            scalars = _scalar_values(alpha_raw, lambda_raw)
+            if layer_wise:
+                scalars = _layer_wise_scalar_values(
+                    alpha_raw_default, alpha_raw_layer,
+                    lambda_raw_default, lambda_raw_layer,
+                    layer_indices,
+                )
+            else:
+                scalars = _scalar_values(alpha_raw, lambda_raw)
             update_loss = update_loss_sum / float(max(1, update_loss_count))
             update_loss_sum = 0.0
             update_loss_count = 0
@@ -626,6 +747,23 @@ def run_continual_supermerge_optimizer(
             if heldout_entry is not None and heldout_entry.get("best_selection_score") == heldout_entry.get("selection_score"):
                 best_params = scalars
                 best_update_step = optimizer_steps_completed
+            if layer_wise:
+                lw: LayerWiseContinualScalarParameters = scalars  # type: ignore[assignment]
+                lw_alpha_vals = list(lw.layer_alpha.values())
+                lw_lambda_vals = list(lw.layer_lambda.values())
+                scalar_log = {
+                    "default_alpha": lw.default_alpha,
+                    "default_lambda": lw.default_lambda,
+                    "mean_layer_alpha": float(sum(lw_alpha_vals) / max(1, len(lw_alpha_vals))),
+                    "min_layer_alpha": float(min(lw_alpha_vals)) if lw_alpha_vals else 0.0,
+                    "max_layer_alpha": float(max(lw_alpha_vals)) if lw_alpha_vals else 0.0,
+                    "mean_layer_lambda": float(sum(lw_lambda_vals) / max(1, len(lw_lambda_vals))),
+                    "min_layer_lambda": float(min(lw_lambda_vals)) if lw_lambda_vals else 0.0,
+                    "max_layer_lambda": float(max(lw_lambda_vals)) if lw_lambda_vals else 0.0,
+                }
+            else:
+                gs: ContinualScalarParameters = scalars  # type: ignore[assignment]
+                scalar_log = {"alpha": float(gs.alpha), "lambda": float(gs.lambda_weight)}
             entry = {
                 "step": int(step + 1),
                 "optimizer_step": int(optimizer_steps_completed),
@@ -637,8 +775,7 @@ def run_continual_supermerge_optimizer(
                 "best_monitor_weighted_ce": None if best_loss is None else float(best_loss),
                 "no_improve_steps": int(no_improve_steps),
                 "ce_by_task": by_task,
-                "alpha": float(scalars.alpha),
-                "lambda": float(scalars.lambda_weight),
+                **scalar_log,
             }
             if heldout_entry is not None:
                 entry["heldout_eval"] = heldout_entry
@@ -646,13 +783,23 @@ def run_continual_supermerge_optimizer(
             if logging_steps > 0 and (
                 optimizer_steps_completed % logging_steps == 0 or (step + 1) == steps
             ):
+                if layer_wise:
+                    lw_log: LayerWiseContinualScalarParameters = scalars  # type: ignore[assignment]
+                    param_str = (
+                        f"default_alpha={lw_log.default_alpha:.6f} "
+                        f"default_lambda={lw_log.default_lambda:.6f} "
+                        f"mean_layer_alpha={scalar_log['mean_layer_alpha']:.6f} "
+                        f"mean_layer_lambda={scalar_log['mean_layer_lambda']:.6f}"
+                    )
+                else:
+                    gs_log: ContinualScalarParameters = scalars  # type: ignore[assignment]
+                    param_str = f"alpha={gs_log.alpha:.6f} lambda={gs_log.lambda_weight:.6f}"
                 print(
                     "[continual_supermerge] "
                     f"step={step + 1}/{steps} update_step={optimizer_steps_completed} "
                     f"weighted_ce={update_loss:.6f} monitor_ce={monitor_loss:.6f} "
                     f"best_monitor_ce={best_loss:.6f} no_improve={no_improve_steps} "
-                    f"alpha={scalars.alpha:.6f} "
-                    f"lambda={scalars.lambda_weight:.6f}"
+                    + param_str
                 )
             if heldout_entry is not None and bool(heldout_entry.get("should_stop", False)):
                 print("[continual_supermerge] early stopping on held-out selection.")
@@ -670,11 +817,33 @@ def run_continual_supermerge_optimizer(
         if streaming_handles:
             unregister_streaming_parametrizations(streaming_handles)
 
-    final_scalars = _scalar_values(alpha_raw, lambda_raw)
+    if layer_wise:
+        final_scalars = _layer_wise_scalar_values(
+            alpha_raw_default, alpha_raw_layer,
+            lambda_raw_default, lambda_raw_layer,
+            layer_indices,
+        )
+    else:
+        final_scalars = _scalar_values(alpha_raw, lambda_raw)
     selected = best_params if (restore_best_checkpoint and best_params is not None) else final_scalars
     summary_dir.mkdir(parents=True, exist_ok=True)
+
+    if layer_wise:
+        parameterization_info: Dict[str, Any] = {
+            "scope": "layer_wise",
+            "alpha": "softplus(raw_alpha_default) + per-layer softplus(raw_alpha_layer[i])",
+            "lambda": "sigmoid(raw_lambda_default) + per-layer sigmoid(raw_lambda_layer[i])",
+            "num_layer_params": int(len(layer_indices)),
+        }
+    else:
+        parameterization_info = {
+            "scope": "global",
+            "alpha": "softplus(raw_alpha)",
+            "lambda": "sigmoid(raw_lambda)",
+        }
+
     optimizer_provenance = {
-        "type": "validation_ce_scalar_alpha_lambda",
+        "type": "validation_ce_layer_wise_alpha_lambda" if layer_wise else "validation_ce_scalar_alpha_lambda",
         "optimized_tasks": tasks,
         "split": split,
         "best_update_step": best_update_step,
@@ -701,10 +870,7 @@ def run_continual_supermerge_optimizer(
                 heldout_eval_cfg.restore_best_checkpoint if heldout_eval_cfg is not None else None
             ),
         },
-        "parameterization": {
-            "alpha": "softplus(raw_alpha)",
-            "lambda": "sigmoid(raw_lambda)",
-        },
+        "parameterization": parameterization_info,
         "gradient_checkpointing": gradient_checkpointing,
         "gradient_checkpointing_use_reentrant": gradient_checkpointing_use_reentrant,
         "merge_impl": merge_impl,
@@ -713,6 +879,56 @@ def run_continual_supermerge_optimizer(
         "task_vector_dtype": task_vector_dtype,
         "model_dtype": model_dtype,
     }
+
+    if layer_wise:
+        sel_lw: LayerWiseContinualScalarParameters = selected  # type: ignore[assignment]
+        fin_lw: LayerWiseContinualScalarParameters = final_scalars  # type: ignore[assignment]
+        selected_params_dict = sel_lw.to_dict()
+        final_params_dict = fin_lw.to_dict()
+        run_dir = summary_dir.parent / "runs" / (
+            f"run_0001_da{sel_lw.default_alpha:g}_dl{sel_lw.default_lambda:g}".replace(".", "p")
+        )
+        merge_policy: Any = LayerWiseContinualMergePolicy(
+            default_alpha=sel_lw.default_alpha,
+            default_lambda=sel_lw.default_lambda,
+            layer_alpha=sel_lw.layer_alpha,
+            layer_lambda=sel_lw.layer_lambda,
+        )
+        merge_result = continual_merge_sources_to_artifact_layer_wise(
+            x_source=context.x_source,
+            y_source=context.y_source,
+            policy=merge_policy,
+            output_dir=run_dir,
+            energy_threshold=context.energy_threshold,
+            merge_mode=context.merge_mode,
+            store_dtype=context.store_dtype,
+        )
+        tag_alpha: Optional[float] = sel_lw.default_alpha
+        tag_lambda: Optional[float] = sel_lw.default_lambda
+        eval_alpha: Optional[float] = sel_lw.default_alpha
+        eval_lambda: Optional[float] = sel_lw.default_lambda
+    else:
+        sel_gs: ContinualScalarParameters = selected  # type: ignore[assignment]
+        fin_gs: ContinualScalarParameters = final_scalars  # type: ignore[assignment]
+        selected_params_dict = {"alpha": sel_gs.alpha, "lambda": sel_gs.lambda_weight}
+        final_params_dict = {"alpha": fin_gs.alpha, "lambda": fin_gs.lambda_weight}
+        run_dir = summary_dir.parent / "runs" / (
+            f"run_0001_alpha{sel_gs.alpha:g}_lambda{sel_gs.lambda_weight:g}".replace(".", "p")
+        )
+        merge_result = continual_merge_sources_to_artifact(
+            x_source=context.x_source,
+            y_source=context.y_source,
+            policy=ContinualMergePolicy(alpha=sel_gs.alpha, lambda_weight=sel_gs.lambda_weight),
+            output_dir=run_dir,
+            energy_threshold=context.energy_threshold,
+            merge_mode=context.merge_mode,
+            store_dtype=context.store_dtype,
+        )
+        tag_alpha = sel_gs.alpha
+        tag_lambda = sel_gs.lambda_weight
+        eval_alpha = sel_gs.alpha
+        eval_lambda = sel_gs.lambda_weight
+
     _write_optimizer_metadata(
         summary_dir / "continual_supermerge_optimizer_history.json",
         {
@@ -720,26 +936,14 @@ def run_continual_supermerge_optimizer(
             "optimizer": {"type": opt_type, "params": params},
             "optimizer_provenance": optimizer_provenance,
             "history": history,
-            "selected_params": {"alpha": selected.alpha, "lambda": selected.lambda_weight},
-            "final_params": {"alpha": final_scalars.alpha, "lambda": final_scalars.lambda_weight},
+            "selected_params": selected_params_dict,
+            "final_params": final_params_dict,
         },
-    )
-    run_dir = summary_dir.parent / "runs" / (
-        f"run_0001_alpha{selected.alpha:g}_lambda{selected.lambda_weight:g}".replace(".", "p")
-    )
-    merge_result = continual_merge_sources_to_artifact(
-        x_source=context.x_source,
-        y_source=context.y_source,
-        policy=ContinualMergePolicy(alpha=selected.alpha, lambda_weight=selected.lambda_weight),
-        output_dir=run_dir,
-        energy_threshold=context.energy_threshold,
-        merge_mode=context.merge_mode,
-        store_dtype=context.store_dtype,
     )
     merge_tag = build_continual_tag(
         source_tasks=context.eval_tasks,
-        alpha=selected.alpha,
-        lambda_weight=selected.lambda_weight,
+        alpha=tag_alpha,
+        lambda_weight=tag_lambda,
     )
     results = evaluate_continual_artifact(
         artifact_path=merge_result.artifact_dir,
@@ -752,8 +956,8 @@ def run_continual_supermerge_optimizer(
         save_results=True,
         eval_subset=config.eval_subset,
         merge_tag=merge_tag,
-        alpha=selected.alpha,
-        lambda_weight=selected.lambda_weight,
+        alpha=eval_alpha,
+        lambda_weight=eval_lambda,
         method_name=CONTINUAL_SUPERMERGE_METHOD,
     )
     score, score_details = _score_min_interference(results, config.constraint_nonnegative)
@@ -777,8 +981,8 @@ def run_continual_supermerge_optimizer(
             compute_missing_interference_baselines=config.compute_missing_interference_baselines,
             save_results=True,
             merge_tag=merge_tag,
-            alpha=selected.alpha,
-            lambda_weight=selected.lambda_weight,
+            alpha=eval_alpha,
+            lambda_weight=eval_lambda,
             method_name=CONTINUAL_SUPERMERGE_METHOD,
         )
         post_score, post_score_details = _score_min_interference(post_results, config.constraint_nonnegative)
@@ -786,7 +990,7 @@ def run_continual_supermerge_optimizer(
             "enabled": True,
             "split": post_split,
             "save_merged": True,
-            "params": {"alpha": selected.alpha, "lambda": selected.lambda_weight},
+            "params": selected_params_dict,
             "score": float(post_score),
             "score_details": post_score_details,
             "results": post_results,
@@ -810,13 +1014,12 @@ def run_continual_supermerge_optimizer(
         "best_score": float(score),
         "runs": [
             {
-                "params": {"alpha": selected.alpha, "lambda": selected.lambda_weight},
+                "params": selected_params_dict,
                 "score": float(score),
                 "score_details": score_details,
                 "results": results,
                 "continual": {
-                    "alpha": selected.alpha,
-                    "lambda": selected.lambda_weight,
+                    **selected_params_dict,
                     "artifact_dir": str(merge_result.artifact_dir),
                     "manifest_path": str(merge_result.manifest_path),
                     "num_merged_params": int(merge_result.num_merged_params),
@@ -824,8 +1027,8 @@ def run_continual_supermerge_optimizer(
                 },
                 "optimizer": {
                     "history": history,
-                    "final_params": {"alpha": final_scalars.alpha, "lambda": final_scalars.lambda_weight},
-                    "selected_params": {"alpha": selected.alpha, "lambda": selected.lambda_weight},
+                    "final_params": final_params_dict,
+                    "selected_params": selected_params_dict,
                 },
             }
         ],
@@ -840,16 +1043,26 @@ def run_continual_supermerge_optimizer(
             "optimizer": summary["optimizer"],
             "optimizer_provenance": summary["optimizer_provenance"],
             "history": history,
-            "selected_params": {"alpha": selected.alpha, "lambda": selected.lambda_weight},
-            "final_params": {"alpha": final_scalars.alpha, "lambda": final_scalars.lambda_weight},
+            "selected_params": selected_params_dict,
+            "final_params": final_params_dict,
         },
     )
     print(f"\n💾 Continual SuperMerge summary saved to {summary_path}")
-    print(f"🏆 Selected alpha={selected.alpha:.6f}, lambda={selected.lambda_weight:.6f}")
+    if layer_wise:
+        sel_lw_final: LayerWiseContinualScalarParameters = selected  # type: ignore[assignment]
+        print(
+            f"🏆 Selected default_alpha={sel_lw_final.default_alpha:.6f}, "
+            f"default_lambda={sel_lw_final.default_lambda:.6f} "
+            f"(layer_wise, {len(sel_lw_final.layer_alpha)} layers)"
+        )
+    else:
+        sel_gs_final: ContinualScalarParameters = selected  # type: ignore[assignment]
+        print(f"🏆 Selected alpha={sel_gs_final.alpha:.6f}, lambda={sel_gs_final.lambda_weight:.6f}")
     return summary
 
 
 __all__ = [
     "ContinualScalarParameters",
+    "LayerWiseContinualScalarParameters",
     "run_continual_supermerge_optimizer",
 ]

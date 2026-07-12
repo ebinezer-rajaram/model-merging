@@ -13,7 +13,7 @@ import torch
 
 from merging.artifacts.continual_format import ContinualArtifactWriter
 from merging.compression.svd import CompressedParam, compress_dense_delta_to_svd
-from merging.continual.policy import ContinualMergePolicy
+from merging.continual.policy import ContinualMergePolicy, LayerWiseContinualMergePolicy
 from merging.delta_sources.base import DeltaSource, ParamDeltaSpec, ProvenanceNode
 from merging.delta_sources.lora_source import LoRADeltaSource
 from merging.policies.lambda_policy import extract_layer_index
@@ -462,8 +462,70 @@ def continual_merge_sources_to_artifact(
     )
 
 
+def continual_merge_sources_to_artifact_layer_wise(
+    *,
+    x_source: DeltaSource,
+    y_source: DeltaSource,
+    policy: LayerWiseContinualMergePolicy,
+    output_dir: Path,
+    energy_threshold: float,
+    merge_mode: str = "common",
+    compute_dtype: torch.dtype = torch.float32,
+    store_dtype: str = "float16",
+) -> ContinualMergeResult:
+    """Merge two delta sources with per-layer alpha/lambda and save compressed artifact."""
+    _validate_energy_threshold(energy_threshold)
+    policy.validate()
+
+    def _coeff_provider(key: str) -> List[float]:
+        x_coeff, y_coeff = policy.source_coefficients_for_key(key)
+        return [x_coeff, y_coeff]
+
+    provenance = ProvenanceNode(
+        kind="continual_merge_layer_wise",
+        label="continual_layer_wise_alpha_lambda",
+        params={
+            "default_alpha": float(policy.default_alpha),
+            "default_lambda": float(policy.default_lambda),
+            "num_layer_overrides": int(len(policy.layer_alpha)),
+            "formula": "alpha[layer] * (lambda[layer] * x + (1-lambda[layer]) * y)",
+            "merge_mode": merge_mode,
+        },
+        children=[x_source.provenance(), y_source.provenance()],
+    )
+
+    semantics = {
+        "semantic_type": "continual_two_source_layer_wise",
+        "formula": "alpha[layer] * (lambda[layer] * x + (1-lambda[layer]) * y)",
+        "default_alpha": float(policy.default_alpha),
+        "default_lambda": float(policy.default_lambda),
+        "layer_alpha": {str(k): float(v) for k, v in policy.layer_alpha.items()},
+        "layer_lambda": {str(k): float(v) for k, v in policy.layer_lambda.items()},
+        "merge_mode": merge_mode,
+        "source_order": ["x", "y"],
+        "source_ids": [x_source.source_id, y_source.source_id],
+    }
+
+    return _materialize_params_to_artifact(
+        output_dir=Path(output_dir).resolve(),
+        sources=[x_source, y_source],
+        key_resolver_specs=[x_source.list_target_params(), y_source.list_target_params()],
+        merge_mode=merge_mode,
+        energy_threshold=energy_threshold,
+        merge_semantics=semantics,
+        provenance_tree=provenance,
+        stored_representation_extra={
+            "source_artifact_type": "continual_merge_layer_wise",
+        },
+        coeff_provider=_coeff_provider,
+        compute_dtype=compute_dtype,
+        store_dtype=store_dtype,
+    )
+
+
 __all__ = [
     "ContinualMergeResult",
     "continual_merge_sources_to_artifact",
+    "continual_merge_sources_to_artifact_layer_wise",
     "materialize_existing_merge_to_artifact",
 ]
